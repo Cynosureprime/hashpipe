@@ -8,6 +8,70 @@ Multi-threaded hash verification tool. Reads lines containing `hash:password` pa
 
 Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash computation.
 
+## Usage
+
+```
+hashpipe [-t N] [-i N] [-q N] [-o outfile] [-e errfile] [-V] [-h] [file ...]
+```
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `-t N` | Thread count (default: number of CPUs) |
+| `-i N` | Max iteration count for hard pass (default: 128) |
+| `-q N` | Quantization (reserved, default: 128) |
+| `-o F` | Output verified results to file (default: stdout) |
+| `-e F` | Output unresolved lines to file (default: stderr) |
+| `-V` | Print version and exit |
+| `-h` | Print help |
+
+### Input Format
+
+Each input line has the form:
+
+```
+[TYPE[xNN] ]hash[:salt]:password
+```
+
+- **TYPE** is an optional hash type hint (e.g., `MD5`, `SHA256`, `NTLM`).  When omitted, hashpipe tries all supported types.
+- **xNN** is an optional iteration suffix on the type.
+- **hash** is the hex-encoded hash value.
+- **salt** is an optional salt, required for salted types.
+- **password** is the plaintext candidate.
+
+### Output
+
+- **stdout**: verified lines in mdxfind format: `TYPE[xNN] hash[:salt]:password`
+- **stderr**: unresolved lines (bad data, wrong password, corrupted entries)
+
+### Examples
+
+Verify a potfile from stdin:
+```
+cat potfile.txt | hashpipe
+```
+
+Verify with type hints, saving results and rejects to separate files:
+```
+hashpipe -o verified.txt -e unresolved.txt potfile.txt
+```
+
+Use 8 threads:
+```
+hashpipe -t 8 potfile.txt
+```
+
+Pipe verified results directly into mdsplit:
+```
+cat potfile.txt | hashpipe | mdsplit
+```
+
+Verify multiple files:
+```
+hashpipe file1.txt file2.txt file3.txt
+```
+
 ## Pot(files) considered harmful
 
 For many years, I have taken the position that potfiles, the place where solved hashes go to die, are not only bad, but also dangerous.  They can confuse what hash types are involved, or what the algorithm is, and can introduce bad solutions into an otherwise perfect hash processing stream.  Hashpipe is intended to be an automated method to resolve, or verify, questionable hashes.  By trying many different hashing methods, in a fully automated fashion, hashpipe can figure out what types of hashes are involved, properly format the output, and can pipe directly into mdsplit for long term hash management.  Much more to the point, it also separates out the unsolved hashes, corrupted entries, or other bad data.
