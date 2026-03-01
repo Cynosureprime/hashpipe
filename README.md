@@ -8,6 +8,10 @@ Multi-threaded hash verification tool. Reads lines containing `hash:password` pa
 
 Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash computation.
 
+## Pot(files) considered harmful
+
+For many years, I have taken the position that potfiles, the place where solved hashes go to die, are not only bad, but also dangerous.  They can confuse what hash types are involved, or what the algorithm is, and can introduce bad solutions into an otherwise perfect hash processing stream.  Hashpipe is intended to be an automated method to resolve, or verify, questionable hashes.  By trying many different hashing methods, in a fully automated fashion, hashpipe can figure out what types of hashes are involved, properly format the output, and can pipe directly into mdsplit for long term hash management.  Much more to the point, it also separates out the unsolved hashes, corrupted entries, or other bad data.
+
 ## Supported Hash Types
 
 | Type | Algorithm | MDXfind | hashcat |
