@@ -244,6 +244,17 @@ To remove downloaded dependency sources:
 make distclean
 ```
 
+Docker can be used to build and run the binary. The `/data` directory is used as a working directory.
+```bash
+docker build . -t csp/hashpipe
+```
+
+```bash
+docker run -v ${PWD}:/data -it --rm csp/hashpipe -m auto test.txt
+MD5x01 ce114e4501d2f4e2dcea3e17b546f339:This is a test
+```
+
+
 ### Dependencies
 
 hashpipe requires the following static libraries:
