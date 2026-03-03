@@ -187,6 +187,9 @@ dep-sphlib:
 	echo "  libsph.a installed"
 
 # ---- libmhash ----
+# mhash uses K&R-style empty-parenthesis prototypes in mhash_int.h which
+# require -std=gnu89 to avoid conflicting-type errors on modern GCC.
+# The mutils/ include directory is also copied for hashpipe.c includes.
 dep-mhash:
 	@echo "==> libmhash ($(MHASH_COMMIT))"
 	@if [ -f $(TOPDIR)/libmhash.a ]; then echo "  already built, skipping"; exit 0; fi; \
@@ -200,10 +203,11 @@ dep-mhash:
 	echo "  verified $$GOT"; \
 	cd $(DEPDIR)/mhash && \
 	autoreconf -i && \
-	./configure --enable-static --disable-shared && \
+	CFLAGS="-O2 -std=gnu89" ./configure --enable-static --disable-shared && \
 	$(MAKE); \
 	cp $(DEPDIR)/mhash/lib/.libs/libmhash.a $(TOPDIR)/; \
 	cp $(DEPDIR)/mhash/include/mhash.h $(TOPDIR)/; \
+	cp -r $(DEPDIR)/mhash/include/mutils $(TOPDIR)/; \
 	echo "  libmhash.a installed"
 
 # ---- librhash ----
