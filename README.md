@@ -231,10 +231,41 @@ Use `-b` to benchmark specific types: `-b e1,e8-e12,e450`.
 ## Building
 
 ```bash
+make deps      # pull and build all dependencies from source
 make hashpipe
 ```
 
-Requires OpenSSL, libsph, librhash, libmhash, libJudy, bcrypt, and GOST/Streebog libraries.  Static `.a` archives are expected in the project root.
+`make deps` clones each dependency from its authoritative GitHub repository, pins it to a verified commit hash, and builds a static library.  This requires git, a C compiler, make, and autotools (for libmhash and libJudy).  Built artifacts are placed in the hashpipe source tree.
+
+If you already have the required static libraries (from a previous `make deps` or a manual build), `make hashpipe` is sufficient.
+
+To remove downloaded dependency sources:
+```bash
+make distclean
+```
+
+### Dependencies
+
+hashpipe requires the following static libraries:
+
+- OpenSSL 1.1.1w (`libssl.a`, `libcrypto.a`)
+- sphlib (`libsph.a`)
+- libmhash (`libmhash.a`)
+- RHash (`librhash.a`)
+- MD6 (`md6.a`)
+- GOST/Streebog (`gosthash/gost2012/gost2012.a`)
+- bcrypt / crypt_blowfish (`bcrypt-master/bcrypt.a`)
+- libJudy (`libJudy.a`)
+- yescrypt (`yescrypt/*.o`)
+
+### Supported Platforms
+
+The Makefile detects the build platform automatically.  Tested on:
+
+- macOS x86\_64 and arm64 (requires libiconv from MacPorts)
+- Linux x86\_64 (Ubuntu 18.04, 22.04)
+- Linux ppc64le (PowerPC 8)
+- FreeBSD 13.2 x86\_64 (uses gmake)
 
 ## Type Indices
 
@@ -259,6 +290,10 @@ hashpipe depends on the following libraries:
 - [RHash](https://github.com/rhash/RHash) — RHash Project
 - [libmhash](https://mhash.sourceforge.net/) — Nikos Mavroyanopoulos, Sascha Schumann
 - [bcrypt](https://www.openwall.com/crypt/) — Niels Provos, David Mazieres (via Openwall crypt_blowfish)
+- [yescrypt](https://www.openwall.com/yescrypt/) — Alexander Peslyak (via Openwall)
+- [stribob](https://github.com/mjosaarinen/brutus) — Markku-Juhani O. Saarinen (Streebog/GOST R 34.11-2012 primitives; standalone wrapper from stricat bundled with permission)
+
+Platform detection in the Makefile was inspired by [PR #1](https://github.com/Cynosureprime/hashpipe/pull/1) from [@0xVavaldi](https://github.com/0xVavaldi).
 
 ## License
 
