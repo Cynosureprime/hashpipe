@@ -21,11 +21,13 @@ WORKDIR /src
 RUN git clone https://github.com/Cynosureprime/hashpipe.git /src/hashpipe
 
 WORKDIR /src/hashpipe
-RUN make deps && make
+RUN make deps \
+    && cp -r deps/mhash/include/mutils . \
+    && make
 
 # RUNTIME LAYER
 # Minimal image containing only the built binary.
-FROM alpine
+FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     && rm -rf /var/lib/apt/lists/*
