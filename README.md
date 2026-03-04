@@ -251,6 +251,19 @@ To remove downloaded dependency sources:
 make distclean
 ```
 
+### Docker
+
+Docker can be used to build and run hashpipe without installing dependencies locally:
+```bash
+docker build . -t csp/hashpipe
+```
+
+```bash
+docker run -v ${PWD}:/data -it --rm csp/hashpipe -m auto potfile.txt
+```
+
+The `/data` directory inside the container is used as the working directory.
+
 ### Dependencies
 
 hashpipe requires the following static libraries:

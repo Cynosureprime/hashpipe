@@ -204,6 +204,7 @@ dep-mhash:
 	$(MAKE); \
 	cp $(DEPDIR)/mhash/lib/.libs/libmhash.a $(TOPDIR)/; \
 	cp $(DEPDIR)/mhash/include/mhash.h $(TOPDIR)/; \
+	cp -r $(DEPDIR)/mhash/include/mutils $(TOPDIR)/; \
 	echo "  libmhash.a installed"
 
 # ---- librhash ----

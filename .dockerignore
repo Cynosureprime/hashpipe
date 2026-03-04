@@ -1,0 +1,6 @@
+.git
+.claude
+deps
+*.o
+*.a
+hashpipe
