@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.21 2026/03/04 00:03:39 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.22 2026/03/04 05:17:11 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +22,8 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.21 202
 
 /* OpenSSL extra */
 #include <openssl/hmac.h>
+#include <openssl/rc4.h>
+#include <openssl/md4.h>
 #ifndef OPENSSL_NO_MDC2
 #include <openssl/mdc2.h>
 #else
@@ -318,6 +320,7 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 /* ---- Constants ---- */
 
 #define MAXLINE (40*1024)
+#define TESTVECSIZE (2048*1024)
 #define BATCH_SIZE 4096
 #define BATCH_BUFSIZE (1024 * 1024)
 #define MAX_HASH_BYTES 64   /* SHA-512 */
@@ -343,6 +346,7 @@ struct workspace {
     unsigned char passbuf[MAXLINE];
     unsigned char vpassbuf[MAXLINE];
     unsigned char decoded[MAXLINE];
+    unsigned char *testvec;  /* malloc'd TESTVECSIZE+16 buffer for $TESTVEC[] */
 };
 
 static __thread struct workspace *WS;
@@ -5420,6 +5424,21 @@ static int base64_decode(const char *in, int inlen, unsigned char *out, int outm
         if (e > 63) break;
         if (o < outmax) out[o++] = (c << 6) | e;
     }
+    /* Handle trailing 2-3 chars (no padding) */
+    if (i < inlen && o < outmax) {
+        int rem = inlen - i;
+        if (rem >= 2) {
+            unsigned char a = d[(unsigned char)in[i]], b = d[(unsigned char)in[i+1]];
+            if (a <= 63 && b <= 63) {
+                out[o++] = (a << 2) | (b >> 4);
+                if (rem >= 3 && o < outmax) {
+                    unsigned char c = d[(unsigned char)in[i+2]];
+                    if (c <= 63)
+                        out[o++] = (b << 4) | (c >> 2);
+                }
+            }
+        }
+    }
     return o;
 }
 
@@ -7837,6 +7856,198 @@ static void compute_sha1lsb35(const unsigned char *pass, int passlen,
 }
 
 /* ================================================================= */
+/* Helper functions for verify types (ported from mdxfind.c)         */
+/* ================================================================= */
+
+/* Forward declarations for functions defined later in the file */
+static int hex2bin(const char *hex, int hexlen, unsigned char *bin);
+
+static const char phpitoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+static void cisco_pix_encode(const unsigned char *digest, char *out)
+{
+    int i, j = 0;
+    for (i = 0; i < 16; i += 4) {
+        unsigned int v = digest[i] | (digest[i+1] << 8) | (digest[i+2] << 16);
+        out[j++] = phpitoa64[v & 0x3f];
+        out[j++] = phpitoa64[(v >> 6) & 0x3f];
+        out[j++] = phpitoa64[(v >> 12) & 0x3f];
+        out[j++] = phpitoa64[(v >> 18) & 0x3f];
+    }
+    out[16] = 0;
+}
+
+static const char juniper_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void juniper_encode(const unsigned char *digest, char *out)
+{
+    int w, p = 0;
+    static const char sig[] = "nrcstn";
+    static const int sigpos[] = {0, 6, 12, 17, 23, 29};
+    int si = 0;
+    unsigned short hi, lo;
+    char data[24];
+
+    for (w = 0; w < 4; w++) {
+        hi = (digest[w*4+0] << 8) | digest[w*4+1];
+        lo = (digest[w*4+2] << 8) | digest[w*4+3];
+        data[w*6+0] = juniper_b64[(hi >> 12) & 0x3f];
+        data[w*6+1] = juniper_b64[(hi >>  6) & 0x3f];
+        data[w*6+2] = juniper_b64[(hi      ) & 0x3f];
+        data[w*6+3] = juniper_b64[(lo >> 12) & 0x3f];
+        data[w*6+4] = juniper_b64[(lo >>  6) & 0x3f];
+        data[w*6+5] = juniper_b64[(lo      ) & 0x3f];
+    }
+    { int di = 0;
+      for (p = 0; p < 30; p++) {
+          if (si < 6 && p == sigpos[si])
+              out[p] = sig[si++];
+          else
+              out[p] = data[di++];
+      }
+    }
+    out[30] = 0;
+}
+
+static int aix_encode(const unsigned char *digest, int dlen, char *out) {
+    int i, j = 0;
+    for (i = 0; i + 2 < dlen; i += 3) {
+        unsigned int v = ((unsigned int)digest[i] << 16) | (digest[i+1] << 8) | digest[i+2];
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f];
+    }
+    if (dlen - i == 2) {
+        unsigned int v = ((unsigned int)digest[i] << 16) | (digest[i+1] << 8);
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f];
+    } else if (dlen - i == 1) {
+        unsigned int v = (unsigned int)digest[i] << 16;
+        out[j++] = phpitoa64[v & 0x3f]; v >>= 6;
+        out[j++] = phpitoa64[v & 0x3f];
+    }
+    out[j] = 0;
+    return j;
+}
+
+static const unsigned char a2e[256] = {
+    0x00,0x01,0x02,0x03,0x37,0x2d,0x2e,0x2f,0x16,0x05,0x25,0x0b,0x0c,0x0d,0x0e,0x0f,
+    0x10,0x11,0x12,0x13,0x3c,0x3d,0x32,0x26,0x18,0x19,0x3f,0x27,0x1c,0x1d,0x1e,0x1f,
+    0x40,0x5a,0x7f,0x7b,0x5b,0x6c,0x50,0x7d,0x4d,0x5d,0x5c,0x4e,0x6b,0x60,0x4b,0x61,
+    0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0x7a,0x5e,0x4c,0x7e,0x6e,0x6f,
+    0x7c,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xd1,0xd2,0xd3,0xd4,0xd5,0xd6,
+    0xd7,0xd8,0xd9,0xe2,0xe3,0xe4,0xe5,0xe6,0xe7,0xe8,0xe9,0xad,0xe0,0xbd,0x5f,0x6d,
+    0x79,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x91,0x92,0x93,0x94,0x95,0x96,
+    0x97,0x98,0x99,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xc0,0x4f,0xd0,0xa1,0x07,
+    0x20,0x21,0x22,0x23,0x24,0x15,0x06,0x17,0x28,0x29,0x2a,0x2b,0x2c,0x09,0x0a,0x1b,
+    0x30,0x31,0x1a,0x33,0x34,0x35,0x36,0x08,0x38,0x39,0x3a,0x3b,0x04,0x14,0x3e,0xe1,
+    0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x51,0x52,0x53,0x54,0x55,0x56,0x57,
+    0x58,0x59,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x70,0x71,0x72,0x73,0x74,0x75,
+    0x76,0x77,0x78,0x80,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,0x90,0x9a,0x9b,0x9c,0x9d,0x9e,
+    0x9f,0xa0,0xaa,0xab,0xac,0x4a,0xae,0xaf,0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,
+    0xb8,0xb9,0xba,0xbb,0xbc,0xa1,0xbe,0xbf,0xca,0xcb,0xcc,0xcd,0xce,0xcf,0xda,0xdb,
+    0xdc,0xdd,0xde,0xdf,0xea,0xeb,0xec,0xed,0xee,0xef,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
+};
+
+static const unsigned char lotus_magic_table[256] = {
+    0xbd,0x56,0xea,0xf2,0xa2,0xf1,0xac,0x2a,0xb0,0x93,0xd1,0x9c,0x1b,0x33,0xfd,0xd0,
+    0x30,0x04,0xb6,0xdc,0x7d,0xdf,0x32,0x4b,0xf7,0xcb,0x45,0x9b,0x31,0xbb,0x21,0x5a,
+    0x41,0x9f,0xe1,0xd9,0x4a,0x4d,0x9e,0xda,0xa0,0x68,0x2c,0xc3,0x27,0x5f,0x80,0x36,
+    0x3e,0xee,0xfb,0x95,0x1a,0xfe,0xce,0xa8,0x34,0xa9,0x13,0xf0,0xa6,0x3f,0xd8,0x0c,
+    0x78,0x24,0xaf,0x23,0x52,0xc1,0x67,0x17,0xf5,0x66,0x90,0xe7,0xe8,0x07,0xb8,0x60,
+    0x48,0xe6,0x1e,0x53,0xf3,0x92,0xa4,0x72,0x8c,0x08,0x15,0x6e,0x86,0x00,0x84,0xfa,
+    0xf4,0x7f,0x8a,0x42,0x19,0xf6,0xdb,0xcd,0x14,0x8d,0x50,0x12,0xba,0x3c,0x06,0x4e,
+    0xec,0xb3,0x35,0x11,0xa1,0x88,0x8e,0x2b,0x94,0x99,0xb7,0x71,0x74,0xd3,0xe4,0xbf,
+    0x3a,0xde,0x96,0x0e,0xbc,0x0a,0xed,0x77,0xfc,0x37,0x6b,0x03,0x79,0x89,0x62,0xc6,
+    0xd7,0xc0,0xd2,0x7c,0x6a,0x8b,0x22,0xa3,0x5b,0x05,0x5d,0x02,0x75,0xd5,0x61,0xe3,
+    0x18,0x8f,0x55,0x51,0xad,0x1f,0x0b,0x5e,0x85,0xe5,0xc2,0x57,0x63,0xca,0x3d,0x6c,
+    0xb4,0xc5,0xcc,0x70,0xb2,0x91,0x59,0x0d,0x47,0x20,0xc8,0x4f,0x58,0xe0,0x01,0xe2,
+    0x16,0x38,0xc4,0x6f,0x3b,0x0f,0x65,0x46,0xbe,0x7e,0x2d,0x7b,0x82,0xf9,0x40,0xb5,
+    0x1d,0x73,0xf8,0xeb,0x26,0xc7,0x87,0x97,0x25,0x54,0xb1,0x28,0xaa,0x98,0x9d,0xa5,
+    0x64,0x6d,0x7a,0xd4,0x10,0x81,0x44,0xef,0x49,0xd6,0xae,0x2e,0xdd,0x76,0x5c,0x2f,
+    0xa7,0x1c,0xc9,0x09,0x69,0x9a,0x83,0xcf,0x29,0x39,0xb9,0xe9,0x4c,0xff,0x43,0xab
+};
+
+static void lotus_mix(unsigned char *state) {
+    int p = 0, i, k;
+    for (i = 0; i < 18; i++) {
+        for (k = 0; k < 48; k++) {
+            p = (p + (48 - k)) & 0xff;
+            p = state[k] ^ lotus_magic_table[p];
+            state[k] = p;
+        }
+    }
+}
+
+static void lotus_transform_password(const unsigned char *block, unsigned char *checksum) {
+    unsigned char t = checksum[15];
+    int i;
+    for (i = 0; i < 16; i++) {
+        t = checksum[i] ^ lotus_magic_table[block[i] ^ t];
+        checksum[i] = t;
+    }
+}
+
+static void domino5_transform(const unsigned char *input, int inlen, unsigned char *output) {
+    unsigned char state[48], padded[512], checksum[16];
+    int padlen, nblocks, i, j;
+
+    padlen = 16 - (inlen % 16);
+    if (padlen == 0) padlen = 16;
+    if (inlen + padlen > (int)sizeof(padded)) return;
+    memcpy(padded, input, inlen);
+    memset(padded + inlen, padlen, padlen);
+    nblocks = (inlen + padlen) / 16;
+
+    memset(state, 0, 48);
+    memset(checksum, 0, 16);
+
+    for (i = 0; i < nblocks; i++) {
+        unsigned char *block = padded + i * 16;
+        for (j = 0; j < 16; j++) {
+            state[16 + j] = block[j];
+            state[32 + j] = block[j] ^ state[j];
+        }
+        lotus_mix(state);
+        lotus_transform_password(block, checksum);
+    }
+
+    for (j = 0; j < 16; j++) {
+        state[16 + j] = checksum[j];
+        state[32 + j] = checksum[j] ^ state[j];
+    }
+    lotus_mix(state);
+
+    memcpy(output, state, 16);
+}
+
+static const char lotus64[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/";
+
+static int lotus64_encode(const unsigned char *in, int inlen, char *out, int outmax) {
+    int i, j = 0;
+    for (i = 0; i + 2 < inlen; i += 3) {
+        if (j + 4 > outmax) break;
+        out[j++] = lotus64[in[i] >> 2];
+        out[j++] = lotus64[((in[i] & 3) << 4) | (in[i+1] >> 4)];
+        out[j++] = lotus64[((in[i+1] & 0xf) << 2) | (in[i+2] >> 6)];
+        out[j++] = lotus64[in[i+2] & 0x3f];
+    }
+    if (i < inlen && j + 2 <= outmax) {
+        out[j++] = lotus64[in[i] >> 2];
+        if (i + 1 < inlen) {
+            out[j++] = lotus64[((in[i] & 3) << 4) | (in[i+1] >> 4)];
+            if (j < outmax) out[j++] = lotus64[(in[i+1] & 0xf) << 2];
+        } else {
+            out[j++] = lotus64[(in[i] & 3) << 4];
+        }
+    }
+    if (j < outmax) out[j] = 0;
+    return j;
+}
+
+/* ================================================================= */
 /* Non-hex verify functions (for bcrypt, APACHE-SHA, PHPBB3, APR1)   */
 /* ================================================================= */
 
@@ -8079,6 +8290,1314 @@ static int verify_apr1(const char *hashstr, int hashlen,
         snprintf(expected, sizeof(expected), "$apr1$%.*s$%s",
                  saltlen, salt, enc);
         return strncmp(expected, hashstr, hashlen) == 0;
+    }
+}
+
+/* POSTGRESQL (e855): md5(pass + username) → "md5" + 32hex ":" username */
+static int verify_postgresql(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16];
+    char computed[36];
+    const char *colon;
+    int hpart;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 35 || memcmp(hashstr, "md5", 3) != 0) return 0;
+
+    /* md5(pass + username) */
+    { const char *username = colon + 1;
+      int ulen = hashlen - hpart - 1;
+      unsigned char buf[1024];
+      if (passlen + ulen > (int)sizeof(buf)) return 0;
+      memcpy(buf, pass, passlen);
+      memcpy(buf + passlen, username, ulen);
+      rhash_msg(RHASH_MD5, buf, passlen + ulen, md5);
+    }
+    strcpy(computed, "md5");
+    prmd5(md5, computed + 3, 32);
+    computed[35] = 0;
+    return hpart == 35 && memcmp(computed, hashstr, 35) == 0;
+}
+
+/* PEOPLESOFT (e858): base64(SHA1(UTF16LE(pass))) — 28 chars */
+static int verify_peoplesoft(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char utf16[1024], sha1[20];
+    char b64[32];
+    int u16len;
+
+    if (hashlen != 28) return 0;
+    u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16));
+    if (u16len <= 0) return 0;
+    SHA1(utf16, u16len, sha1);
+    b64_encode(sha1, 20, b64);
+    return memcmp(b64, hashstr, 28) == 0;
+}
+
+/* HMAILSERVER (e860): SHA256(salt + pass) — 6hex_salt + 64hex_hash (70 chars) */
+static int verify_hmailserver(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha256[32];
+    char computed[72];
+
+    if (hashlen != 70) return 0;
+    /* salt is first 6 chars (hex string used as-is) */
+    { unsigned char buf[1024];
+      if (6 + passlen > (int)sizeof(buf)) return 0;
+      memcpy(buf, hashstr, 6);
+      memcpy(buf + 6, pass, passlen);
+      SHA256(buf, 6 + passlen, sha256);
+    }
+    memcpy(computed, hashstr, 6);
+    prmd5(sha256, computed + 6, 64);
+    computed[70] = 0;
+    return strncasecmp(computed, hashstr, 70) == 0;
+}
+
+/* MEDIAWIKI (e863): md5(salt + "-" + md5(pass)) — "$B$" salt "$" 32hex */
+static int verify_mediawiki(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5_inner[16], md5_outer[16];
+    char hex_inner[33], computed[80];
+    const char *salt, *hash_part;
+    int saltlen;
+
+    if (hashlen < 10 || memcmp(hashstr, "$B$", 3) != 0) return 0;
+    salt = hashstr + 3;
+    hash_part = memchr(salt, '$', hashlen - 3);
+    if (!hash_part) return 0;
+    saltlen = hash_part - salt;
+    hash_part++;
+    if (hashstr + hashlen - hash_part != 32) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5_inner);
+    prmd5(md5_inner, hex_inner, 32);
+    hex_inner[32] = 0;
+
+    { unsigned char buf[256];
+      if (saltlen + 1 + 32 > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt, saltlen);
+      buf[saltlen] = '-';
+      memcpy(buf + saltlen + 1, hex_inner, 32);
+      rhash_msg(RHASH_MD5, buf, saltlen + 1 + 32, md5_outer);
+    }
+    snprintf(computed, sizeof(computed), "$B$%.*s$", saltlen, salt);
+    prmd5(md5_outer, computed + 4 + saltlen, 32);
+    computed[4 + saltlen + 32] = 0;
+    return hashlen == (int)strlen(computed) && memcmp(computed, hashstr, hashlen) == 0;
+}
+
+/* DAHUA (e864): md5(salt + UC(md5(pepper + pass)))
+ * Format: 32hex_hash:salt:pepper:password */
+static int verify_dahua(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5_inner[16], md5_outer[16];
+    char uchex[33];
+    const char *c1, *c2, *salt, *pepper;
+    int saltlen, peplen;
+
+    /* Parse hash:salt:pepper */
+    c1 = memchr(hashstr, ':', hashlen);
+    if (!c1) return 0;
+    if (c1 - hashstr != 32) return 0;
+    c2 = memchr(c1 + 1, ':', hashlen - (c1 + 1 - hashstr));
+    if (!c2) return 0;
+    salt = c1 + 1;
+    saltlen = c2 - salt;
+    pepper = c2 + 1;
+    peplen = hashlen - (pepper - hashstr);
+
+    /* md5(pepper + pass) */
+    { unsigned char buf[1024];
+      if (peplen + passlen > (int)sizeof(buf)) return 0;
+      memcpy(buf, pepper, peplen);
+      memcpy(buf + peplen, pass, passlen);
+      rhash_msg(RHASH_MD5, buf, peplen + passlen, md5_inner);
+    }
+    prmd5UC(md5_inner, uchex, 32);
+    uchex[32] = 0;
+
+    /* md5(salt + UC_hex) */
+    { unsigned char buf[256];
+      if (saltlen + 32 > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt, saltlen);
+      memcpy(buf + saltlen, uchex, 32);
+      rhash_msg(RHASH_MD5, buf, saltlen + 32, md5_outer);
+    }
+    { char out[33];
+      prmd5(md5_outer, out, 32);
+      return strncasecmp(out, hashstr, 32) == 0;
+    }
+}
+
+/* NETSCALER (e878): SHA1(salt_hex_str + pass + \0) — "1" + 8hex_salt + 40hex */
+static int verify_netscaler(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20];
+    char computed[50];
+
+    if (hashlen != 49 || hashstr[0] != '1') return 0;
+    /* SHA1(8-char hex salt string + password + NUL byte) */
+    { unsigned char buf[1024];
+      if (8 + passlen + 1 > (int)sizeof(buf)) return 0;
+      memcpy(buf, hashstr + 1, 8); /* salt as hex string */
+      memcpy(buf + 8, pass, passlen);
+      buf[8 + passlen] = 0;
+      SHA1(buf, 8 + passlen + 1, sha1);
+    }
+    computed[0] = '1';
+    memcpy(computed + 1, hashstr + 1, 8);
+    prmd5(sha1, computed + 9, 40);
+    computed[49] = 0;
+    return strncasecmp(computed, hashstr, 49) == 0;
+}
+
+/* WBB3 (e880): SHA1(salt + SHA1(salt + SHA1(pass))) — 40hex ":" 40hex_salt */
+static int verify_wbb3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20];
+    char hex1[41], hex2[41], hex3[41];
+    const char *colon;
+    int hpart;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 40) return 0;
+    if (hashlen - hpart - 1 != 40) return 0;
+
+    /* h1 = sha1(pass) → hex */
+    SHA1(pass, passlen, sha1);
+    prmd5(sha1, hex1, 40);
+    /* h2 = sha1(salt_hex + h1_hex) */
+    { unsigned char buf[80];
+      memcpy(buf, colon + 1, 40);
+      memcpy(buf + 40, hex1, 40);
+      SHA1(buf, 80, sha1);
+    }
+    prmd5(sha1, hex2, 40);
+    /* h3 = sha1(salt_hex + h2_hex) */
+    { unsigned char buf[80];
+      memcpy(buf, colon + 1, 40);
+      memcpy(buf + 40, hex2, 40);
+      SHA1(buf, 80, sha1);
+    }
+    prmd5(sha1, hex3, 40);
+    return strncasecmp(hex3, hashstr, 40) == 0;
+}
+
+/* MSSQL2000 (e850): SHA1(UTF16LE(pass) + salt) — 0x0100 + 8hex_salt + 40hex_cs + 40hex_uc */
+static int verify_mssql2000(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char utf16[1024], sha1[20], salt_bin[4];
+    int u16len;
+
+    if (hashlen != 94) return 0;
+    if (strncasecmp(hashstr, "0x0100", 6) != 0) return 0;
+    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+
+    u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16) - 4);
+    if (u16len <= 0) return 0;
+    memcpy(utf16 + u16len, salt_bin, 4);
+    SHA1(utf16, u16len + 4, sha1);
+
+    /* Compare case-sensitive SHA1 at offset 14 (40 hex chars) */
+    { char hex[41];
+      prmd5(sha1, hex, 40);
+      return strncasecmp(hex, hashstr + 14, 40) == 0;
+    }
+}
+
+/* MSSQL2005 (e851): SHA1(UTF16LE(pass) + salt) — 0x0100 + 8hex_salt + 40hex */
+static int verify_mssql2005(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char utf16[1024], sha1[20], salt_bin[4];
+    int u16len;
+
+    if (hashlen != 54) return 0;
+    if (strncasecmp(hashstr, "0x0100", 6) != 0) return 0;
+    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+
+    u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16) - 4);
+    if (u16len <= 0) return 0;
+    memcpy(utf16 + u16len, salt_bin, 4);
+    SHA1(utf16, u16len + 4, sha1);
+
+    { char hex[41];
+      prmd5(sha1, hex, 40);
+      return strncasecmp(hex, hashstr + 14, 40) == 0;
+    }
+}
+
+/* MSSQL2012 (e852): SHA512(UTF16LE(pass) + salt) — 0x0200 + 8hex_salt + 128hex */
+static int verify_mssql2012(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char utf16[1024], sha512[64], salt_bin[4];
+    int u16len;
+
+    if (hashlen != 142) return 0;
+    if (strncasecmp(hashstr, "0x0200", 6) != 0) return 0;
+    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+
+    u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16) - 4);
+    if (u16len <= 0) return 0;
+    memcpy(utf16 + u16len, salt_bin, 4);
+    SHA512(utf16, u16len + 4, sha512);
+
+    { char hex[129];
+      prmd5(sha512, hex, 128);
+      return strncasecmp(hex, hashstr + 14, 128) == 0;
+    }
+}
+
+/* MACOSX (e853): SHA1(salt_bin + pass) — 8hex_salt + 40hex */
+static int verify_macosx(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20], salt_bin[4];
+    char hex[41];
+
+    if (hashlen != 48) return 0;
+    if (hex2bin(hashstr, 8, salt_bin) != 4) return 0;
+
+    { unsigned char buf[1024];
+      if (4 + passlen > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt_bin, 4);
+      memcpy(buf + 4, pass, passlen);
+      SHA1(buf, 4 + passlen, sha1);
+    }
+    prmd5(sha1, hex, 40);
+    return strncasecmp(hex, hashstr + 8, 40) == 0;
+}
+
+/* MACOSX7 (e854): SHA512(salt_bin + pass) — 8hex_salt + 128hex */
+static int verify_macosx7(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha512[64], salt_bin[4];
+    char hex[129];
+
+    if (hashlen != 136) return 0;
+    if (hex2bin(hashstr, 8, salt_bin) != 4) return 0;
+
+    { unsigned char buf[1024];
+      if (4 + passlen > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt_bin, 4);
+      memcpy(buf + 4, pass, passlen);
+      SHA512(buf, 4 + passlen, sha512);
+    }
+    prmd5(sha512, hex, 128);
+    return strncasecmp(hex, hashstr + 8, 128) == 0;
+}
+
+/* DESENCRYPT (e848): DES_ECB(pass_as_key, salt_plaintext) — 16hex ":" 16hex_salt */
+static int verify_desencrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char expected_ct[8], salt_bin[8];
+    DES_cblock deskey, desct;
+    DES_key_schedule desks;
+    const char *colon;
+    int hpart;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 16) return 0;
+    if (hashlen - hpart - 1 != 16) return 0;
+    if (hex2bin(hashstr, 16, expected_ct) != 8) return 0;
+    if (hex2bin(colon + 1, 16, salt_bin) != 8) return 0;
+
+    memset(deskey, 0, 8);
+    memcpy(deskey, pass, passlen < 8 ? passlen : 8);
+    DES_set_key_unchecked(&deskey, &desks);
+    DES_ecb_encrypt((DES_cblock *)salt_bin, &desct, &desks, DES_ENCRYPT);
+    return memcmp(desct, expected_ct, 8) == 0;
+}
+
+/* DES3ENCRYPT (e849): 3DES_ECB(pass_as_3keys, salt_plaintext) — 16hex ":" 16hex_salt */
+static int verify_des3encrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char expected_ct[8], salt_bin[8];
+    DES_cblock deskey1, deskey2, deskey3, desct;
+    DES_key_schedule desks1, desks2, desks3;
+    const char *colon;
+    int hpart;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 16) return 0;
+    if (hashlen - hpart - 1 != 16) return 0;
+    if (hex2bin(hashstr, 16, expected_ct) != 8) return 0;
+    if (hex2bin(colon + 1, 16, salt_bin) != 8) return 0;
+
+    memset(deskey1, 0, 8); memset(deskey2, 0, 8); memset(deskey3, 0, 8);
+    if (passlen >= 8) memcpy(deskey1, pass, 8); else memcpy(deskey1, pass, passlen);
+    if (passlen > 8) { if (passlen >= 16) memcpy(deskey2, pass+8, 8); else memcpy(deskey2, pass+8, passlen-8); }
+    if (passlen > 16) { if (passlen >= 24) memcpy(deskey3, pass+16, 8); else memcpy(deskey3, pass+16, passlen-16); }
+    DES_set_key_unchecked(&deskey1, &desks1);
+    DES_set_key_unchecked(&deskey2, &desks2);
+    DES_set_key_unchecked(&deskey3, &desks3);
+    DES_ecb3_encrypt((DES_cblock *)salt_bin, &desct, &desks1, &desks2, &desks3, DES_ENCRYPT);
+    return memcmp(desct, expected_ct, 8) == 0;
+}
+
+/* RACF (e881): DES_ECB(EBCDIC_UC_username, EBCDIC_pass_key) — 16hex ":" username */
+static int verify_racf(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char expected[8], euser[8], deskey[8], ciphertext[8];
+    DES_key_schedule ks;
+    const char *colon, *username;
+    int hpart, ulen, x;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 16) return 0;
+    if (hex2bin(hashstr, 16, expected) != 8) return 0;
+    username = colon + 1;
+    ulen = hashlen - hpart - 1;
+
+    /* Password to DES key: EBCDIC, XOR 0x55, shift left 1, odd parity */
+    { int plen = passlen > 8 ? 8 : passlen;
+      for (x = 0; x < 8; x++) {
+          unsigned char ebcdic = (x < plen) ? a2e[pass[x]] : 0x40;
+          unsigned char val = (ebcdic ^ 0x55);
+          val = (val << 1) & 0xfe;
+          { int bits = 0; unsigned char t = val;
+            while (t) { bits += t & 1; t >>= 1; }
+            if ((bits & 1) == 0) val |= 1;
+          }
+          deskey[x] = val;
+      }
+    }
+    DES_set_key_unchecked((DES_cblock *)deskey, &ks);
+
+    /* Uppercase username, pad to 8 with spaces, convert to EBCDIC */
+    for (x = 0; x < 8; x++) {
+        char c = (x < ulen) ? username[x] : ' ';
+        if (c >= 'a' && c <= 'z') c -= 32;
+        euser[x] = a2e[(unsigned char)c];
+    }
+    DES_ecb_encrypt((DES_cblock *)euser, (DES_cblock *)ciphertext, &ks, DES_ENCRYPT);
+    return memcmp(ciphertext, expected, 8) == 0;
+}
+
+/* JUNIPERSSG (e856): MD5(user + ":Administration Tools:" + pass) → juniper_encode
+ * Format: 30-char encoded ":" username */
+static int verify_juniperssg(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16];
+    char encoded[31];
+    const char *colon, *username;
+    int hpart, ulen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 30) return 0;
+    username = colon + 1;
+    ulen = hashlen - hpart - 1;
+
+    { unsigned char buf[1024];
+      int total = ulen + 22 + passlen;
+      if (total > (int)sizeof(buf)) return 0;
+      memcpy(buf, username, ulen);
+      memcpy(buf + ulen, ":Administration Tools:", 22);
+      memcpy(buf + ulen + 22, pass, passlen);
+      rhash_msg(RHASH_MD5, buf, total, md5);
+    }
+    juniper_encode(md5, encoded);
+    return memcmp(encoded, hashstr, 30) == 0;
+}
+
+/* CISCOPIX (e861): MD5(pass padded to 16) → cisco_pix_encode — 16-char encoded */
+static int verify_ciscopix(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16], padded[16];
+    char encoded[17];
+
+    if (hashlen != 16) return 0;
+    memset(padded, 0, 16);
+    memcpy(padded, pass, passlen > 16 ? 16 : passlen);
+    rhash_msg(RHASH_MD5, padded, 16, md5);
+    cisco_pix_encode(md5, encoded);
+    return memcmp(encoded, hashstr, 16) == 0;
+}
+
+/* CISCOASA (e862): MD5((pass+salt) padded to 16/32) → cisco_pix_encode
+ * Format: 16-char encoded ":" salt */
+static int verify_ciscoasa(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16], padded[32];
+    char encoded[17];
+    const char *colon, *salt;
+    int hpart, saltlen, asa_plen, padto;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 16) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - hpart - 1;
+
+    asa_plen = passlen;
+    if (asa_plen + saltlen > 32) asa_plen = 32 - saltlen;
+    if (asa_plen < 0) asa_plen = 0;
+    memset(padded, 0, 32);
+    memcpy(padded, pass, asa_plen);
+    memcpy(padded + asa_plen, salt, saltlen);
+    padto = (asa_plen + saltlen >= 16) ? 32 : 16;
+    rhash_msg(RHASH_MD5, padded, padto, md5);
+    cisco_pix_encode(md5, encoded);
+    return memcmp(encoded, hashstr, 16) == 0;
+}
+
+/* CISCO4 (e865): SHA256(pass) → phpitoa64 big-endian encode — 43 chars */
+static int verify_cisco4(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha256[32];
+    char encoded[44];
+
+    if (hashlen != 43) return 0;
+    SHA256(pass, passlen, sha256);
+    /* php64 big-endian encode: groups of 3 bytes, MSB first */
+    { int i, ei = 0;
+      for (i = 0; i + 2 < 32; i += 3) {
+          unsigned int v = ((unsigned int)sha256[i] << 16) |
+                           ((unsigned int)sha256[i+1] << 8) | sha256[i+2];
+          encoded[ei++] = phpitoa64[(v >> 18) & 0x3f];
+          encoded[ei++] = phpitoa64[(v >> 12) & 0x3f];
+          encoded[ei++] = phpitoa64[(v >>  6) & 0x3f];
+          encoded[ei++] = phpitoa64[v & 0x3f];
+      }
+      /* last 2 bytes (32 = 10*3 + 2) */
+      { unsigned int v = ((unsigned int)sha256[30] << 16) | ((unsigned int)sha256[31] << 8);
+        encoded[ei++] = phpitoa64[(v >> 18) & 0x3f];
+        encoded[ei++] = phpitoa64[(v >> 12) & 0x3f];
+        encoded[ei++] = phpitoa64[(v >>  6) & 0x3f];
+      }
+      encoded[ei] = 0;
+    }
+    return memcmp(encoded, hashstr, 43) == 0;
+}
+
+/* CISCOISE (e866): 128x SHA256(salt_bin + pass) — 64hex_hash ":" 64hex_salt */
+static int verify_ciscoise(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha256[32], salt_bin[32];
+    char computed[65];
+    int x;
+
+    /* Format: 64hex_hash + 64hex_salt (128 chars concatenated, no colon) */
+    if (hashlen != 128) return 0;
+    if (hex2bin(hashstr + 64, 64, salt_bin) != 32) return 0;
+
+    { unsigned char buf[1024];
+      if (32 + passlen > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt_bin, 32);
+      memcpy(buf + 32, pass, passlen);
+      SHA256(buf, 32 + passlen, sha256);
+    }
+    /* 128 more iterations */
+    for (x = 0; x < 128; x++)
+        SHA256(sha256, 32, sha256);
+
+    prmd5(sha256, computed, 64);
+    return strncasecmp(computed, hashstr, 64) == 0;
+}
+
+/* SAMSUNGSHA1 (e867): 1024x SHA1(digest + str(i) + pass + salt) — 40hex ":" salt */
+static int verify_samsungsha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20], expected[20];
+    const char *colon, *salt;
+    int hpart, saltlen, siter;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 40) return 0;
+    if (hex2bin(hashstr, 40, expected) != 20) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - hpart - 1;
+
+    /* iter 0: SHA1("0" + pass + salt) */
+    { unsigned char buf[2048];
+      int pos = 0;
+      buf[pos++] = '0';
+      memcpy(buf + pos, pass, passlen); pos += passlen;
+      memcpy(buf + pos, salt, saltlen); pos += saltlen;
+      SHA1(buf, pos, sha1);
+    }
+    /* iter 1-1023: SHA1(prev_digest + str(i) + pass + salt) */
+    for (siter = 1; siter < 1024; siter++) {
+        unsigned char buf[2048];
+        int pos = 0;
+        memcpy(buf, sha1, 20); pos = 20;
+        pos += sprintf((char *)buf + pos, "%d", siter);
+        memcpy(buf + pos, pass, passlen); pos += passlen;
+        memcpy(buf + pos, salt, saltlen); pos += saltlen;
+        SHA1(buf, pos, sha1);
+    }
+    return memcmp(sha1, expected, 20) == 0;
+}
+
+/* EPISERVER (e859): SHA1 or SHA256(salt_bin + UTF16LE(pass))
+ * Format: $episerver$*V*b64salt*b64hash (V=0 SHA1, V=1 SHA256) */
+static int verify_episerver(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char utf16[1024], hash_out[32], salt_bin[64], expected[32];
+    int u16len, epiver, hashbytes;
+    const char *p, *salt_b64, *hash_b64;
+    int salt_b64_len, hash_b64_len, salt_len, exp_len;
+
+    if (hashlen < 20 || memcmp(hashstr, "$episerver$*", 12) != 0) return 0;
+    epiver = hashstr[12] - '0';
+    if (epiver != 0 && epiver != 1) return 0;
+    if (hashstr[13] != '*') return 0;
+
+    salt_b64 = hashstr + 14;
+    p = memchr(salt_b64, '*', hashlen - 14);
+    if (!p) return 0;
+    salt_b64_len = p - salt_b64;
+    hash_b64 = p + 1;
+    hash_b64_len = hashlen - (hash_b64 - hashstr);
+
+    salt_len = base64_decode(salt_b64, salt_b64_len, salt_bin, sizeof(salt_bin));
+    if (salt_len <= 0) return 0;
+    hashbytes = (epiver == 1) ? 32 : 20;
+    exp_len = base64_decode(hash_b64, hash_b64_len, expected, sizeof(expected));
+    if (exp_len < hashbytes) return 0;
+
+    u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16));
+    if (u16len <= 0) return 0;
+
+    { unsigned char buf[1024];
+      if (salt_len + u16len > (int)sizeof(buf)) return 0;
+      memcpy(buf, salt_bin, salt_len);
+      memcpy(buf + salt_len, utf16, u16len);
+      if (epiver == 1)
+          SHA256(buf, salt_len + u16len, hash_out);
+      else
+          SHA1(buf, salt_len + u16len, hash_out);
+    }
+    return memcmp(hash_out, expected, hashbytes) == 0;
+}
+
+/* SYBASE-ASE (e877): SHA256(UTF16BE(pass, 510 bytes) + salt_bin) — 0xc007 + 16hex_salt + 64hex */
+static int verify_sybase(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha256[32], salt_bin[8], expected[32];
+    unsigned char wbuf[518];
+    int x;
+
+    if (hashlen != 86) return 0;
+    if (strncasecmp(hashstr, "0xc007", 6) != 0) return 0;
+    if (hex2bin(hashstr + 6, 16, salt_bin) != 8) return 0;
+    if (hex2bin(hashstr + 22, 64, expected) != 32) return 0;
+
+    /* UTF-16BE password padded to 510 bytes */
+    memset(wbuf, 0, 518);
+    for (x = 0; x < passlen && x < 255; x++) {
+        wbuf[x * 2] = 0;
+        wbuf[x * 2 + 1] = pass[x];
+    }
+    memcpy(wbuf + 510, salt_bin, 8);
+    SHA256(wbuf, 518, sha256);
+    return memcmp(sha256, expected, 32) == 0;
+}
+
+/* IPMI2-SHA1 (e872): HMAC-SHA1(pass, hex_decoded_salt) — 40hex ":" salt_hex */
+static int verify_ipmi2sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char hmac_out[20], expected[20], salt_bin[256];
+    unsigned int hmac_len = 20;
+    const char *colon, *hash_part, *salt_part;
+    int hpart, salt_hex_len, salt_len;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+
+    /* Try hash:salt (40hex hash first) or salt:hash (salt first) */
+    if (hpart == 40) {
+        hash_part = hashstr;
+        salt_part = colon + 1;
+        salt_hex_len = hashlen - hpart - 1;
+    } else {
+        salt_part = hashstr;
+        salt_hex_len = hpart;
+        hash_part = colon + 1;
+        if (hashlen - hpart - 1 != 40) return 0;
+    }
+    if (hex2bin(hash_part, 40, expected) != 20) return 0;
+    salt_len = hex2bin(salt_part, salt_hex_len, salt_bin);
+    if (salt_len <= 0) return 0;
+
+    HMAC(EVP_sha1(), pass, passlen, salt_bin, salt_len, hmac_out, &hmac_len);
+    return memcmp(hmac_out, expected, 20) == 0;
+}
+
+/* IPMI2-MD5 (e873): HMAC-MD5(pass, hex_decoded_salt) — 32hex ":" salt_hex */
+static int verify_ipmi2md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char hmac_out[16], expected[16], salt_bin[256];
+    unsigned int hmac_len = 16;
+    const char *colon;
+    int hpart, salt_hex_len, salt_len;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 32) return 0;
+    if (hex2bin(hashstr, 32, expected) != 16) return 0;
+
+    salt_hex_len = hashlen - hpart - 1;
+    salt_len = hex2bin(colon + 1, salt_hex_len, salt_bin);
+    if (salt_len <= 0) return 0;
+
+    HMAC(EVP_md5(), pass, passlen, salt_bin, salt_len, hmac_out, &hmac_len);
+    return memcmp(hmac_out, expected, 16) == 0;
+}
+
+/* KRB5PA23 (e874): NTLM → HMAC-MD5(usage=1) → RC4 decrypt → verify timestamp
+ * Format: $krb5pa$23$user$realm$data$enc_timestamp_hex+checksum_hex */
+static int verify_krb5pa23(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char ntlm[16], k1[16], k3[16];
+    unsigned char enc_bin[512], decrypted[512];
+    unsigned int hmac_len;
+    const char *p;
+    int dc, enc_hex_len, enc_len, data_len, i;
+
+    if (hashlen < 30 || memcmp(hashstr, "$krb5pa$23$", 11) != 0) return 0;
+
+    /* Skip past user$realm$data$ to get enc_hex */
+    p = hashstr + 11;
+    dc = 0;
+    while (*p && dc < 3 && (p - hashstr) < hashlen) { if (*p == '$') dc++; p++; }
+    if (dc != 3) return 0;
+
+    enc_hex_len = hashlen - (p - hashstr);
+    enc_len = enc_hex_len / 2;
+    if (enc_len < 36 || enc_len > (int)sizeof(enc_bin)) return 0;
+    if (hex2bin(p, enc_hex_len, enc_bin) != enc_len) return 0;
+
+    /* Compute NTLM hash: MD4(UTF16LE(pass)) */
+    { unsigned char utf16[1024];
+      int u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16));
+      if (u16len <= 0) return 0;
+      MD4(utf16, u16len, ntlm);
+    }
+
+    /* K1 = HMAC-MD5(ntlm, usage_type=1) */
+    { unsigned char usage[4] = {1, 0, 0, 0};
+      hmac_len = 16;
+      HMAC(EVP_md5(), ntlm, 16, usage, 4, k1, &hmac_len);
+    }
+
+    /* checksum = last 16 bytes, encrypted data = first enc_len-16 bytes */
+    data_len = enc_len - 16;
+
+    /* K3 = HMAC-MD5(K1, checksum) */
+    hmac_len = 16;
+    HMAC(EVP_md5(), k1, 16, enc_bin + data_len, 16, k3, &hmac_len);
+
+    /* RC4 decrypt */
+    { RC4_KEY rc4key;
+      RC4_set_key(&rc4key, 16, k3);
+      RC4(&rc4key, data_len, enc_bin, decrypted);
+    }
+
+    /* Verify: bytes 14-15 must be '2','0' and bytes 16-27 must be ASCII digits */
+    if (data_len < 28) return 0;
+    if (decrypted[14] != '2' || decrypted[15] != '0') return 0;
+    for (i = 16; i < 28; i++)
+        if (decrypted[i] < '0' || decrypted[i] > '9') return 0;
+    return 1;
+}
+
+/* AIX-MD5 (e868): md5crypt with empty magic — {smd5}salt$encoded */
+static int verify_aixmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    /* Reuse APR1/md5crypt logic but with empty magic "" */
+    unsigned char md5[16], alt[16];
+    const char *salt;
+    int saltlen, i, plen;
+    static const char itoa64[] =
+        "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    if (hashlen < 10 || memcmp(hashstr, "{smd5}", 6) != 0) return 0;
+    salt = hashstr + 6;
+    for (saltlen = 0; saltlen < 8 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;
+
+    plen = passlen;
+
+    /* Step 1: MD5(pass + "" + salt) — empty magic */
+    { rhash ctx, altctx;
+      ctx = rhash_init(RHASH_MD5);
+      rhash_update(ctx, pass, plen);
+      /* No magic string for AIX */
+      rhash_update(ctx, salt, saltlen);
+
+      /* Step 2: alternate MD5(pass + salt + pass) */
+      altctx = rhash_init(RHASH_MD5);
+      rhash_update(altctx, pass, plen);
+      rhash_update(altctx, salt, saltlen);
+      rhash_update(altctx, pass, plen);
+      rhash_final(altctx, alt); rhash_free(altctx);
+
+      for (i = plen; i > 0; i -= 16)
+          rhash_update(ctx, alt, (i > 16) ? 16 : i);
+      for (i = plen; i > 0; i >>= 1) {
+          if (i & 1) rhash_update(ctx, "", 1);
+          else rhash_update(ctx, pass, 1);
+      }
+      rhash_final(ctx, md5); rhash_free(ctx);
+    }
+
+    /* 1000 iterations */
+    for (i = 0; i < 1000; i++) {
+        rhash ctx = rhash_init(RHASH_MD5);
+        if (i & 1) rhash_update(ctx, pass, plen);
+        else rhash_update(ctx, md5, 16);
+        if (i % 3) rhash_update(ctx, salt, saltlen);
+        if (i % 7) rhash_update(ctx, pass, plen);
+        if (i & 1) rhash_update(ctx, md5, 16);
+        else rhash_update(ctx, pass, plen);
+        rhash_final(ctx, md5); rhash_free(ctx);
+    }
+
+    /* md5crypt encoding */
+    { static const unsigned char grp[][3] = {
+          {0,6,12}, {1,7,13}, {2,8,14}, {3,9,15}, {4,10,5}
+      };
+      char enc[23];
+      int eidx = 0, g;
+      unsigned int v;
+      for (g = 0; g < 5; g++) {
+          v = ((unsigned int)md5[grp[g][0]] << 16)
+            | ((unsigned int)md5[grp[g][1]] << 8)
+            | md5[grp[g][2]];
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f];
+      }
+      v = md5[11];
+      enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+      enc[eidx++] = itoa64[v & 0x3f];
+      enc[eidx] = 0;
+
+      { char expected[128];
+        snprintf(expected, sizeof(expected), "{smd5}%.*s$%s", saltlen, salt, enc);
+        return strncmp(expected, hashstr, hashlen) == 0;
+      }
+    }
+}
+
+/* AIX-SHA1 (e869): PBKDF2-HMAC-SHA1 — {ssha1}NN$salt$encoded */
+static int verify_aixsha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char derived[20];
+    char encoded[64];
+    const char *p;
+    int nn, saltlen;
+    unsigned long rounds;
+
+    if (hashlen < 15 || memcmp(hashstr, "{ssha1}", 7) != 0) return 0;
+    p = hashstr + 7;
+    nn = (p[0] - '0') * 10 + (p[1] - '0');
+    if (p[2] != '$') return 0;
+    rounds = 1UL << nn;
+
+    { const char *salt_start = p + 3;
+      const char *dollar = memchr(salt_start, '$', hashlen - (salt_start - hashstr));
+      if (!dollar) return 0;
+      saltlen = dollar - salt_start;
+
+      PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+          (const unsigned char *)salt_start, saltlen, rounds,
+          EVP_sha1(), 20, derived);
+      aix_encode(derived, 20, encoded);
+
+      { char expected[256];
+        snprintf(expected, sizeof(expected), "{ssha1}%02d$%.*s$%s", nn, saltlen, salt_start, encoded);
+        return strncmp(expected, hashstr, hashlen) == 0;
+      }
+    }
+}
+
+/* AIX-SHA256 (e870): PBKDF2-HMAC-SHA256 — {ssha256}NN$salt$encoded */
+static int verify_aixsha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char derived[32];
+    char encoded[64];
+    const char *p;
+    int nn, saltlen;
+    unsigned long rounds;
+
+    if (hashlen < 17 || memcmp(hashstr, "{ssha256}", 9) != 0) return 0;
+    p = hashstr + 9;
+    nn = (p[0] - '0') * 10 + (p[1] - '0');
+    if (p[2] != '$') return 0;
+    rounds = 1UL << nn;
+
+    { const char *salt_start = p + 3;
+      const char *dollar = memchr(salt_start, '$', hashlen - (salt_start - hashstr));
+      if (!dollar) return 0;
+      saltlen = dollar - salt_start;
+
+      PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+          (const unsigned char *)salt_start, saltlen, rounds,
+          EVP_sha256(), 32, derived);
+      aix_encode(derived, 32, encoded);
+
+      { char expected[256];
+        snprintf(expected, sizeof(expected), "{ssha256}%02d$%.*s$%s", nn, saltlen, salt_start, encoded);
+        return strncmp(expected, hashstr, hashlen) == 0;
+      }
+    }
+}
+
+/* AIX-SHA512 (e871): PBKDF2-HMAC-SHA512 — {ssha512}NN$salt$encoded */
+static int verify_aixsha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char derived[64];
+    char encoded[128];
+    const char *p;
+    int nn, saltlen;
+    unsigned long rounds;
+
+    if (hashlen < 17 || memcmp(hashstr, "{ssha512}", 9) != 0) return 0;
+    p = hashstr + 9;
+    nn = (p[0] - '0') * 10 + (p[1] - '0');
+    if (p[2] != '$') return 0;
+    rounds = 1UL << nn;
+
+    { const char *salt_start = p + 3;
+      const char *dollar = memchr(salt_start, '$', hashlen - (salt_start - hashstr));
+      if (!dollar) return 0;
+      saltlen = dollar - salt_start;
+
+      PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+          (const unsigned char *)salt_start, saltlen, rounds,
+          EVP_sha512(), 64, derived);
+      aix_encode(derived, 64, encoded);
+
+      { char expected[256];
+        snprintf(expected, sizeof(expected), "{ssha512}%02d$%.*s$%s", nn, saltlen, salt_start, encoded);
+        return strncmp(expected, hashstr, hashlen) == 0;
+      }
+    }
+}
+
+/* MYSQL-SHA256CRYPT (e875): sha256crypt — $mysql$A$NNN*salt_hex*hash_hex */
+static int verify_mysqlsha256crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char digest[32], P[256], S[32], alt[32];
+    int nnn, rounds, saltlen, x, rnd;
+    const char *p;
+    unsigned char salt_bin[64];
+    int salt_hex_len, salt_bin_len;
+
+    if (hashlen < 20 || memcmp(hashstr, "$mysql$A$", 9) != 0) return 0;
+    p = hashstr + 9;
+    nnn = atoi(p);
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p != '*') return 0;
+    { const char *salt_hex = p + 1;
+      const char *star2 = memchr(salt_hex, '*', hashlen - (salt_hex - hashstr));
+      if (!star2) return 0;
+      salt_hex_len = star2 - salt_hex;
+      if (salt_hex_len > 128) return 0;
+      salt_bin_len = hex2bin(salt_hex, salt_hex_len, salt_bin);
+      if (salt_bin_len <= 0) return 0;
+      rounds = nnn * 1000;
+      if (rounds < 1000) rounds = 5000;
+      saltlen = salt_bin_len;
+
+      /* sha256crypt algorithm */
+      /* B = sha256(pass + salt + pass) */
+      SHA256_CTX ctx;
+      SHA256_Init(&ctx);
+      SHA256_Update(&ctx, pass, passlen);
+      SHA256_Update(&ctx, salt_bin, saltlen);
+      SHA256_Update(&ctx, pass, passlen);
+      SHA256_Final(alt, &ctx);
+
+      /* A = sha256(pass + salt + alt_result[0..passlen-1]) */
+      SHA256_Init(&ctx);
+      SHA256_Update(&ctx, pass, passlen);
+      SHA256_Update(&ctx, salt_bin, saltlen);
+      for (x = passlen; x > 32; x -= 32)
+          SHA256_Update(&ctx, alt, 32);
+      SHA256_Update(&ctx, alt, x);
+      for (x = passlen; x != 0; x >>= 1) {
+          if (x & 1) SHA256_Update(&ctx, alt, 32);
+          else SHA256_Update(&ctx, pass, passlen);
+      }
+      SHA256_Final(digest, &ctx);
+
+      /* DP = sha256(pass repeated passlen times) */
+      SHA256_Init(&ctx);
+      for (x = 0; x < passlen; x++)
+          SHA256_Update(&ctx, pass, passlen);
+      SHA256_Final(alt, &ctx);
+      memset(P, 0, sizeof(P));
+      for (x = 0; x < passlen; x += 32)
+          memcpy(P + x, alt, (passlen - x > 32) ? 32 : (passlen - x));
+
+      /* DS = sha256(salt repeated 16+digest[0] times) */
+      SHA256_Init(&ctx);
+      for (x = 0; x < (int)(16 + digest[0]); x++)
+          SHA256_Update(&ctx, salt_bin, saltlen);
+      SHA256_Final(alt, &ctx);
+      for (x = 0; x < saltlen; x += 32)
+          memcpy(S + x, alt, (saltlen - x > 32) ? 32 : (saltlen - x));
+
+      for (rnd = 0; rnd < rounds; rnd++) {
+          SHA256_Init(&ctx);
+          if (rnd & 1) SHA256_Update(&ctx, P, passlen);
+          else SHA256_Update(&ctx, digest, 32);
+          if (rnd % 3) SHA256_Update(&ctx, S, saltlen);
+          if (rnd % 7) SHA256_Update(&ctx, P, passlen);
+          if (rnd & 1) SHA256_Update(&ctx, digest, 32);
+          else SHA256_Update(&ctx, P, passlen);
+          SHA256_Final(digest, &ctx);
+      }
+
+      /* Encode with sha256crypt transposition + phpitoa64 */
+      { static const int sha256_transpose[][3] = {
+            {0,10,20},{21,1,11},{12,22,2},{3,13,23},{24,4,14},
+            {15,25,5},{6,16,26},{27,7,17},{18,28,8},{9,19,29},{-1,30,31}
+        };
+        char my256_encoded[48];
+        int ei = 0, ti;
+        unsigned int v;
+        for (ti = 0; ti < 10; ti++) {
+            v = ((unsigned int)digest[sha256_transpose[ti][0]] << 16) |
+                ((unsigned int)digest[sha256_transpose[ti][1]] << 8) |
+                digest[sha256_transpose[ti][2]];
+            my256_encoded[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+            my256_encoded[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+            my256_encoded[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+            my256_encoded[ei++] = phpitoa64[v & 0x3f];
+        }
+        v = ((unsigned int)digest[31] << 8) | digest[30];
+        my256_encoded[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+        my256_encoded[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+        my256_encoded[ei++] = phpitoa64[v & 0x3f];
+        my256_encoded[43] = 0;
+
+        /* Build expected: hex-encode the phpitoa64 string */
+        { char expected[512];
+          int elen = salt_hex + salt_hex_len + 1 - hashstr;
+          /* Copy up to and including second '*' */
+          memcpy(expected, hashstr, elen);
+          for (ei = 0; ei < 43; ei++) {
+              expected[elen + ei*2]     = "0123456789ABCDEF"[(my256_encoded[ei]>>4)&0xf];
+              expected[elen + ei*2 + 1] = "0123456789ABCDEF"[my256_encoded[ei]&0xf];
+          }
+          expected[elen + 86] = 0;
+          return hashlen == elen + 86 && strncasecmp(expected, hashstr, hashlen) == 0;
+        }
+      }
+    }
+}
+
+/* DRUPAL7 (e876): iterated SHA512, phpitoa64 LSB encode — $S$iter_char + 8salt + 43encoded */
+static int verify_drupal7(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char digest[64];
+    unsigned long count;
+    const char *salt_start;
+    int log2_count;
+
+    if (hashlen != 55 || memcmp(hashstr, "$S$", 3) != 0) return 0;
+    { const char *pp = strchr(phpitoa64, hashstr[3]);
+      if (!pp) return 0;
+      log2_count = pp - phpitoa64;
+    }
+    count = 1UL << log2_count;
+    salt_start = hashstr + 4;
+
+    /* h = SHA512(salt + password) */
+    { unsigned char buf[1024];
+      memcpy(buf, salt_start, 8);
+      memcpy(buf + 8, pass, passlen);
+      SHA512(buf, 8 + passlen, digest);
+    }
+    /* iterate: h = SHA512(h + password) */
+    { unsigned long ic;
+      for (ic = 0; ic < count; ic++) {
+          unsigned char buf[1024];
+          memcpy(buf, digest, 64);
+          memcpy(buf + 64, pass, passlen);
+          SHA512(buf, 64 + passlen, digest);
+      }
+    }
+    /* phpitoa64-encode first bytes of hash (LSB-first) */
+    { char encoded[44];
+      int ei = 0, bi = 0;
+      while (bi < 64 && ei < 43) {
+          unsigned int v = digest[bi++];
+          if (bi < 64) v |= (unsigned int)digest[bi++] << 8;
+          if (bi < 64) v |= (unsigned int)digest[bi++] << 16;
+          encoded[ei++] = phpitoa64[v & 0x3f];
+          if (ei < 43) encoded[ei++] = phpitoa64[(v >> 6) & 0x3f];
+          if (ei < 43) encoded[ei++] = phpitoa64[(v >> 12) & 0x3f];
+          if (ei < 43) encoded[ei++] = phpitoa64[(v >> 18) & 0x3f];
+      }
+      encoded[43] = 0;
+      return memcmp(encoded, hashstr + 12, 43) == 0;
+    }
+}
+
+/* NSEC3 (e879): iterated SHA1(dns_wire + salt) — b32hex_hash:domain:salt_hex:iters */
+static int verify_nsec3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20], expected[20], salt_bin[256];
+    const char *c1, *c2, *c3;
+    int hash_len, iterations, salt_len, iter;
+
+    /* Format: BASE32HEX_HASH:DOMAIN:SALT_HEX:ITERATIONS */
+    c1 = memchr(hashstr, ':', hashlen);
+    if (!c1) return 0;
+    hash_len = c1 - hashstr;
+    if (hash_len != 32) return 0;
+
+    c2 = memchr(c1 + 1, ':', hashlen - (c1 + 1 - hashstr));
+    if (!c2) return 0;
+    c3 = memchr(c2 + 1, ':', hashlen - (c2 + 1 - hashstr));
+    if (!c3) return 0;
+
+    iterations = atoi(c3 + 1);
+    { int salt_hex_len = c3 - c2 - 1;
+      salt_len = hex2bin(c2 + 1, salt_hex_len, salt_bin);
+      if (salt_len < 0) salt_len = 0;
+    }
+
+    /* DNS wire format: length-prefixed label for password + domain labels */
+    { unsigned char wire[1024];
+      int wlen = 0;
+      const char *domain = c1 + 1;
+      int dlen = c2 - c1 - 1;
+
+      /* password as first label */
+      wire[wlen++] = (unsigned char)passlen;
+      memcpy(wire + wlen, pass, passlen);
+      wlen += passlen;
+
+      /* domain labels: split on '.' */
+      { const char *dp = domain, *end = domain + dlen;
+        while (dp < end) {
+            const char *dot = memchr(dp, '.', end - dp);
+            int lablen = dot ? (dot - dp) : (end - dp);
+            if (lablen > 0) {
+                wire[wlen++] = (unsigned char)lablen;
+                /* lowercase the label */
+                { int li;
+                  for (li = 0; li < lablen; li++)
+                      wire[wlen++] = (dp[li] >= 'A' && dp[li] <= 'Z') ? dp[li] + 32 : dp[li];
+                }
+            }
+            dp += lablen + (dot ? 1 : 0);
+        }
+        wire[wlen++] = 0; /* root label */
+      }
+
+      /* First hash: SHA1(wire + salt) */
+      memcpy(wire + wlen, salt_bin, salt_len);
+      SHA1(wire, wlen + salt_len, sha1);
+
+      /* Iterations: SHA1(prev + salt) */
+      for (iter = 0; iter < iterations; iter++) {
+          unsigned char buf[256];
+          memcpy(buf, sha1, 20);
+          memcpy(buf + 20, salt_bin, salt_len);
+          SHA1(buf, 20 + salt_len, sha1);
+      }
+    }
+
+    /* base32hex decode expected hash and compare */
+    { static const char b32hex[] = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+      unsigned char dec[20];
+      int i, j = 0, bits = 0;
+      unsigned int accum = 0;
+      for (i = 0; i < 32 && j < 20; i++) {
+          char c = hashstr[i];
+          const char *bp;
+          int val;
+          if (c >= 'a' && c <= 'v') c -= 32;
+          bp = strchr(b32hex, c);
+          if (!bp) return 0;
+          val = bp - b32hex;
+          accum = (accum << 5) | val;
+          bits += 5;
+          if (bits >= 8) {
+              bits -= 8;
+              dec[j++] = (accum >> bits) & 0xff;
+          }
+      }
+      if (j != 20) return 0;
+      return memcmp(sha1, dec, 20) == 0;
+    }
+}
+
+/* DOMINO5 (e882): domino5_transform(pass) — 32hex (16 bytes) */
+static int verify_domino5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char output[16], expected[16];
+
+    if (hashlen != 32) return 0;
+    if (hex2bin(hashstr, 32, expected) != 16) return 0;
+    if (passlen > 256) return 0;
+    domino5_transform(pass, passlen, output);
+    return memcmp(output, expected, 16) == 0;
+}
+
+/* DOMINO6 (e883): domino5(salt + UC(domino5(pass)[0:14])), lotus64 — (G...encoded...) */
+static int verify_domino6(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h1[16], h2[16], d6_buf[48], d6_raw[14], d6_salt[5];
+    char encoded[24];
+    static const char uchex[] = "0123456789ABCDEF";
+    int x;
+
+    if (hashlen != 22 || hashstr[0] != '(' || hashstr[hashlen-1] != ')' || hashstr[1] != 'G')
+        return 0;
+    if (passlen > 256) return 0;
+
+    /* Decode salt from the encoded hash — need to reverse the lotus64 encoding */
+    /* The hash format is (G + lotus64(salt5 + h2_9)), but we need to decode to get salt */
+    { static const signed char lotus64_rev[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9,-1,-1,-1,-1,-1,-1,
+        -1,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
+        25,26,27,28,29,30,31,32,33,34,35,-1,-1,-1,-1,-1,
+        -1,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,
+        51,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1
+      };
+      /* Decode the 19 lotus64 chars after "(G" to get 14 raw bytes */
+      const char *enc = hashstr + 2;
+      int enc_len = hashlen - 3; /* 19 chars between "(G" and ")" */
+      unsigned char raw[14];
+      int ri = 0, ei = 0;
+      if (enc_len != 19) return 0;
+      while (ei + 3 < enc_len && ri + 2 < 14) {
+          int a = lotus64_rev[(unsigned char)enc[ei]];
+          int b = lotus64_rev[(unsigned char)enc[ei+1]];
+          int c = lotus64_rev[(unsigned char)enc[ei+2]];
+          int d = lotus64_rev[(unsigned char)enc[ei+3]];
+          if (a < 0 || b < 0 || c < 0 || d < 0) return 0;
+          raw[ri++] = (a << 2) | (b >> 4);
+          raw[ri++] = ((b & 0xf) << 4) | (c >> 2);
+          raw[ri++] = ((c & 3) << 6) | d;
+          ei += 4;
+      }
+      /* Handle remaining chars */
+      if (ei < enc_len && ri < 14) {
+          int a = lotus64_rev[(unsigned char)enc[ei]];
+          int b = (ei+1 < enc_len) ? lotus64_rev[(unsigned char)enc[ei+1]] : 0;
+          int c = (ei+2 < enc_len) ? lotus64_rev[(unsigned char)enc[ei+2]] : 0;
+          if (a < 0) return 0;
+          raw[ri++] = (a << 2) | (b >> 4);
+          if (ri < 14 && ei+1 < enc_len) raw[ri++] = ((b & 0xf) << 4) | (c >> 2);
+      }
+
+      /* Extract salt: first 5 bytes, undo the +4 quirk on byte 3 */
+      memcpy(d6_salt, raw, 5);
+      d6_salt[3] -= 4;
+    }
+
+    /* h1 = domino5_transform(password) */
+    domino5_transform(pass, passlen, h1);
+
+    /* Build: raw_salt(5) + "(" + UCHEX(h1[0:14]) = 34 bytes */
+    memcpy(d6_buf, d6_salt, 5);
+    d6_buf[5] = '(';
+    for (x = 0; x < 14; x++) {
+        d6_buf[6+x*2]   = uchex[(h1[x]>>4)&0xf];
+        d6_buf[6+x*2+1] = uchex[h1[x]&0xf];
+    }
+
+    /* h2 = domino5_transform(d6_buf, 34) */
+    domino5_transform(d6_buf, 34, h2);
+
+    /* Compare computed h2 with the h2 extracted from the hash (bytes 5-13 of raw decode) */
+    { unsigned char raw_expect[14];
+      const char *enc = hashstr + 2;
+      int ei = 0, ri = 0;
+      static const signed char lr[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9,-1,-1,-1,-1,-1,-1,
+        -1,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
+        25,26,27,28,29,30,31,32,33,34,35,-1,-1,-1,-1,-1,
+        -1,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,
+        51,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1
+      };
+      while (ei + 3 < 19 && ri + 2 < 14) {
+          int a = lr[(unsigned char)enc[ei]], b = lr[(unsigned char)enc[ei+1]];
+          int c = lr[(unsigned char)enc[ei+2]], d = lr[(unsigned char)enc[ei+3]];
+          if (a < 0 || b < 0 || c < 0 || d < 0) return 0;
+          raw_expect[ri++] = (a << 2) | (b >> 4);
+          raw_expect[ri++] = ((b & 0xf) << 4) | (c >> 2);
+          raw_expect[ri++] = ((c & 3) << 6) | d;
+          ei += 4;
+      }
+      if (ei < 19 && ri < 14) {
+          int a = lr[(unsigned char)enc[ei]];
+          int b = (ei+1 < 19) ? lr[(unsigned char)enc[ei+1]] : 0;
+          int c = (ei+2 < 19) ? lr[(unsigned char)enc[ei+2]] : 0;
+          if (a < 0) return 0;
+          raw_expect[ri++] = (a << 2) | (b >> 4);
+          if (ri < 14 && ei+1 < 19) raw_expect[ri++] = ((b & 0xf) << 4) | (c >> 2);
+      }
+      /* Compare h2 bytes: raw_expect[5..13] vs computed h2[0..8] */
+      return ri >= 14 && memcmp(raw_expect + 5, h2, 9) == 0;
     }
 }
 
@@ -9222,6 +10741,57 @@ static void init_hashtypes(void)
     HTV("APR1",       0, verify_apr1, "$apr1$rndSa1t$UuNY2EWlcn4SkHJxQh1G3/:password123");
     HTV("SCRYPT",     0, verify_scrypt, "SCRYPT:1024:1:1:MDIwMzMwNTQwNDQyNQ==:5FW+zWivLxgCWj7qLiQbeC8zaNQ+qdO0NUinvqyFcfo=:hashcat");
 
+    /* Wave 1: Simple salted hex types */
+    HTV("POSTGRESQL",  0, verify_postgresql, "md5c3a6d24526b9285dd98be631e8271309:testuser:password123");
+    HTV("PEOPLESOFT",  0, verify_peoplesoft, "lACuKESOE2QXTd4mmyzOG8qdfug=:password123");
+    HTV("HMAILSERVER", 0, verify_hmailserver, "1234563fa01c590efd5499b9f9468f7ae5d427112933294e3d150f9bdce07e3e578ae3:password123");
+    HTV("MEDIAWIKI",   0, verify_mediawiki, "$B$56668501$20461e17ce27c23cf7927fe0aa1a7725:password123");
+    HTV("DAHUA",       0, verify_dahua, "27fd18d177daf2fc0d47833944eab52d:229381927:182719643:password123");
+    HTV("NETSCALER",   0, verify_netscaler, "100000000c61de3dad73fee288fbafd575bb2d5d95c1ee79d:password123");
+    HTV("WBB3",        0, verify_wbb3, "e4351f5c90ae882a35a1b94ac837088707111680:0000000000000000000000000000000000000000:password123");
+
+    /* Wave 2: MSSQL + macOS */
+    HTV("MSSQL2000",   0, verify_mssql2000, "0x010012345678f9cf12a8bbcee0131a6068815203371250b5cb1198069a7aec5df5cb05ef43f73acbe8572cf9d744:password123");
+    HTV("MSSQL2005",   0, verify_mssql2005, "0x010012345678f9cf12a8bbcee0131a6068815203371250b5cb11:password123");
+    HTV("MSSQL2012",   0, verify_mssql2012, "0x020012345678d0d6c9153b0e776be47d3075c6a6cc1f7241c63f37eea7c6f0848e79d22d746de10aa011e3204748b4b6bdd2ca58b6bfd4a987b94d915d78e0dc51e4a7bc6609:password123");
+    HTV("MACOSX",      0, verify_macosx, "123456782ff71ecef04bd9660e9bad78ed5cf12d97d341c5:password123");
+    HTV("MACOSX7",     0, verify_macosx7, "123456780c911e4f72ab8610bd212f4fb547c6b13c0abb1b488350f19e888fe874dbcb542ab2ad0706af8d9303164a54008937f7a328404dfb81b5e2d1017b1a5c3ea141:password123");
+
+    /* Wave 3: DES-based */
+    HTV("DESENCRYPT",  0, verify_desencrypt, "efb32954aec338ca:1172075784504605:password123");
+    HTV("DES3ENCRYPT", 0, verify_des3encrypt, "c74ec0f283bb3efb:8152001061460743:password123");
+    HTV("RACF",        0, verify_racf, "6A182040F07213B8:USER:password123");
+
+    /* Wave 4: Cisco + Juniper */
+    HTV("JUNIPERSSG",  0, verify_juniperssg, "nKLFAKrpHSNHcHMMnsaMoCDtGrPj0n:user:password123");
+    HTV("CISCOPIX",    0, verify_ciscopix, "5wyJZrN0zZZDiHA6:password123");
+    HTV("CISCOASA",    0, verify_ciscoasa, "iOZ4lbE3GPO/eeeS:36:password123");
+    HTV("CISCO4",      0, verify_cisco4, "vt8rS9fyRlu773i7v9k6d2dC3ak4NNYFW/wsDIFnuIw:password123");
+    HTV("CISCOISE",    0, verify_ciscoise, "6921eaf6ba9eedb30c84a2c7fed2309e964d631f69e7f6b2972482dcb68007824d65737361676544696765737400000000000000000000000000000000000000:password123");
+
+    /* Wave 5: Iterated types */
+    HTV("SAMSUNGSHA1", 0, verify_samsungsha1, "b663d01f50b917f6a9b1aa402207f863ba8b7c41:2173921648:password123");
+    HTV("EPISERVER",   0, verify_episerver, "$episerver$*0*RGVm*qNFZycuVKKgy9gzqwETNNLxZ+vg:password123");
+    HTV("SYBASE-ASE",  0, verify_sybase, "0xc00700000000000000000995a15a592719c9407085d7dfd203f6c11a9de5bf449e3cb93e90439d4c65aa:password123");
+
+    /* Wave 6: HMAC + KRB5 */
+    HTV("IPMI2-SHA1",  0, verify_ipmi2sha1, "00:1c9f35d812ea7ef72acdd262ec5e3ae59582103a:password123");
+    HTV("IPMI2-MD5",   0, verify_ipmi2md5, "e83eb99a98bd696bc41c0826bb378986:00:password123");
+    HTV("KRB5PA23",    0, verify_krb5pa23, "$krb5pa$23$x$x$x$06e07bf14b909c6e6773b7d0bc9fd9a04602c3bd4991ffc7438a60446a40b384d2f13ce9124a8f7024bd831d9b66b1052440:password123");
+
+    /* Wave 7: crypt/PBKDF2 */
+    HTV("AIX-MD5",     0, verify_aixmd5, "{smd5}rndSa1t$7BZvKWug/Zy4p.iPozdxC0:password123");
+    HTV("AIX-SHA1",    0, verify_aixsha1, "{ssha1}06$bJbkFGJAB30L2e23$zKSZhTrB6UjXkJlxKsxSALf2.MH:password123");
+    HTV("AIX-SHA256",  0, verify_aixsha256, "{ssha256}06$aJckFGJAB30LTe10$3nmSlxZe9vAsv7ylzEjjt9K6x2zac8Zm3udVIFZ9.Qr:password123");
+    HTV("AIX-SHA512",  0, verify_aixsha512, "{ssha512}06$bJbkFGJAB30L2e23$6kmLDyWSi0Y5c4.h/cUmVKFO9j.F/p/JvfeTcfEjvIANUghVYQFTVfrQ4u2fs1laoJlsV/34DQaITeWwBAqN..:password123");
+    HTV("MYSQL-SHA256CRYPT", 0, verify_mysqlsha256crypt, "$mysql$A$005*0000000000*735953686774693157507A4A56526F713439744874516D6878335855747A644E416D506979304547335A37:password123");
+    HTV("DRUPAL7",     0, verify_drupal7, "$S$C00000000uP3JXd.0IL30e76wJH2NZ/Ovd0AALo.mjXytygeAP9u:password123");
+
+    /* Wave 8: Custom transform */
+    HTV("NSEC3",       0, verify_nsec3, "44jvntvfj82gq27k8ps7pqrjlo5h9c58:.x.net:1:00:password123");
+    HTV("DOMINO5",     0, verify_domino5, "173127311326bb6eeacdfef5c2791514:password123");
+    HTV("DOMINO6",     0, verify_domino6, "(G0000101iBosJ2cVSZqu):password123");
+
     #undef HT
     #undef HTC
     #undef HTV
@@ -9468,6 +11038,68 @@ static int decode_hex_password(const char *pass, int passlen,
     return hex2bin(pass + 5, hexlen, out);
 }
 
+/* ---- $TESTVEC[] decode ---- */
+
+/* Decode $TESTVEC[HH x NNNNNNN] password into pre-allocated testvec buffer.
+ * Returns expanded length, or -1 if not $TESTVEC format. */
+static int decode_testvec_password(const char *pass, int passlen,
+    unsigned char *out, int outmax)
+{
+    const char *p, *end, *sep;
+    unsigned char pat[256];
+    int patbytes, hexlen, count, total, i;
+
+    if (passlen < 15) return -1;  /* $TESTVEC[HH x N] minimum */
+    if (strncmp(pass, "$TESTVEC[", 9) != 0) return -1;
+    if (pass[passlen - 1] != ']') return -1;
+
+    p = pass + 9;
+    end = pass + passlen - 1;  /* points to ']' */
+
+    /* Find " x " separator */
+    sep = NULL;
+    for (i = 0; p + i + 2 < end; i++) {
+        if (p[i] == ' ' && p[i+1] == 'x' && p[i+2] == ' ') {
+            sep = p + i;
+            break;
+        }
+    }
+    if (!sep) return -1;
+
+    /* Parse hex pattern before separator */
+    hexlen = (int)(sep - p);
+    if (hexlen < 2 || hexlen > (int)sizeof(pat) * 2) return -1;
+    patbytes = hex2bin(p, hexlen, pat);
+    if (patbytes <= 0) return -1;
+
+    /* Parse decimal repeat count after " x " */
+    p = sep + 3;
+    if (p >= end) return -1;
+    if (end - p > 7) return -1;  /* max 7 digits */
+    count = 0;
+    for (; p < end; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        count = count * 10 + (*p - '0');
+    }
+    if (count <= 0) return -1;
+
+    /* Compute total and clamp to outmax */
+    total = patbytes * count;
+    if (total > outmax) total = outmax;
+
+    /* Fill output buffer with repeated pattern */
+    if (patbytes == 1) {
+        memset(out, pat[0], total);
+    } else {
+        int pos;
+        for (pos = 0; pos + patbytes <= total; pos += patbytes)
+            memcpy(out + pos, pat, patbytes);
+        if (pos < total)
+            memcpy(out + pos, pat, total - pos);
+    }
+    return total;
+}
+
 /* ---- $HEX[] encode: check if password needs encoding ---- */
 
 static int needs_hex(const char *pass, int passlen)
@@ -9480,6 +11112,8 @@ static int needs_hex(const char *pass, int passlen)
             return 1;
     }
     if (passlen >= 5 && strncmp(pass, "$HEX[", 5) == 0)
+        return 1;
+    if (passlen >= 9 && strncmp(pass, "$TESTVEC[", 9) == 0)
         return 1;
     return 0;
 }
@@ -9584,6 +11218,7 @@ static struct batch *alloc_batch(void)
             fprintf(stderr, "hashpipe: out of memory (workspace)\n");
             exit(1);
         }
+        b->ws->testvec = malloc(TESTVECSIZE + 16);
     }
     b->count = 0;
     b->bufused = 0;
@@ -9713,8 +11348,14 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         if (vpasslen >= 0) {
             vpass = vpassbuf;
         } else {
-            vpass = (const unsigned char *)item->password;
-            vpasslen = item->passlen;
+            vpasslen = decode_testvec_password(item->password, item->passlen,
+                                               WS->testvec, TESTVECSIZE);
+            if (vpasslen >= 0) {
+                vpass = WS->testvec;
+            } else {
+                vpass = (const unsigned char *)item->password;
+                vpasslen = item->passlen;
+            }
         }
         if (item->hint->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
             item->verified = 1;
@@ -9761,7 +11402,12 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         vpasslen = decode_hex_password(item->password, item->passlen,
                                        WS->vpassbuf, MAXLINE);
         if (vpasslen >= 0) { vpass = WS->vpassbuf; }
-        else { vpass = (const unsigned char *)item->password; vpasslen = item->passlen; }
+        else {
+            vpasslen = decode_testvec_password(item->password, item->passlen,
+                                               WS->testvec, TESTVECSIZE);
+            if (vpasslen >= 0) { vpass = WS->testvec; }
+            else { vpass = (const unsigned char *)item->password; vpasslen = item->passlen; }
+        }
 
         /* Hot list verify types first */
         {
@@ -9801,13 +11447,19 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         return;
     }
 
-    /* Decode password: handle $HEX[] */
+    /* Decode password: handle $HEX[] and $TESTVEC[] */
     passlen = decode_hex_password(item->password, item->passlen, passbuf, MAXLINE);
     if (passlen >= 0) {
         pass = passbuf;
     } else {
-        pass = (const unsigned char *)item->password;
-        passlen = item->passlen;
+        passlen = decode_testvec_password(item->password, item->passlen,
+                                          WS->testvec, TESTVECSIZE);
+        if (passlen >= 0) {
+            pass = WS->testvec;
+        } else {
+            pass = (const unsigned char *)item->password;
+            passlen = item->passlen;
+        }
     }
 
     /* Decode salt if present (handle $HEX[] encoding) */
@@ -9848,8 +11500,14 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             altpass = altbuf;
             altpasslen = adec;
         } else {
-            altpass = (const unsigned char *)item->alt_password;
-            altpasslen = item->alt_passlen;
+            altpasslen = decode_testvec_password(item->alt_password, item->alt_passlen,
+                                                 WS->testvec, TESTVECSIZE);
+            if (altpasslen >= 0) {
+                altpass = WS->testvec;
+            } else {
+                altpass = (const unsigned char *)item->alt_password;
+                altpasslen = item->alt_passlen;
+            }
         }
     }
 
@@ -9910,7 +11568,12 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 int fdec = decode_hex_password(item->fullpass, item->fullpasslen,
                                                fpbuf, MAXLINE);
                 if (fdec >= 0) { fp = fpbuf; fplen = fdec; }
-                else { fp = (const unsigned char *)item->fullpass; fplen = item->fullpasslen; }
+                else {
+                    fdec = decode_testvec_password(item->fullpass, item->fullpasslen,
+                                                   WS->testvec, TESTVECSIZE);
+                    if (fdec >= 0) { fp = WS->testvec; fplen = fdec; }
+                    else { fp = (const unsigned char *)item->fullpass; fplen = item->fullpasslen; }
+                }
                 hash_compute(ht, fp, fplen, NULL, 0, computed);
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                     item->password = item->fullpass;
@@ -9996,9 +11659,8 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         int m;
         for (m = 0; m < ModeCount; m++) {
             struct hashtype *ht = &Hashtypes[ModeList[m]];
-            if (ht->hashlen < hashbytes) continue;
 
-            /* non-hex verify types */
+            /* non-hex verify types (check before hashlen filter) */
             if (ht->verify) {
                 if (ht->verify(item->hashstr, item->hashlen, pass, passlen)) {
                     item->verified = 1;
@@ -10010,6 +11672,8 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 }
                 continue;
             }
+
+            if (ht->hashlen < hashbytes) continue;
 
             if ((ht->flags & HTF_SALTED) && saltbinlen > 0) {
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, computed);
@@ -10362,14 +12026,19 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     int passlen;
     int dec_len;
 
-    /* Decode $HEX[] on the fly if present */
-    dec_len = decode_hex_password(item->password, item->passlen, decoded, MAXLINE);
-    if (dec_len >= 0) {
-        pass = (const char *)decoded;
-        passlen = dec_len;
-    } else {
+    /* Decode $HEX[] on the fly if present; pass through $TESTVEC[] verbatim */
+    if (item->passlen >= 9 && strncmp(item->password, "$TESTVEC[", 9) == 0) {
         pass = item->password;
         passlen = item->passlen;
+    } else {
+        dec_len = decode_hex_password(item->password, item->passlen, decoded, MAXLINE);
+        if (dec_len >= 0) {
+            pass = (const char *)decoded;
+            passlen = dec_len;
+        } else {
+            pass = item->password;
+            passlen = item->passlen;
+        }
     }
 
     /* Type name + iteration suffix (only when iter > 0, matches mdxfind) */
@@ -10385,9 +12054,12 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     if (item->salt && item->saltlen > 0)
         pos += sprintf(outbuf + pos, ":%.*s", item->saltlen, item->salt);
 
-    /* Colon + password (with $HEX[] if needed) */
+    /* Colon + password (with $HEX[] if needed, $TESTVEC[] verbatim) */
     outbuf[pos++] = ':';
-    if (needs_hex(pass, passlen)) {
+    if (passlen >= 9 && strncmp(pass, "$TESTVEC[", 9) == 0) {
+        memcpy(outbuf + pos, pass, passlen);
+        pos += passlen;
+    } else if (needs_hex(pass, passlen)) {
         int i;
         memcpy(outbuf + pos, "$HEX[", 5);
         pos += 5;
@@ -10415,10 +12087,11 @@ static void update_batch_limit(int type_idx)
         struct workspace *tmp_ws = NULL;
         if (!WS) {
             tmp_ws = (struct workspace *)calloc(1, sizeof(*tmp_ws));
+            tmp_ws->testvec = malloc(TESTVECSIZE + 16);
             WS = tmp_ws;
         }
         ht->rate = bench_one_type_timed(type_idx, 0.2);
-        if (tmp_ws) { WS = NULL; free(tmp_ws); }
+        if (tmp_ws) { WS = NULL; free(tmp_ws->testvec); free(tmp_ws); }
         if (ht->rate <= 0) ht->rate = 1;
     }
     limit = (int)((double)ht->rate * TARGET_BATCH_SECS);
@@ -10681,6 +12354,53 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     /* Hash is from p to first colon */
     hashstart = p;
     item->hashlen = colon1 - hashstart;
+
+    /* Prefix-based hint detection for verify types with recognizable formats */
+    if (!item->hint) {
+        int _remaining = end - hashstart;  /* bytes from hash start to end of line */
+        if (_remaining >= 14 && memcmp(hashstart, "$episerver$*", 12) == 0)
+            item->hint = find_type_by_name("EPISERVER");
+        else if (_remaining >= 6 && memcmp(hashstart, "{smd5}", 6) == 0)
+            item->hint = find_type_by_name("AIX-MD5");
+        else if (_remaining >= 7 && memcmp(hashstart, "{ssha1}", 7) == 0)
+            item->hint = find_type_by_name("AIX-SHA1");
+        else if (_remaining >= 9 && memcmp(hashstart, "{ssha256}", 9) == 0)
+            item->hint = find_type_by_name("AIX-SHA256");
+        else if (_remaining >= 9 && memcmp(hashstart, "{ssha512}", 9) == 0)
+            item->hint = find_type_by_name("AIX-SHA512");
+        else if (_remaining >= 3 && memcmp(hashstart, "$S$", 3) == 0)
+            item->hint = find_type_by_name("DRUPAL7");
+        else if (_remaining >= 3 && memcmp(hashstart, "$B$", 3) == 0)
+            item->hint = find_type_by_name("MEDIAWIKI");
+        else if (_remaining >= 9 && memcmp(hashstart, "$mysql$A$", 9) == 0)
+            item->hint = find_type_by_name("MYSQL-SHA256CRYPT");
+        else if (_remaining >= 6 && strncasecmp(hashstart, "0x0200", 6) == 0)
+            item->hint = find_type_by_name("MSSQL2012");
+        else if (_remaining >= 6 && strncasecmp(hashstart, "0x0100", 6) == 0) {
+            /* MSSQL2000 = 0x0100 + 8salt + 40cs + 40uc (94 hex after 0x); MSSQL2005 = 0x0100 + 8salt + 40 (54 hex after 0x) */
+            int _hlen = colon_last - hashstart;
+            if (_hlen >= 94)
+                item->hint = find_type_by_name("MSSQL2000");
+            else
+                item->hint = find_type_by_name("MSSQL2005");
+        }
+        else if (_remaining >= 6 && strncasecmp(hashstart, "0xc007", 6) == 0)
+            item->hint = find_type_by_name("SYBASE-ASE");
+        else if (_remaining >= 3 && hashstart[0] == '(' && hashstart[1] == 'G')
+            item->hint = find_type_by_name("DOMINO6");
+        else if (_remaining >= 35 && memcmp(hashstart, "md5", 3) == 0)
+            item->hint = find_type_by_name("POSTGRESQL");
+        else if (_remaining >= 10 && memcmp(hashstart, "$krb5pa$23$", 11) == 0)
+            item->hint = find_type_by_name("KRB5PA23");
+    }
+    /* Fallback: if -m selected exactly one verify type, use that */
+    if (!item->hint && ModeCount > 0) {
+        int _m, _nv = 0, _vi = -1;
+        for (_m = 0; _m < ModeCount; _m++)
+            if (Hashtypes[ModeList[_m]].verify) { _nv++; _vi = _m; }
+        if (_nv == 1)
+            item->hint = &Hashtypes[ModeList[_vi]];
+    }
 
     /* Non-hex verify types skip hex validation */
     if (item->hint && item->hint->verify) {
@@ -11125,6 +12845,7 @@ static void bench_worker(void *dummy)
 {
     struct workspace *ws = (struct workspace *)calloc(1, sizeof(*ws));
     (void)dummy;
+    ws->testvec = malloc(TESTVECSIZE + 16);
     WS = ws;
     for (;;) {
         int idx;
@@ -11149,6 +12870,7 @@ static void bench_worker(void *dummy)
         }
         release(BenchLock);
     }
+    free(ws->testvec);
     free(ws);
 }
 
@@ -11430,7 +13152,16 @@ static void init_rates(void)
         {830, 79188036LL}, {831, 1324961LL}, {832, 1314939LL}, {834, 1806326LL},
         {837, 124372LL}, {838, 125236LL}, {839, 111172LL}, {840, 111886LL},
         {841, 2648787LL}, {842, 2594592LL}, {843, 2632009LL}, {844, 5284524LL},
-        {845, 3172941LL}, {846, 4023442LL}, {847, 4203886LL}, {857, 5247548LL},
+        {845, 3172941LL}, {846, 4023442LL}, {847, 4203886LL},
+        {848, 5323019LL}, {849, 2025534LL}, {850, 3940874LL}, {851, 3942488LL},
+        {852, 1730767LL}, {853, 5671481LL}, {854, 2020116LL}, {855, 6611722LL},
+        {856, 5679280LL}, {857, 5247548LL}, {858, 6025016LL}, {859, 4921983LL},
+        {860, 3031865LL}, {861, 7162399LL}, {862, 6901372LL}, {863, 2720320LL},
+        {864, 2909721LL}, {865, 4729197LL}, {866, 39990LL}, {867, 6311LL},
+        {868, 6689LL}, {869, 21692LL}, {870, 13573LL}, {871, 11293LL},
+        {872, 1335787LL}, {873, 1343596LL}, {874, 473090LL}, {875, 655LL},
+        {876, 240LL}, {877, 611340LL}, {878, 5355245LL}, {879, 3549919LL},
+        {880, 1997303LL}, {881, 4538035LL}, {882, 295776LL}, {883, 98651LL},
         {884, 7050LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
@@ -11462,6 +13193,34 @@ int main(int argc, char **argv)
     Errfp = stderr;
     BenchAll = 0;
     BenchSpec = NULL;
+
+    /* Reorder argv so options come before filenames (POSIX getopt stops at first non-option) */
+    /* This allows "hashpipe foo.txt -o out.txt -e err.txt" to work correctly */
+    {
+        char **sorted = malloc((argc + 1) * sizeof(char *));
+        char *used = calloc(argc, 1);
+        int dst = 1;
+        sorted[0] = argv[0];
+        used[0] = 1;
+        for (i = 1; i < argc; i++) {
+            if (argv[i][0] == '-' && argv[i][1] != '\0') {
+                sorted[dst++] = argv[i];
+                used[i] = 1;
+                if (argv[i][2] == '\0' && strchr("tiqoebm", argv[i][1]) && i + 1 < argc) {
+                    i++;
+                    sorted[dst++] = argv[i];
+                    used[i] = 1;
+                }
+            }
+        }
+        for (i = 1; i < argc; i++) {
+            if (!used[i])
+                sorted[dst++] = argv[i];
+        }
+        memcpy(argv, sorted, argc * sizeof(char *));
+        free(sorted);
+        free(used);
+    }
 
     while ((opt = getopt(argc, argv, "t:i:q:o:e:b:m:BVh")) != -1) {
         switch (opt) {
@@ -11589,6 +13348,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "hashpipe: out of memory (workspace)\n");
                 exit(1);
             }
+            b->ws->testvec = malloc(TESTVECSIZE + 16);
             b->next = FreeHead;
             FreeHead = b;
         }
