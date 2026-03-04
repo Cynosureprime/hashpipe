@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.20 2026/03/03 14:57:25 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.21 2026/03/04 00:03:39 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -386,6 +386,326 @@ struct hashtype {
     struct chain_step *chain;  /* chain[0]=innermost, chain[nchain-1]=outermost */
     const char *example;       /* "hash:password" or "hash:salt:password" for benchmarking */
     long long rate;            /* hashes/sec from benchmark, 0 = unknown */
+};
+
+/* Hashcat mode to internal type index mapping (from mdxfind.c).
+ * 65535 = unsupported/unmapped. */
+struct MapHashcat {
+  short unsigned int hc, mdx;
+} Maphashcat[] = {
+    {0,     1},
+    {900,   3},
+    {5100,  1},
+    {100,   8},
+    {1300,  9},
+    {1400,  10},
+    {10800, 11},
+    {1700,  12},    /* SHA-512 */
+    {5000,  91},    /* SHA-3 */
+    {600,   841},   /* BLAKE2b-512 */
+    {610,   842},   /* BLAKE2b-512($pass.$salt) */
+    {620,   843},   /* BLAKE2b-512($salt.$pass) */
+    {10100, 65535}, /* SIPhash */
+    {6000,  118},
+    {6100,  5},
+    {6900,  13},
+    {11700, 427},
+    {11780, 428},
+    {10,    373},
+    {20,    394},
+    {30,    801},   /* md5(utf16le($pass).$salt) */
+    {40,    802},   /* md5($salt.utf16le($pass)) */
+    {3800,  411},
+    {3710,  441},
+    {4010,  516},
+    {4110,  515},
+    {2600,  1},     /* md5(md5($pass)) -> MD5 iter 2 */
+    {3910,  458},
+    {4300,  2},
+    {4400,  178},
+    {110,   405},
+    {120,   385},
+    {130,   803},   /* sha1(utf16le($pass).$salt) */
+    {140,   804},   /* sha1($salt.utf16le($pass)) */
+    {170,   727},
+    {4500,  8},
+    {4520,  520},
+    {4700,  160},
+    {4900,  395},
+    {14400, 521},   /* sha1(CX) */
+    {1410,  413},
+    {1420,  412},
+    {1430,  806},   /* sha256(utf16le($pass).$salt) */
+    {1440,  807},   /* sha256($salt.utf16le($pass)) */
+    {1710,  386},
+    {1720,  388},
+    {1730,  809},   /* sha512(utf16le($pass).$salt) */
+    {1740,  810},   /* sha512($salt.utf16le($pass)) */
+    {50,    792},   /* HMAC-MD5 (key = $pass) */
+    {60,    214},
+    {150,   793},   /* HMAC-SHA1 (key = $pass) */
+    {160,   215},
+    {1450,  795},   /* HMAC-SHA256 (key = $pass) */
+    {1460,  217},
+    {1750,  797},   /* HMAC-SHA512 (key = $pass) */
+    {1760,  218},
+    {14000, 848},   /* DES (PT = $salt, key = $pass) */
+    {14100, 849},   /* 3DES (PT = $salt, key = $pass) */
+    {14900, 65535},
+    {15400, 65535}, /* ChaCha20 */
+    {400,   455},
+    {8900,  884},   /* scrypt */
+    {11900, 531},   /* PBKDF2-HMAC-MD5 */
+    {12000, 532},   /* PBKDF2-HMAC-SHA1 */
+    {10900, 530},   /* PBKDF2-HMAC-SHA256 */
+    {12100, 533},   /* PBKDF2-HMAC-SHA512 */
+    {23,    857},   /* Skype */
+    {24,    394},   /* SolarWinds Serv-U */
+    {2500,  65535}, /* WPA/WPA2 */
+    {4800,  65535}, /* iSCSI CHAP authentication */
+    {5300,  65535}, /* IKE-PSK MD5 */
+    {5400,  65535}, /* IKE-PSK SHA1 */
+    {5500,  65535}, /* NetNTLMv1 */
+    {5600,  65535}, /* NetNTLMv2 */
+    {7300,  872},   /* IPMI2 RAKP HMAC-SHA1 */
+    {7350,  873},   /* IPMI2 RAKP HMAC-MD5 */
+    {7500,  874},   /* Kerberos 5 AS-REQ Pre-Auth etype 23 */
+    {8300,  879},   /* DNSSEC (NSEC3) */
+    {10200, 65535}, /* CRAM-MD5 */
+    {11100, 65535}, /* PostgreSQL CRAM (MD5) */
+    {11200, 65535}, /* MySQL CRAM (SHA1) */
+    {11400, 65535}, /* SIP digest authentication (MD5) */
+    {13100, 65535}, /* Kerberos 5 TGS-REP etype 23 */
+    {121,   414},
+    {2611,  31},
+    {2711,  31},
+    {2811,  367},   /* MyBB 1.2+ */
+    {8400,  880},   /* WBB3 */
+    {11,    373},   /* Joomla < 2.5.18 */
+    {2612,  886},   /* PHPS */
+    {21,    394},
+    {11000, 65535}, /* PrestaShop */
+    {124,   385},   /* Django (SHA-1) */
+    {10000, 530},   /* Django (PBKDF2-SHA256) */
+    {3711,  863},   /* MediaWiki B type */
+    {13900, 65535}, /* OpenCart */
+    {4521,  579},   /* Redmine -> SHA1SHA1PASSSALT */
+    {4522,  579},   /* PunBB -> SHA1SHA1PASSSALT */
+    {12001, 534},   /* Atlassian (PBKDF2-HMAC-SHA1) */
+    {12,    855},   /* PostgreSQL */
+    {22,    856},   /* Juniper NetScreen/SSG */
+    {131,   850},   /* MSSQL (2000) */
+    {132,   851},   /* MSSQL (2005) */
+    {1731,  852},   /* MSSQL (2012, 2014) */
+    {200,   456},
+    {300,   259},
+    {3100,  65535}, /* Oracle H: Type (Oracle 7+) */
+    {112,   834},   /* Oracle S: Type (Oracle 11+) */
+    {12300, 65535}, /* Oracle T: Type (Oracle 12+) */
+    {8000,  877},   /* Sybase ASE */
+    {1441,  859},   /* Episerver 6.x >= .NET 4 */
+    {1600,  461},   /* APR1 */
+    {12600, 65535}, /* ColdFusion 10+ */
+    {1421,  860},   /* hMailServer */
+    {101,   457},   /* nsldap, SHA-1(Base64) */
+    {111,   833},   /* nsldaps, SSHA-1(Base64) */
+    {1411,  835},   /* SSHA-256(Base64) */
+    {1711,  836},   /* SSHA-512(Base64) */
+    {15000, 65535}, /* FileZilla Server */
+    {11500, 65535}, /* CRC32 */
+    {3000,  379},   /* LM */
+    {1000,  369},   /* NTLM */
+    {1100,  439},   /* DCC, MS Cache */
+    {2100,  65535}, /* DCC2, MS Cache 2 */
+    {15300, 65535}, /* DPAPI masterkey */
+    {12800, 65535}, /* MS-AzureSync */
+    {1500,  500},   /* DES */
+    {12400, 500},   /* Extended DES */
+    {500,   511},   /* md5crypt */
+    {3200,  450},   /* bcrypt */
+    {7400,  512},   /* sha256crypt */
+    {7401,  875},   /* MySQL $A$ (sha256crypt) */
+    {7900,  876},   /* Drupal7 */
+    {1800,  513},   /* sha512crypt */
+    {122,   853},   /* macOS v10.4-10.6 */
+    {1722,  854},   /* macOS v10.7 */
+    {7100,  533},   /* OSX v10.8+ (PBKDF2-SHA512) */
+    {6300,  868},   /* AIX {smd5} */
+    {6700,  869},   /* AIX {ssha1} */
+    {6400,  870},   /* AIX {ssha256} */
+    {6500,  871},   /* AIX {ssha512} */
+    {2400,  861},   /* Cisco-PIX MD5 */
+    {2410,  862},   /* Cisco-ASA MD5 */
+    {5700,  865},   /* Cisco-IOS type 4 (SHA256) */
+    {5720,  866},   /* Cisco-ISE (SHA256, binary salt) */
+    {9200,  529},   /* Cisco-IOS $8$ (PBKDF2-SHA256) */
+    {9300,  65535}, /* Cisco-IOS $9$ (scrypt) */
+    {501,   885},   /* Juniper IVE */
+    {15100, 65535}, /* Juniper/NetBSD sha1crypt */
+    {7000,  65535}, /* FortiGate (FortiOS) */
+    {5800,  867},   /* Samsung Android Password/PIN */
+    {13800, 65535}, /* Windows Phone 8+ */
+    {8100,  878},   /* Citrix NetScaler */
+    {8500,  881},   /* RACF */
+    {7200,  65535}, /* GRUB 2 */
+    {9900,  264},
+    {125,   65535}, /* ArubaOS */
+    {7700,  65535}, /* SAP CODVN B */
+    {7800,  65535}, /* SAP CODVN F/G */
+    {1030,  65535}, /* SAP CODVN H */
+    {8600,  882},   /* Lotus Notes/Domino 5 */
+    {8700,  883},   /* Lotus Notes/Domino 6 */
+    {9100,  65535}, /* Lotus Notes/Domino 8 */
+    {133,   858},   /* PeopleSoft */
+    {141,   859},   /* Episerver 6.x < .NET 4 */
+    {13500, 65535}, /* PeopleSoft PS_TOKEN */
+    {11600, 65535}, /* 7-Zip */
+    {12500, 65535}, /* RAR3-hp */
+    {13000, 65535}, /* RAR5 */
+    {13200, 65535}, /* AxCrypt */
+    {13300, 65535}, /* AxCrypt in-memory SHA1 */
+    {13600, 65535}, /* WinZip */
+    {14700, 65535}, /* iTunes backup < 10.0 */
+    {14800, 65535}, /* iTunes backup >= 10.0 */
+    {6211,  65535}, /* TrueCrypt */
+    {6212,  65535},
+    {6213,  65535},
+    {6221,  65535},
+    {6222,  65535},
+    {6223,  65535},
+    {6231,  65535},
+    {6232,  65535},
+    {6233,  65535},
+    {6241,  65535},
+    {6242,  65535},
+    {6243,  65535},
+    {8800,  65535}, /* Android FDE <= 4.3 */
+    {12900, 65535}, /* Android FDE (Samsung DEK) */
+    {12200, 65535}, /* eCryptfs */
+    {13711, 65535}, /* VeraCrypt */
+    {13712, 65535},
+    {13713, 65535},
+    {13721, 65535},
+    {13722, 65535},
+    {13723, 65535},
+    {13731, 65535},
+    {13732, 65535},
+    {13733, 65535},
+    {13741, 65535},
+    {13742, 65535},
+    {13743, 65535},
+    {13751, 65535},
+    {13752, 65535},
+    {13753, 65535},
+    {13761, 65535},
+    {13762, 65535},
+    {13763, 65535},
+    {14600, 65535}, /* LUKS */
+    {9700,  65535}, /* MS Office */
+    {9710,  65535},
+    {9720,  65535},
+    {9800,  65535},
+    {9810,  65535},
+    {9820,  65535},
+    {9400,  65535}, /* MS Office 2007 */
+    {9500,  65535}, /* MS Office 2010 */
+    {9600,  65535}, /* MS Office 2013 */
+    {10400, 65535}, /* PDF 1.1-1.3 */
+    {10410, 65535},
+    {10420, 65535},
+    {10500, 65535}, /* PDF 1.4-1.6 */
+    {10600, 65535}, /* PDF 1.7 Level 3 */
+    {10700, 65535}, /* PDF 1.7 Level 8 */
+    {9000,  65535}, /* Password Safe v2 */
+    {5200,  65535}, /* Password Safe v3 */
+    {6800,  65535}, /* LastPass */
+    {6600,  65535}, /* 1Password, agilekeychain */
+    {8200,  65535}, /* 1Password, cloudkeychain */
+    {11300, 65535}, /* Bitcoin/Litecoin wallet.dat */
+    {12700, 65535}, /* Blockchain, My Wallet */
+    {15200, 65535}, /* Blockchain, My Wallet, V2 */
+    {13400, 65535}, /* KeePass */
+    {15500, 65535}, /* JKS Java Key Store */
+    {15600, 65535}, /* Ethereum Wallet, PBKDF2-SHA256 */
+    {15700, 65535}, /* Ethereum Wallet, SCRYPT */
+    {11800, 428},   /* GOST R 34.11-2012 (Streebog) 512-bit */
+    {17300, 88},    /* SHA3-224 */
+    {17400, 89},    /* SHA3-256 */
+    {17500, 90},    /* SHA3-384 */
+    {17600, 91},    /* SHA3-512 */
+    {17700, 84},    /* Keccak-224 */
+    {17800, 85},    /* Keccak-256 */
+    {17900, 86},    /* Keccak-384 */
+    {18000, 87},    /* Keccak-512 */
+    {3500,  303},   /* md5(md5(md5($pass))) */
+    {4410,  555},   /* md5(sha1($pass).$salt) */
+    {4710,  587},   /* sha1(md5($pass).$salt) */
+    {18500, 287},   /* sha1(md5(md5($pass))) */
+    {20710, 382},   /* sha256(sha256($pass).$salt) */
+    {20720, 523},   /* sha256($salt.sha256($pass)) */
+    {25600, 451},   /* bcrypt(md5($pass)) */
+    {25800, 452},   /* bcrypt(sha1($pass)) */
+    {30600, 577},   /* bcrypt(sha256($pass)) */
+    {32410, 387},   /* sha512(sha512($pass).$salt) */
+    {32800, 188},   /* md5(sha1(md5($pass))) */
+    {34500, 766},   /* sha224(sha1($pass)) */
+    {34600, 29},    /* MD6-256 */
+    {6060,  211},   /* HMAC-RIPEMD160 (key = $salt) */
+    {30420, 36},    /* DANE RFC7929/RFC8162 SHA2-256 */
+    {34400, 9},     /* sha224(sha224($pass)) */
+    {2630,  373},   /* md5(md5($pass.$salt)) */
+    {3730,  864},   /* md5($salt1.strtoupper(md5($salt2.$pass))) */
+    {3610,  356},   /* md5(md5(md5($pass)).$salt) */
+    {4420,  443},   /* md5(sha1($pass.$salt)) */
+    {4510,  310},   /* sha1(sha1($pass).$salt) */
+    {4711,  308},   /* Huawei sha1(md5($pass).$salt) */
+    {20730, 413},   /* sha256(sha256($pass.$salt)) */
+    {20800, 164},   /* sha256(md5($pass)) */
+    {20900, 442},   /* md5(sha1($pass).md5($pass).sha1($pass)) */
+    {21000, 38},    /* BitShares sha512(sha512_bin($pass)) */
+    {21100, 469},   /* sha1(md5($pass.$salt)) */
+    {21200, 440},   /* md5(sha1($salt).md5($pass)) */
+    {21300, 528},   /* md5($salt.sha1($salt.$pass)) */
+    {21400, 36},    /* sha256(sha256_bin($pass)) */
+    {30700, 530},   /* Anope IRC Services (PBKDF2-SHA256) */
+    {32420, 510},   /* sha512(sha512_bin($pass).$salt) */
+    {33660, 213},   /* HMAC-RIPEMD320 (key = $salt) */
+    {70,    800},   /* md5(utf16le($pass)) */
+    {1470,  805},   /* sha256(utf16le($pass)) */
+    {1770,  808},   /* sha512(utf16le($pass)) */
+    {6050,  798},   /* HMAC-RIPEMD160 (key = $pass) */
+    {33650, 799},   /* HMAC-RIPEMD320 (key = $pass) */
+    {10810, 811},   /* sha384($pass.$salt) */
+    {10820, 812},   /* sha384($salt.$pass) */
+    {10870, 813},   /* sha384(utf16le($pass)) */
+    {10830, 814},   /* sha384(utf16le($pass).$salt) */
+    {10840, 815},   /* sha384($salt.utf16le($pass)) */
+    {33600, 816},   /* ripemd320($pass) */
+    {4430,  817},   /* md5(sha1($salt.$pass)) */
+    {33100, 818},   /* md5($salt.md5($pass).$salt) */
+    {31700, 819},   /* md5(md5(md5($pass).$salt).$pepper) */
+    {30500, 820},   /* md5(md5($salt).md5(md5($pass))) */
+    {21900, 821},   /* md5(md5($pass.$salt).$pepper) */
+    {21310, 822},   /* md5($salt.sha1($pepper.$pass)) */
+    {24300, 823},   /* sha1($salt.sha1($pass.$salt)) */
+    {29000, 824},   /* sha1($salt.sha1(utf16le($user):utf16le($pass))) */
+    {22300, 825},   /* sha256($salt.$pass.$salt) */
+    {21420, 826},   /* sha256($salt.sha256_raw($pass)) */
+    {32600, 827},   /* whirlpool($salt.$pass.$salt) */
+    {33300, 828},   /* HMAC-BLAKE2S */
+    {34200, 829},   /* MurmurHash64A */
+    {34201, 830},   /* MurmurHash64A (seed=0) */
+    {1310,  831},   /* sha224($pass.$salt) */
+    {1320,  832},   /* sha224($salt.$pass) */
+    {11750, 837},   /* HMAC-Streebog-256 (key = $pass) */
+    {11760, 838},   /* HMAC-Streebog-256 (key = $salt) */
+    {11850, 839},   /* HMAC-Streebog-512 (key = $pass) */
+    {11860, 840},   /* HMAC-Streebog-512 (key = $salt) */
+    {31000, 844},   /* BLAKE2s-256 */
+    {34800, 845},   /* BLAKE2b-256 */
+    {34810, 846},   /* BLAKE2b-256($pass.$salt) */
+    {34820, 847},   /* BLAKE2b-256($salt.$pass) */
+    {65535, 65535}  /* EOF */
 };
 
 static int Numtypes;                    /* set from Types[] NULL terminator */
@@ -10614,42 +10934,56 @@ static int parse_mode_spec(const char *spec)
             continue;
         }
 
-        if (*p != 'e' && *p != 'E') {
-            fprintf(stderr, "hashpipe: -m: expected 'e' or 'auto' at '%s'\n", p);
-            free(list);
-            return -1;
-        }
-        p++;
-
-        if (!isdigit((unsigned char)*p)) {
-            fprintf(stderr, "hashpipe: -m: expected number at '%s'\n", p);
-            free(list);
-            return -1;
-        }
-        lo = atoi(p);
-        while (isdigit((unsigned char)*p)) p++;
-
-        if (*p == '-') {
+        /* Bare number = hashcat mode; eN = internal index */
+        if (*p == 'e' || *p == 'E') {
             p++;
-            if (*p == 'e' || *p == 'E') p++;
+
             if (!isdigit((unsigned char)*p)) {
-                fprintf(stderr, "hashpipe: -m: expected number after '-' at '%s'\n", p);
+                fprintf(stderr, "hashpipe: -m: expected number at '%s'\n", p);
                 free(list);
                 return -1;
             }
-            hi = atoi(p);
+            lo = atoi(p);
             while (isdigit((unsigned char)*p)) p++;
-        } else {
-            hi = lo;
-        }
 
-        if (lo < 0 || hi < 0 || lo >= Numtypes || hi >= Numtypes) {
-            fprintf(stderr, "hashpipe: -m: index out of range (0-%d): e%d-e%d\n",
-                Numtypes - 1, lo, hi);
+            if (*p == '-') {
+                p++;
+                if (*p == 'e' || *p == 'E') p++;
+                if (!isdigit((unsigned char)*p)) {
+                    fprintf(stderr, "hashpipe: -m: expected number after '-' at '%s'\n", p);
+                    free(list);
+                    return -1;
+                }
+                hi = atoi(p);
+                while (isdigit((unsigned char)*p)) p++;
+            } else {
+                hi = lo;
+            }
+
+            if (lo < 0 || hi < 0 || lo >= Numtypes || hi >= Numtypes) {
+                fprintf(stderr, "hashpipe: -m: index out of range (0-%d): e%d-e%d\n",
+                    Numtypes - 1, lo, hi);
+                free(list);
+                return -1;
+            }
+            if (lo > hi) { int t = lo; lo = hi; hi = t; }
+        } else if (isdigit((unsigned char)*p)) {
+            /* Hashcat mode number */
+            int hcmode = atoi(p), x;
+            while (isdigit((unsigned char)*p)) p++;
+            for (x = 0; Maphashcat[x].hc != 65535; x++)
+                if (hcmode == Maphashcat[x].hc) break;
+            if (Maphashcat[x].mdx == 65535) {
+                fprintf(stderr, "hashpipe: -m: unknown or unsupported hashcat mode %d\n", hcmode);
+                free(list);
+                return -1;
+            }
+            lo = hi = Maphashcat[x].mdx;
+        } else {
+            fprintf(stderr, "hashpipe: -m: expected 'e', number, or 'auto' at '%s'\n", p);
             free(list);
             return -1;
         }
-        if (lo > hi) { int t = lo; lo = hi; hi = t; }
 
         for (j = lo; j <= hi; j++) {
             /* skip duplicates */
@@ -10867,7 +11201,8 @@ static void usage(int brief)
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
         "  -q N   Iteration step size (reserved, default: 128)\n"
-        "  -m S   Only try types in S (e.g., -m e1,e8); add 'auto' to fallback\n"
+        "  -m S   Only try types in S (e.g., -m e1,e8,1000); add 'auto' to fallback\n"
+        "         Bare numbers are hashcat modes; eN selects internal index\n"
         "  -o F   Output verified results to file (default: stdout)\n"
         "  -e F   Output unresolved lines to file (default: stderr)\n"
         "  -b S   Benchmark selected types (e.g., -b e1-10,e15)\n"
@@ -10881,12 +11216,12 @@ static void usage(int brief)
     );
 
     if (!brief && Hashtypes) {
-        int i;
-        fprintf(stderr, "\n%-10s%-10s%s\n", "Internal", "Flags", "Hash name");
+        int i, val;
+        fprintf(stderr, "\n%-10s%-10s%-30s%s\n", "Internal", "Flags", "Hash name", "hashcat -m");
         for (i = 0; i < Numtypes; i++) {
             struct hashtype *ht = &Hashtypes[i];
-            char flags[16];
-            int fp = 0;
+            char flags[16], hcbuf[64];
+            int fp = 0, hci = 0;
 
             if (!ht->name) continue;
             if (!ht->compute && !ht->verify && ht->nchain == 0) continue;
@@ -10900,7 +11235,14 @@ static void usage(int brief)
             if (fp == 0) flags[fp++] = '-';
             flags[fp] = '\0';
 
-            fprintf(stderr, "e%-9d%-10s%s\n", i, flags, ht->name);
+            for (val = 0; Maphashcat[val].hc != 65535; val++) {
+                if (Maphashcat[val].mdx == i) {
+                    if (hci) hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, ",");
+                    hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, "%d", Maphashcat[val].hc);
+                }
+            }
+            fprintf(stderr, "e%-9d%-10s%-30s%s\n", i, flags, ht->name,
+                hci ? hcbuf : "n/a");
         }
         fprintf(stderr, "\nFlags: s=salted u=UC c=composed n=NTLM v=non-hex V=verify\n");
     }
