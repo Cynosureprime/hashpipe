@@ -16,18 +16,25 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
-| `-t N` | Thread count (default: number of CPUs) |
-| `-i N` | Max iteration count for hard pass (default: 128) |
-| `-q N` | Maximum internal hash iteration (default: 128) |
-| `-m S` | Only try types in S (e.g., `-m e1,e8`); add `auto` to fallback to auto-detect |
-| `-o F` | Output verified results to file (default: stdout) |
-| `-e F` | Output unresolved lines to file (default: stderr) |
-| `-b S` | Benchmark selected types (e.g., `-b e1-e10,e15`) |
-| `-B` | Benchmark all registered types |
-| `-V` | Print version and exit |
-| `-h` | Print help and list all supported hash types |
+**`-t N`** — Thread count (default: number of CPUs)
+
+**`-i N`** — Max iteration count for hard pass (default: 128)
+
+**`-q N`** — Maximum internal hash iteration (default: 128)
+
+**`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect
+
+**`-o F`** — Output verified results to file (default: stdout)
+
+**`-e F`** — Output unresolved lines to file (default: stderr)
+
+**`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
+
+**`-B`** — Benchmark all registered types
+
+**`-V`** — Print version and exit
+
+**`-h`** — Print help and list all supported hash types
 
 ### Input Format
 
@@ -278,17 +285,30 @@ The Makefile detects the build platform automatically.  Tested on:
 - Linux ppc64le (PowerPC 8)
 - FreeBSD 13.2 x86\_64 (uses gmake)
 
-## Type Indices
+## Type Indices and Hashcat Modes
 
-hashpipe uses the same type index numbering as mdxfind. The `e` prefix distinguishes internal indices from hashcat mode numbers. When using `-m`, always use the `e` prefix:
+hashpipe uses the same type index numbering as mdxfind. The `-m` option accepts both internal indices (with `e` prefix) and hashcat mode numbers (bare numbers):
 
 ```bash
-# Correct: internal index
+# Internal indices
 hashpipe -m e1,e8,e450 potfile.txt
 
-# Multiple ranges
-hashpipe -m e1-e12,e369,e450-e461 potfile.txt
+# Hashcat mode numbers
+hashpipe -m 0 potfile.txt          # MD5 (hashcat mode 0)
+hashpipe -m 1000 potfile.txt       # NTLM (hashcat mode 1000)
+hashpipe -m 3200 potfile.txt       # bcrypt (hashcat mode 3200)
+
+# Mixed: hashcat modes and internal indices together
+hashpipe -m 1000,e1,3200 potfile.txt
+
+# Ranges (internal indices only) with hashcat modes
+hashpipe -m e1-e12,1000,3200 potfile.txt
+
+# With auto-detect fallback
+hashpipe -m 0,1000,auto potfile.txt
 ```
+
+Run `hashpipe -h` to see the full type list with hashcat mode mappings.
 
 ## Acknowledgments
 
