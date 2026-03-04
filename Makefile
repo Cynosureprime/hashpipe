@@ -59,12 +59,18 @@ LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
 YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
                 yescrypt/sha256.o yescrypt/insecure_memzero.o
 
-OBJS = hashpipe.o yarn.o
+OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o
 
 all: hashpipe
 
 yarn.o: yarn.c yarn.h
 	$(CC) $(CFLAGS) -c yarn.c
+
+myprogress.o: myprogress.c
+	$(CC) $(CFLAGS) -c myprogress.c
+
+crypt-des.o: crypt-des.c
+	$(CC) $(CFLAGS) -c crypt-des.c
 
 hashpipe.o: hashpipe.c
 	$(CC) $(CFLAGS) -c hashpipe.c
