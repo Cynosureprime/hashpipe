@@ -254,7 +254,6 @@ docker run -v ${PWD}:/data -it --rm csp/hashpipe -m auto test.txt
 MD5x01 ce114e4501d2f4e2dcea3e17b546f339:This is a test
 ```
 
-
 ### Dependencies
 
 hashpipe requires the following static libraries:
