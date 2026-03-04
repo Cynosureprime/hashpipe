@@ -16,18 +16,25 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-
 
 ### Options
 
-| Flag    | Description |
-|---------|-------------|
-| `-t N` | Thread count (default: number of CPUs) |
-| `-i N` | Max iteration count for hard pass (default: 128) |
-| `-q N` | Maximum internal hash iteration (default: 128) |
-| `-m S` | Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect |
-| `-o F` | Output verified results to file (default: stdout) |
-| `-e F` | Output unresolved lines to file (default: stderr) |
-| `-b S` | Benchmark selected types (e.g., `-b e1-e10,e15`) |
-| `-B` | Benchmark all registered types |
-| `-V` | Print version and exit |
-| `-h` | Print help and list all supported hash types |
+**`-t N`** — Thread count (default: number of CPUs)
+
+**`-i N`** — Max iteration count for hard pass (default: 128)
+
+**`-q N`** — Maximum internal hash iteration (default: 128)
+
+**`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect
+
+**`-o F`** — Output verified results to file (default: stdout)
+
+**`-e F`** — Output unresolved lines to file (default: stderr)
+
+**`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
+
+**`-B`** — Benchmark all registered types
+
+**`-V`** — Print version and exit
+
+**`-h`** — Print help and list all supported hash types
 
 ### Input Format
 
