@@ -21,7 +21,6 @@ WORKDIR /src
 RUN git clone https://github.com/Cynosureprime/hashpipe.git /src/hashpipe
 
 WORKDIR /src/hashpipe
-COPY Makefile .
 RUN make deps && make
 
 # RUNTIME LAYER
