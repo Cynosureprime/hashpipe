@@ -16,8 +16,8 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-
 
 ### Options
 
-| Flag | Description |
-|------|-------------|
+| Flag    | Description |
+|---------|-------------|
 | `-t N` | Thread count (default: number of CPUs) |
 | `-i N` | Max iteration count for hard pass (default: 128) |
 | `-q N` | Maximum internal hash iteration (default: 128) |
