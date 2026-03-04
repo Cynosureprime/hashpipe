@@ -15002,6 +15002,18 @@ static void worker(void *dummy)
         if (b->count < 0) {
             /* Poison pill */
             free_batch(b);
+            if (iconv_utf16le != (iconv_t)-1) {
+                iconv_close(iconv_utf16le);
+                iconv_utf16le = (iconv_t)-1;
+            }
+            if (iconv_utf16be != (iconv_t)-1) {
+                iconv_close(iconv_utf16be);
+                iconv_utf16be = (iconv_t)-1;
+            }
+            if (tls_desinfo) {
+                free(tls_desinfo);
+                tls_desinfo = NULL;
+            }
             return;
         }
 
@@ -15748,6 +15760,18 @@ static void bench_worker(void *dummy)
         }
         release(BenchLock);
     }
+    if (iconv_utf16le != (iconv_t)-1) {
+        iconv_close(iconv_utf16le);
+        iconv_utf16le = (iconv_t)-1;
+    }
+    if (iconv_utf16be != (iconv_t)-1) {
+        iconv_close(iconv_utf16be);
+        iconv_utf16be = (iconv_t)-1;
+    }
+    if (tls_desinfo) {
+        free(tls_desinfo);
+        tls_desinfo = NULL;
+    }
     free(ws->testvec);
     free(ws);
 }
@@ -16351,10 +16375,26 @@ int main(int argc, char **argv)
     while (FreeHead) {
         struct batch *b = FreeHead;
         FreeHead = b->next;
+        if (b->ws) {
+            free(b->ws->testvec);
+            free(b->ws);
+        }
         free(b);
     }
 
     free(ModeList);
+
+    int h;
+    for (h = 0; h < MAX_HASHLEN; h++) {
+        free(Unsalted[h].list);
+        free(Salted[h].list);
+        free(Composed[h].list);
+    }
+
+    Word_t Rc;
+    JSLFA(Rc, TypenameJ);
+
+    free(Hashtypes);
 
     return 0;
 }
