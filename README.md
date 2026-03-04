@@ -125,7 +125,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 794 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 880 pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -146,11 +146,11 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 794 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 880 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## Supported Hash Types
 
-hashpipe supports 794 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 880 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -194,7 +194,37 @@ hashpipe supports 794 hash types.  Run `hashpipe -h` for the full list.
 | e497 | MD4UTF16MD5 | `md4(utf16le(hex(md5($pass))))` |
 | e368 | MD5NTLM | `md5(hex(md4(utf16le($pass))))` |
 | e251 | SHA256SHA1 | `sha256(hex(sha1($pass)))` |
-| e786 | NTLMH | `md4(utf16le(hex(md4(utf16le($pass)))))` |
+| e786 | NTLMH | `md4(utf16le($pass))` (dual-mode, see note below) |
+
+### Crypt types
+
+| Index | Type | Algorithm |
+|-------|------|-----------|
+| e500 | DESCRYPT | `crypt($pass, $salt)` (DES) |
+| e511 | MD5CRYPT | `$1$$` md5crypt |
+| e512 | SHA256CRYPT | `$5$$` sha256crypt |
+| e513 | SHA512CRYPT | `$6$$` sha512crypt |
+| e577 | BCRYPT256 | `$2k$$` HMAC-SHA256 + bcrypt |
+| e884 | SCRYPT | `$7$$` scrypt |
+
+### PBKDF2 / KDF types
+
+| Index | Type | Algorithm |
+|-------|------|-----------|
+| e529 | CISCO8 | `$8$` PBKDF2-SHA256 20000 rounds |
+| e530 | PBKDF2-SHA256 | PBKDF2-HMAC-SHA256 |
+| e531 | PBKDF2-MD5 | PBKDF2-HMAC-MD5 |
+| e532 | PBKDF2-SHA1 | PBKDF2-HMAC-SHA1 |
+| e533 | PBKDF2-SHA512 | PBKDF2-HMAC-SHA512 |
+| e534 | PKCS5S2 | `{PKCS5S2}` PBKDF2-SHA1 10000 rounds |
+
+### LDAP SSHA types
+
+| Index | Type | Algorithm |
+|-------|------|-----------|
+| e833 | SSHA1BASE64 | `{SSHA}base64(sha1($pass.$salt).$salt)` |
+| e835 | SSHA256BASE64 | `{SSHA256}base64(sha256($pass.$salt).$salt)` |
+| e836 | SSHA512BASE64 | `{SSHA512}base64(sha512($pass.$salt).$salt)` |
 
 ### Non-hex / verify types
 
@@ -206,6 +236,25 @@ hashpipe supports 794 hash types.  Run `hashpipe -h` for the full list.
 | e455 | PHPBB3 | `phpbb3($pass)` |
 | e457 | APACHE-SHA | `{SHA}base64(sha1($pass))` |
 | e461 | APR1 | `apr1($pass)` |
+| e876 | DRUPAL7 | `$S$` SHA512 iterated |
+| e861 | CISCOPIX | Cisco PIX `md5($pass)` phpitoa64 |
+| e862 | CISCOASA | Cisco ASA `md5($pass.$salt)` phpitoa64 |
+
+### Note on NTLMH (e786)
+
+NTLM hashing requires converting the password to UTF-16LE before computing MD4.  For pure ASCII input, every tool agrees: each byte is zero-extended to a 16-bit value.  For non-ASCII input, however, hashcat's zero-extension mode does not perform proper UTF-8 → UTF-16LE conversion — it simply widens each raw byte to 16 bits.  The resulting hash is not a valid Microsoft NTLM hash and could never be used for Windows authentication, but it *is* what hashcat computes and stores in potfiles.
+
+NTLMH (e786) accepts both interpretations:
+
+1. **Proper UTF-8 → UTF-16LE** (via iconv with `//IGNORE`): invalid UTF-8 sequences are silently discarded, and only valid characters are converted.
+2. **Blind zero-extension** (hashcat-compatible): every input byte is widened to 16 bits regardless of UTF-8 validity.
+
+NTLM (e369) uses only the proper iconv path, since mdxfind always emits valid UTF-8 in its output for e369.
+
+Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces two NTLMH hashes:
+
+- `b3f4b4d05705228f87ed95e91e25bc70` — iconv discards `c0` and `ff`, converts remaining `ee ba be`
+- `4b44f50004711067b1eab173dbef5ef8` — all 5 bytes blindly zero-extended (hashcat mode, not a valid NTLM hash)
 
 ### Additional algorithm families
 
@@ -213,7 +262,7 @@ hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, H
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 794 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all 880 registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10
@@ -284,8 +333,10 @@ The Makefile detects the build platform automatically.  Tested on:
 
 - macOS x86\_64 and arm64 (requires libiconv from MacPorts)
 - Linux x86\_64 (Ubuntu 18.04, 22.04)
+- Linux i386 (32-bit)
 - Linux ppc64le (PowerPC 8)
 - FreeBSD 13.2 x86\_64 (uses gmake)
+- Windows x86, x64, and ARM64 (cross-compiled via mingw-w64 / llvm-mingw)
 
 ## Type Indices and Hashcat Modes
 

@@ -8,13 +8,17 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.22 2026/03/04 05:17:11 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.24 2026/03/04 14:57:16 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include <sys/time.h>
 #include <iconv.h>
 #include <openssl/sha.h>
@@ -1526,15 +1530,16 @@ static void compute_md4(const unsigned char *pass, int passlen,
 static __thread iconv_t iconv_utf16le = (iconv_t)-1;
 static __thread iconv_t iconv_utf16be = (iconv_t)-1;
 
-/* iconv-based UTF-8 → UTF-16LE conversion. Returns byte count of UTF-16LE output. */
+/* iconv-based UTF-8 → UTF-16LE conversion. Returns byte count of UTF-16LE output.
+ * Uses //IGNORE to silently discard invalid UTF-8 sequences. */
 static int utf8_to_utf16le(const unsigned char *src, int srclen,
     unsigned char *dst, int dstmax)
 {
     char *inbuf, *outbuf;
-    size_t inleft, outleft, ret;
+    size_t inleft, outleft;
 
     if (iconv_utf16le == (iconv_t)-1) {
-        iconv_utf16le = iconv_open("UTF-16LE", "UTF-8");
+        iconv_utf16le = iconv_open("UTF-16LE//IGNORE", "UTF-8");
         if (iconv_utf16le == (iconv_t)-1) return 0;
     }
 
@@ -1543,11 +1548,7 @@ static int utf8_to_utf16le(const unsigned char *src, int srclen,
     outbuf = (char *)dst;
     outleft = dstmax;
 
-    ret = iconv(iconv_utf16le, &inbuf, &inleft, &outbuf, &outleft);
-    if (ret == (size_t)-1 && outleft == (size_t)dstmax) {
-        iconv(iconv_utf16le, NULL, NULL, NULL, NULL);
-        return 0;
-    }
+    iconv(iconv_utf16le, &inbuf, &inleft, &outbuf, &outleft);
     iconv(iconv_utf16le, NULL, NULL, NULL, NULL);
     return dstmax - (int)outleft;
 }
@@ -5419,9 +5420,9 @@ static int base64_decode(const char *in, int inlen, unsigned char *out, int outm
         unsigned char c = d[(unsigned char)in[i+2]], e = d[(unsigned char)in[i+3]];
         if (a > 63 || b > 63) break;
         out[o++] = (a << 2) | (b >> 4);
-        if (c > 63) break;
+        if (c > 63) { i += 4; break; }
         if (o < outmax) out[o++] = (b << 4) | (c >> 2);
-        if (e > 63) break;
+        if (e > 63) { i += 4; break; }
         if (o < outmax) out[o++] = (c << 6) | e;
     }
     /* Handle trailing 2-3 chars (no padding) */
@@ -5536,13 +5537,39 @@ static void compute_skype(const unsigned char *pass, int passlen, const unsigned
     rhash_final(ctx, dest); rhash_free(ctx);
 }
 
-/* NTLMH — rhash_msg(RHASH_MD5, NTLM(pass)) (raw binary NTLM fed to MD5) */
-static void compute_ntlmh(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+static int hex2bin(const char *hex, int hexlen, unsigned char *bin);
+
+/* NTLMH — MD4(utf16le(pass)) with two conversion strategies:
+ * 1. iconv UTF-8→UTF-16LE with //IGNORE (silently discard invalid bytes)
+ * 2. Blind zero-extension: each input byte → (byte, 0x00)
+ * Both are valid; hashcat uses zero-extension, mdxfind tries both. */
+static int verify_ntlmh(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
 {
-    unsigned char ntlm[16];
-    (void)salt; (void)saltlen;
-    compute_ntlm(pass, passlen, NULL, 0, ntlm);
-    rhash_msg(RHASH_MD5, ntlm, 16, dest);
+    unsigned char target[16], result[16], u16buf[MAXLINE * 2];
+    int hlen, u16len, i;
+
+    /* Find the colon separating hash from password */
+    hlen = hashlen;
+    if (hlen != 32) return 0;
+    if (!hex2bin(hashstr, hlen, target)) return 0;
+
+    /* Path 1: iconv //IGNORE — proper UTF-8→UTF-16LE, bad bytes discarded */
+    u16len = utf8_to_utf16le(pass, passlen, u16buf, sizeof(u16buf));
+    if (u16len > 0) {
+        rhash_msg(RHASH_MD4, u16buf, u16len, result);
+        if (memcmp(result, target, 16) == 0) return 1;
+    }
+
+    /* Path 2: blind zero-extension (hashcat mode) */
+    for (i = 0; i < passlen && i * 2 + 1 < (int)sizeof(u16buf); i++) {
+        u16buf[i * 2]     = pass[i];
+        u16buf[i * 2 + 1] = 0;
+    }
+    rhash_msg(RHASH_MD4, u16buf, passlen * 2, result);
+    if (memcmp(result, target, 16) == 0) return 1;
+
+    return 0;
 }
 
 /* LM hash — DES-based, needs special handling */
@@ -9650,6 +9677,2746 @@ static int verify_scrypt(const char *hashstr, int hashlen,
     return memcmp(b64out, f[5], b64len) == 0;
 }
 
+/* ================================================================= */
+/* Phase 1: Crypt-based verify functions                             */
+/* ================================================================= */
+
+/* Desinfo struct for bsd_crypt_des (from crypt-des.c) */
+struct Desinfo {
+    unsigned int saltbits, old_salt;
+    unsigned int *bits28, *bits24;
+    unsigned int old_rawkey0, old_rawkey1;
+    int des_initialised;
+    unsigned char inv_key_perm[64], inv_comp_perm[56];
+    unsigned char u_sbox[8][64], un_pbox[32];
+    unsigned char init_perm[64], final_perm[64];
+    unsigned int en_keysl[16], en_keysr[16];
+    unsigned int de_keysl[16], de_keysr[16];
+    unsigned char m_sbox[4][4096];
+    unsigned int psbox[4][256];
+    unsigned int ip_maskl[8][256], ip_maskr[8][256];
+    unsigned int fp_maskl[8][256], fp_maskr[8][256];
+    unsigned int key_perm_maskl[8][128], key_perm_maskr[8][128];
+    unsigned int comp_maskl[8][128], comp_maskr[8][128];
+};
+extern char *bsd_crypt_des(const char *key, const char *setting,
+                           char *output, struct Desinfo *ldes);
+
+static __thread struct Desinfo *tls_desinfo;
+
+static struct Desinfo *get_desinfo(void) {
+    if (!tls_desinfo) {
+        tls_desinfo = calloc(1, sizeof(struct Desinfo));
+    }
+    return tls_desinfo;
+}
+
+/* DESCRYPT: DES crypt(pass, 2-char-salt) — "SShashhashhas:password" format
+ * hashstr = 13-char DES crypt output (salt is first 2 chars) */
+static int verify_descrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char passbuf[256], result[14];
+    struct Desinfo *di;
+    char *s;
+    int plen;
+
+    if (hashlen != 13) return 0;
+    if (passlen >= (int)sizeof(passbuf)) return 0;
+    /* DES crypt only uses first 8 chars */
+    plen = passlen > 8 ? 8 : passlen;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, hashstr, result, di);
+    if (!s) return 0;
+    return strncmp(s, hashstr, 13) == 0;
+}
+
+/* MD5DESCRYPT: MD5(descrypt(pass, salt)) — "32hex:SS:password"
+ * hashstr = 32hex ":" 2-char-salt */
+static int verify_md5descrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char passbuf[256], desout[14];
+    unsigned char md5[16];
+    char computed[33];
+    const char *colon;
+    struct Desinfo *di;
+    char *s;
+    int plen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    plen = passlen > 8 ? 8 : passlen;
+    if (plen >= (int)sizeof(passbuf)) return 0;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, colon + 1, desout, di);
+    if (!s) return 0;
+    rhash_msg(RHASH_MD5, s, strlen(s), md5);
+    prmd5(md5, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* MD4DESCRYPT: MD4(descrypt(pass, salt)) — "32hex:SS:password" */
+static int verify_md4descrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char passbuf[256], desout[14];
+    unsigned char md4[16];
+    char computed[33];
+    const char *colon;
+    struct Desinfo *di;
+    char *s;
+    int plen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    plen = passlen > 8 ? 8 : passlen;
+    if (plen >= (int)sizeof(passbuf)) return 0;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, colon + 1, desout, di);
+    if (!s) return 0;
+    MD4((unsigned char *)s, strlen(s), md4);
+    prmd5(md4, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* SHA1DESCRYPT: SHA1(descrypt(pass, salt)) — "40hex:SS:password" */
+static int verify_sha1descrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char passbuf[256], desout[14];
+    unsigned char sha1[20];
+    char computed[41];
+    const char *colon;
+    struct Desinfo *di;
+    char *s;
+    int plen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    plen = passlen > 8 ? 8 : passlen;
+    if (plen >= (int)sizeof(passbuf)) return 0;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, colon + 1, desout, di);
+    if (!s) return 0;
+    SHA1((unsigned char *)s, strlen(s), sha1);
+    prmd5(sha1, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* MD4UTF16DESCRYPT: NTLM(descrypt(pass, salt)) — "32hex:SS:password" */
+static int verify_md4utf16descrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char passbuf[256], desout[14];
+    unsigned char md4[16], utf16[256];
+    char computed[33];
+    const char *colon;
+    struct Desinfo *di;
+    char *s;
+    int plen, u16len;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    plen = passlen > 8 ? 8 : passlen;
+    if (plen >= (int)sizeof(passbuf)) return 0;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, colon + 1, desout, di);
+    if (!s) return 0;
+    u16len = utf8_to_utf16le((unsigned char *)s, strlen(s), utf16, sizeof(utf16));
+    if (u16len <= 0) return 0;
+    MD4(utf16, u16len, md4);
+    prmd5(md4, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* md5crypt core — used by verify_md5crypt, verify_juniperive */
+static int do_md5crypt(const char *pass, int passlen,
+    const char *salt, int saltlen, const char *magic, int magiclen,
+    char *result, int resultmax)
+{
+    unsigned char md5[16], alt[16];
+    rhash ctx, altctx;
+    int i, plen = passlen;
+    static const char itoa64[] =
+        "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    /* Step 1: md5(pass + magic + salt) */
+    ctx = rhash_init(RHASH_MD5);
+    rhash_update(ctx, pass, plen);
+    rhash_update(ctx, magic, magiclen);
+    rhash_update(ctx, salt, saltlen);
+
+    /* Step 2: alt = md5(pass + salt + pass) */
+    altctx = rhash_init(RHASH_MD5);
+    rhash_update(altctx, pass, plen);
+    rhash_update(altctx, salt, saltlen);
+    rhash_update(altctx, pass, plen);
+    rhash_final(altctx, alt); rhash_free(altctx);
+
+    for (i = plen; i > 0; i -= 16)
+        rhash_update(ctx, alt, (i > 16) ? 16 : i);
+
+    for (i = plen; i > 0; i >>= 1) {
+        if (i & 1)
+            rhash_update(ctx, "", 1);
+        else
+            rhash_update(ctx, pass, 1);
+    }
+    rhash_final(ctx, md5); rhash_free(ctx);
+
+    /* 1000 iterations */
+    for (i = 0; i < 1000; i++) {
+        ctx = rhash_init(RHASH_MD5);
+        if (i & 1) rhash_update(ctx, pass, plen);
+        else rhash_update(ctx, md5, 16);
+        if (i % 3) rhash_update(ctx, salt, saltlen);
+        if (i % 7) rhash_update(ctx, pass, plen);
+        if (i & 1) rhash_update(ctx, md5, 16);
+        else rhash_update(ctx, pass, plen);
+        rhash_final(ctx, md5); rhash_free(ctx);
+    }
+
+    /* Encode */
+    { static const unsigned char grp[][3] = {
+          {0,6,12}, {1,7,13}, {2,8,14}, {3,9,15}, {4,10,5}
+      };
+      char enc[23];
+      int eidx = 0, g;
+      unsigned int v;
+      for (g = 0; g < 5; g++) {
+          v = ((unsigned int)md5[grp[g][0]] << 16)
+            | ((unsigned int)md5[grp[g][1]] << 8)
+            | md5[grp[g][2]];
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+          enc[eidx++] = itoa64[v & 0x3f];
+      }
+      v = md5[11];
+      enc[eidx++] = itoa64[v & 0x3f]; v >>= 6;
+      enc[eidx++] = itoa64[v & 0x3f];
+      enc[eidx] = 0;
+      return snprintf(result, resultmax, "%s%.*s$%s", magic, saltlen, salt, enc);
+    }
+}
+
+/* MD5CRYPT: $1$salt$hash */
+static int verify_md5crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    const char *salt;
+    int saltlen;
+    char result[128];
+
+    if (hashlen < 10 || memcmp(hashstr, "$1$", 3) != 0) return 0;
+    salt = hashstr + 3;
+    for (saltlen = 0; saltlen < 8 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;
+
+    do_md5crypt((const char *)pass, passlen, salt, saltlen, "$1$", 3, result, sizeof(result));
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* JUNIPERIVE: same $1$ md5crypt format (AES-decrypted salt already extracted) */
+/* verify_juniperive = verify_md5crypt (alias registered below) */
+
+/* sha256crypt core */
+static int do_sha256crypt(const char *pass, int passlen,
+    const unsigned char *salt, int saltlen, int rounds,
+    char *result, int resultmax)
+{
+    unsigned char digest[32], P[256], S[32], alt[32];
+    SHA256_CTX ctx;
+    int x, rnd;
+
+    /* B = sha256(pass + salt + pass) */
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, pass, passlen);
+    SHA256_Update(&ctx, salt, saltlen);
+    SHA256_Update(&ctx, pass, passlen);
+    SHA256_Final(alt, &ctx);
+
+    /* A = sha256(pass + salt + alt[0..passlen-1]) */
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, pass, passlen);
+    SHA256_Update(&ctx, salt, saltlen);
+    for (x = passlen; x > 32; x -= 32)
+        SHA256_Update(&ctx, alt, 32);
+    SHA256_Update(&ctx, alt, x);
+    for (x = passlen; x != 0; x >>= 1) {
+        if (x & 1) SHA256_Update(&ctx, alt, 32);
+        else SHA256_Update(&ctx, pass, passlen);
+    }
+    SHA256_Final(digest, &ctx);
+
+    /* DP = sha256(pass * passlen) */
+    SHA256_Init(&ctx);
+    for (x = 0; x < passlen; x++)
+        SHA256_Update(&ctx, pass, passlen);
+    SHA256_Final(alt, &ctx);
+    memset(P, 0, sizeof(P));
+    for (x = 0; x < passlen; x += 32)
+        memcpy(P + x, alt, (passlen - x > 32) ? 32 : (passlen - x));
+
+    /* DS = sha256(salt * (16+digest[0])) */
+    SHA256_Init(&ctx);
+    for (x = 0; x < (int)(16 + digest[0]); x++)
+        SHA256_Update(&ctx, salt, saltlen);
+    SHA256_Final(alt, &ctx);
+    for (x = 0; x < saltlen; x += 32)
+        memcpy(S + x, alt, (saltlen - x > 32) ? 32 : (saltlen - x));
+
+    for (rnd = 0; rnd < rounds; rnd++) {
+        SHA256_Init(&ctx);
+        if (rnd & 1) SHA256_Update(&ctx, P, passlen);
+        else SHA256_Update(&ctx, digest, 32);
+        if (rnd % 3) SHA256_Update(&ctx, S, saltlen);
+        if (rnd % 7) SHA256_Update(&ctx, P, passlen);
+        if (rnd & 1) SHA256_Update(&ctx, digest, 32);
+        else SHA256_Update(&ctx, P, passlen);
+        SHA256_Final(digest, &ctx);
+    }
+
+    /* Encode */
+    { static const int t[][3] = {
+          {0,10,20},{21,1,11},{12,22,2},{3,13,23},{24,4,14},
+          {15,25,5},{6,16,26},{27,7,17},{18,28,8},{9,19,29},{-1,30,31}
+      };
+      char enc[48];
+      int ei = 0, ti;
+      unsigned int v;
+      for (ti = 0; ti < 10; ti++) {
+          v = ((unsigned int)digest[t[ti][0]] << 16) |
+              ((unsigned int)digest[t[ti][1]] << 8) | digest[t[ti][2]];
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f];
+      }
+      v = ((unsigned int)digest[31] << 8) | digest[30];
+      enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+      enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+      enc[ei++] = phpitoa64[v & 0x3f];
+      enc[ei] = 0;
+      if (rounds == 5000)
+          return snprintf(result, resultmax, "$5$%.*s$%s", saltlen, salt, enc);
+      else
+          return snprintf(result, resultmax, "$5$rounds=%d$%.*s$%s", rounds, saltlen, salt, enc);
+    }
+}
+
+/* SHA256CRYPT: $5$[rounds=N$]salt$hash */
+static int verify_sha256crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    const char *p, *salt;
+    int saltlen, rounds = 5000;
+    char result[256];
+
+    if (hashlen < 15 || memcmp(hashstr, "$5$", 3) != 0) return 0;
+    p = hashstr + 3;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        p = strchr(p, '$');
+        if (!p) return 0;
+        p++;
+    }
+    salt = p;
+    for (saltlen = 0; saltlen < 16 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;
+
+    do_sha256crypt((const char *)pass, passlen,
+        (const unsigned char *)salt, saltlen, rounds, result, sizeof(result));
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* sha512crypt core */
+static int do_sha512crypt(const char *pass, int passlen,
+    const unsigned char *salt, int saltlen, int rounds,
+    char *result, int resultmax)
+{
+    unsigned char digest[64], P[256], S[64], alt[64];
+    SHA512_CTX ctx;
+    int x, rnd;
+
+    SHA512_Init(&ctx);
+    SHA512_Update(&ctx, pass, passlen);
+    SHA512_Update(&ctx, salt, saltlen);
+    SHA512_Update(&ctx, pass, passlen);
+    SHA512_Final(alt, &ctx);
+
+    SHA512_Init(&ctx);
+    SHA512_Update(&ctx, pass, passlen);
+    SHA512_Update(&ctx, salt, saltlen);
+    for (x = passlen; x > 64; x -= 64)
+        SHA512_Update(&ctx, alt, 64);
+    SHA512_Update(&ctx, alt, x);
+    for (x = passlen; x != 0; x >>= 1) {
+        if (x & 1) SHA512_Update(&ctx, alt, 64);
+        else SHA512_Update(&ctx, pass, passlen);
+    }
+    SHA512_Final(digest, &ctx);
+
+    SHA512_Init(&ctx);
+    for (x = 0; x < passlen; x++)
+        SHA512_Update(&ctx, pass, passlen);
+    SHA512_Final(alt, &ctx);
+    memset(P, 0, sizeof(P));
+    for (x = 0; x < passlen; x += 64)
+        memcpy(P + x, alt, (passlen - x > 64) ? 64 : (passlen - x));
+
+    SHA512_Init(&ctx);
+    for (x = 0; x < (int)(16 + digest[0]); x++)
+        SHA512_Update(&ctx, salt, saltlen);
+    SHA512_Final(alt, &ctx);
+    for (x = 0; x < saltlen; x += 64)
+        memcpy(S + x, alt, (saltlen - x > 64) ? 64 : (saltlen - x));
+
+    for (rnd = 0; rnd < rounds; rnd++) {
+        SHA512_Init(&ctx);
+        if (rnd & 1) SHA512_Update(&ctx, P, passlen);
+        else SHA512_Update(&ctx, digest, 64);
+        if (rnd % 3) SHA512_Update(&ctx, S, saltlen);
+        if (rnd % 7) SHA512_Update(&ctx, P, passlen);
+        if (rnd & 1) SHA512_Update(&ctx, digest, 64);
+        else SHA512_Update(&ctx, P, passlen);
+        SHA512_Final(digest, &ctx);
+    }
+
+    /* sha512crypt transposition encoding */
+    { static const int t[][3] = {
+          {0,21,42},{22,43,1},{44,2,23},{3,24,45},{25,46,4},
+          {47,5,26},{6,27,48},{28,49,7},{50,8,29},{9,30,51},
+          {31,52,10},{53,11,32},{12,33,54},{34,55,13},{56,14,35},
+          {15,36,57},{37,58,16},{59,17,38},{18,39,60},{40,61,19},
+          {62,20,41},{-1,-1,63}
+      };
+      char enc[90];
+      int ei = 0, ti;
+      unsigned int v;
+      for (ti = 0; ti < 21; ti++) {
+          v = ((unsigned int)digest[t[ti][0]] << 16) |
+              ((unsigned int)digest[t[ti][1]] << 8) | digest[t[ti][2]];
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f];
+      }
+      v = digest[63];
+      enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+      enc[ei++] = phpitoa64[v & 0x3f];
+      enc[ei] = 0;
+      if (rounds == 5000)
+          return snprintf(result, resultmax, "$6$%.*s$%s", saltlen, salt, enc);
+      else
+          return snprintf(result, resultmax, "$6$rounds=%d$%.*s$%s", rounds, saltlen, salt, enc);
+    }
+}
+
+/* SHA512CRYPT: $6$[rounds=N$]salt$hash */
+static int verify_sha512crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    const char *p, *salt;
+    int saltlen, rounds = 5000;
+    char result[256];
+
+    if (hashlen < 20 || memcmp(hashstr, "$6$", 3) != 0) return 0;
+    p = hashstr + 3;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        p = strchr(p, '$');
+        if (!p) return 0;
+        p++;
+    }
+    salt = p;
+    for (saltlen = 0; saltlen < 16 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;
+
+    do_sha512crypt((const char *)pass, passlen,
+        (const unsigned char *)salt, saltlen, rounds, result, sizeof(result));
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* SHA512CRYPTMD5: sha512crypt(hex(MD5(pass))) */
+static int verify_sha512cryptmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16];
+    char hex[33];
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5);
+    prmd5(md5, hex, 32);
+    hex[32] = 0;
+    return verify_sha512crypt(hashstr, hashlen, (unsigned char *)hex, 32);
+}
+
+/* BCRYPT256: $2k$ variant — HMAC-SHA256(salt22+extra, pass) → base64 → bcrypt
+ * For each of 4 extra chars ".euO": HMAC-SHA256(key=salt22+extra, data=pass),
+ * base64-encode, then bcrypt(b64, $2b$NN$salt22). If any matches, success.
+ * Also accepts standard $2a$/$2b$ format as plain bcrypt fallback. */
+static int verify_bcrypt256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+
+    if (hashlen < 29 || hashstr[0] != '$') return 0;
+
+    /* Standard bcrypt ($2a$, $2b$, $2y$): just verify normally */
+    if (hashstr[2] != 'k')
+        return verify_bcrypt(hashstr, hashlen, pass, passlen);
+
+    /* $2k$ variant */
+    { static const char extrasalt[] = ".euO";
+      char setting[30], hmac_key[24], result[64], b64[64];
+      unsigned char hmac_out[32];
+      unsigned int hmac_len = 32;
+      int x;
+
+      if (hashlen < 60) return 0;
+      /* Build setting: $2b$ + cost + $ + salt22 */
+      memcpy(setting, hashstr, 28);
+      setting[2] = 'b';
+      setting[28] = 0;
+
+      /* HMAC key = salt22 (positions 7..28) + 1 extra char = 22 chars base */
+      memcpy(hmac_key, hashstr + 7, 21);
+
+      for (x = 0; x < 4; x++) {
+          hmac_key[21] = extrasalt[x];
+          HMAC(EVP_sha256(), hmac_key, 22, pass, passlen, hmac_out, &hmac_len);
+          b64_encode(hmac_out, 32, b64);
+          b64[44] = 0; /* null-terminate */
+          if (!crypt_rn(b64, setting, result, sizeof(result)))
+              continue;
+          if (strncmp(result, hashstr, hashlen) == 0)
+              return 1;
+          /* Compare with $2k$ restored */
+          result[2] = 'k';
+          if (strncmp(result, hashstr, hashlen) == 0)
+              return 1;
+      }
+    }
+    return 0;
+}
+
+/* ================================================================= */
+/* Phase 2: PBKDF2/KDF verify functions                              */
+/* ================================================================= */
+
+/* Generic PBKDF2 verify for formats:
+ * "algo:iters:salt_b64:hash_b64" (e.g. sha256:100:dGVzdA:xxx=)
+ * or "pbkdf2_algo$iters$salt$hash" (Django-style)
+ * or "$ml$iters$hexsalt$hexhash" (macOS ml style) */
+static int verify_pbkdf2_generic(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen,
+    const EVP_MD *evp_md, int dklen)
+{
+    unsigned char derived[64], expected[64], salt_bin[256];
+    int iters, salt_len, expected_len;
+    char buf[512];
+
+    if (hashlen >= (int)sizeof(buf)) return 0;
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Format 1: "algo:iters:salt_b64:hash_b64" */
+    { char *c1 = strchr(buf, ':');
+      if (c1) {
+          char *c2 = strchr(c1 + 1, ':');
+          if (c2) {
+              char *c3 = strchr(c2 + 1, ':');
+              if (c3) {
+                  iters = atoi(c1 + 1);
+                  if (iters <= 0) return 0;
+                  *c2 = 0; *c3 = 0;
+                  salt_len = base64_decode(c2 + 1, strlen(c2 + 1), salt_bin, sizeof(salt_bin));
+                  if (salt_len <= 0) return 0;
+                  expected_len = base64_decode(c3 + 1, strlen(c3 + 1), expected, sizeof(expected));
+                  if (expected_len <= 0) return 0;
+                  if (expected_len < dklen) dklen = expected_len;
+                  PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                      salt_bin, salt_len, iters, evp_md, dklen, derived);
+                  return memcmp(derived, expected, dklen) == 0;
+              }
+          }
+      }
+    }
+    return 0;
+}
+
+/* PBKDF2-MD5 (e531): "md5:iters:salt_b64:hash_b64" */
+static int verify_pbkdf2md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    if (hashlen < 10) return 0;
+    return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_md5(), 32);
+}
+
+/* PBKDF2-SHA1 (e532): "sha1:iters:salt_b64:hash_b64" */
+static int verify_pbkdf2sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    if (hashlen < 10) return 0;
+    return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_sha1(), 20);
+}
+
+/* PBKDF2-SHA256 (e530): "sha256:iters:salt_b64:hash_b64" or "pbkdf2_sha256$iters$salt$hash" */
+static int verify_pbkdf2sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    if (hashlen < 10) return 0;
+    /* Django format: pbkdf2_sha256$iters$salt$hash */
+    if (memcmp(hashstr, "pbkdf2_sha256$", 14) == 0) {
+        char buf[512];
+        unsigned char salt_bin[256], derived[32], expected[32];
+        int iters, expected_len;
+        if (hashlen >= (int)sizeof(buf)) return 0;
+        memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+        { char *p = buf + 14;
+          char *d1 = strchr(p, '$');
+          if (!d1) return 0;
+          iters = atoi(p);
+          { char *d2 = strchr(d1 + 1, '$');
+            if (!d2) return 0;
+            *d1 = 0; *d2 = 0;
+            expected_len = base64_decode(d2 + 1, strlen(d2 + 1), expected, sizeof(expected));
+            if (expected_len < 32) return 0;
+            PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                (unsigned char *)(d1 + 1), d2 - d1 - 1, iters,
+                EVP_sha256(), 32, derived);
+            return memcmp(derived, expected, 32) == 0;
+          }
+        }
+    }
+    return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_sha256(), 32);
+}
+
+/* PBKDF2-SHA512 (e533): "sha512:iters:salt_b64:hash_b64" or "$ml$iters$hexsalt$hexhash" */
+static int verify_pbkdf2sha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    if (hashlen < 10) return 0;
+    /* macOS $ml$ format */
+    if (memcmp(hashstr, "$ml$", 4) == 0) {
+        char buf[512];
+        unsigned char salt_bin[256], derived[64], expected[64];
+        int iters, salt_len, expected_len;
+        if (hashlen >= (int)sizeof(buf)) return 0;
+        memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+        { char *p = buf + 4;
+          char *d1 = strchr(p, '$');
+          if (!d1) return 0;
+          iters = atoi(p);
+          { char *d2 = strchr(d1 + 1, '$');
+            if (!d2) return 0;
+            *d1 = 0; *d2 = 0;
+            salt_len = hex2bin(d1 + 1, d2 - d1 - 1, salt_bin);
+            if (salt_len <= 0) return 0;
+            expected_len = hex2bin(d2 + 1, strlen(d2 + 1), expected);
+            if (expected_len < 64) expected_len = 64;
+            PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                salt_bin, salt_len, iters, EVP_sha512(), 64, derived);
+            return memcmp(derived, expected, 64) == 0;
+          }
+        }
+    }
+    return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_sha512(), 64);
+}
+
+/* PKCS5S2 (e534): "{PKCS5S2}" + base64(salt[16] + derived[32])
+ * Uses PBKDF2-HMAC-SHA1, 10000 rounds */
+static int verify_pkcs5s2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char decoded[64], derived[32];
+    int dlen;
+
+    if (hashlen < 16 || memcmp(hashstr, "{PKCS5S2}", 9) != 0) return 0;
+    dlen = base64_decode(hashstr + 9, hashlen - 9, decoded, sizeof(decoded));
+    if (dlen < 48) return 0; /* need 16 salt + 32 derived */
+
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        decoded, 16, 10000, EVP_sha1(), 32, derived);
+    return memcmp(derived, decoded + 16, 32) == 0;
+}
+
+/* CISCO8 (e529): "$8$14charsalt$phpitoa64hash"
+ * PBKDF2-HMAC-SHA256, 20000 rounds, 32 bytes output */
+static int verify_cisco8(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char derived[32];
+    char encoded[48];
+    const char *salt, *hash_part;
+
+    if (hashlen < 20 || memcmp(hashstr, "$8$", 3) != 0) return 0;
+    salt = hashstr + 3;
+    hash_part = memchr(salt, '$', hashlen - 3);
+    if (!hash_part) return 0;
+    { int saltlen = hash_part - salt;
+      hash_part++;
+      PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+          (unsigned char *)salt, saltlen, 20000,
+          EVP_sha256(), 32, derived);
+      /* Encode with phpitoa64 — sequential 3-byte blocks (php64_encode) */
+      { int ei = 0, bi;
+        for (bi = 0; bi < 32; bi += 3) {
+            unsigned char b0 = derived[bi];
+            unsigned char b1 = (bi + 1 < 32) ? derived[bi + 1] : 0;
+            unsigned char b2 = (bi + 2 < 32) ? derived[bi + 2] : 0;
+            int rem = 32 - bi;
+            encoded[ei++] = phpitoa64[b0 >> 2];
+            encoded[ei++] = phpitoa64[((b0 & 3) << 4) | (b1 >> 4)];
+            if (rem > 1) encoded[ei++] = phpitoa64[((b1 & 0xf) << 2) | (b2 >> 6)];
+            if (rem > 2) encoded[ei++] = phpitoa64[b2 & 0x3f];
+        }
+        encoded[ei] = 0;
+        return strcmp(encoded, hash_part) == 0;
+      }
+    }
+}
+
+/* ================================================================= */
+/* Phase 3: Base64 salted (SSHA) verify functions                    */
+/* ================================================================= */
+
+/* Generic SSHA: prefix + base64(hash(pass+salt) + salt)
+ * Salt is appended after the hash bytes in the decoded data. */
+static int verify_ssha_generic(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen,
+    const char *prefix, int prefixlen,
+    const EVP_MD *evp_md, int hashbytes)
+{
+    unsigned char decoded[256], computed[64];
+    int dlen, saltlen;
+    if (hashlen < prefixlen + 4) return 0;
+    if (memcmp(hashstr, prefix, prefixlen) != 0) return 0;
+    dlen = base64_decode(hashstr + prefixlen, hashlen - prefixlen, decoded, sizeof(decoded));
+    if (dlen <= hashbytes) return 0;
+    saltlen = dlen - hashbytes;
+
+    /* Use simple hash functions directly based on hashbytes */
+    if (hashbytes == 20) {
+        unsigned char buf[1024];
+        if (passlen + saltlen > (int)sizeof(buf)) return 0;
+        memcpy(buf, pass, passlen);
+        memcpy(buf + passlen, decoded + hashbytes, saltlen);
+        SHA1(buf, passlen + saltlen, computed);
+    } else if (hashbytes == 32) {
+        unsigned char buf[1024];
+        if (passlen + saltlen > (int)sizeof(buf)) return 0;
+        memcpy(buf, pass, passlen);
+        memcpy(buf + passlen, decoded + hashbytes, saltlen);
+        SHA256(buf, passlen + saltlen, computed);
+    } else if (hashbytes == 64) {
+        unsigned char buf[1024];
+        if (passlen + saltlen > (int)sizeof(buf)) return 0;
+        memcpy(buf, pass, passlen);
+        memcpy(buf + passlen, decoded + hashbytes, saltlen);
+        SHA512(buf, passlen + saltlen, computed);
+    } else {
+        return 0;
+    }
+
+    return memcmp(computed, decoded, hashbytes) == 0;
+}
+
+/* SSHA1BASE64 (e833): {SSHA}base64(SHA1(pass+salt)+salt) */
+static int verify_ssha1base64(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_ssha_generic(hashstr, hashlen, pass, passlen,
+        "{SSHA}", 6, EVP_sha1(), 20);
+}
+
+/* SSHA256BASE64 (e835): {SSHA256}base64(SHA256(pass+salt)+salt) */
+static int verify_ssha256base64(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_ssha_generic(hashstr, hashlen, pass, passlen,
+        "{SSHA256}", 9, EVP_sha256(), 32);
+}
+
+/* SSHA512BASE64 (e836): {SSHA512}base64(SHA512(pass+salt)+salt) */
+static int verify_ssha512base64(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_ssha_generic(hashstr, hashlen, pass, passlen,
+        "{SSHA512}", 9, EVP_sha512(), 64);
+}
+
+/* ================================================================= */
+/* Phase 4: Format-specific verify functions                          */
+/* ================================================================= */
+
+extern void myprogress(char *cur, int len, char *dest);
+
+/* PHPBB3MD5 (e537): MD5(pass) → hex → phpbb3 iteration
+ * Same format as PHPBB3: $H$NSALT(8)HASH(22) */
+static int verify_phpbb3md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16];
+    char hexpass[33];
+    rhash_msg(RHASH_MD5, pass, passlen, md5);
+    prmd5(md5, hexpass, 32);
+    return verify_phpbb3(hashstr, hashlen, (unsigned char *)hexpass, 32);
+}
+
+/* PHPS (e886): $PHPS$hexsalt$md5(md5hex(pass)+binary_salt) */
+static int verify_phps(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5[16], md5_2[16], salt_bin[128], buf[256];
+    char hexpass[33], computed[33];
+    int saltlen;
+    const char *p, *hash_start;
+
+    if (hashlen < 12 || memcmp(hashstr, "$PHPS$", 6) != 0) return 0;
+    p = hashstr + 6;
+    hash_start = memchr(p, '$', hashlen - 6);
+    if (!hash_start || hash_start - p < 1) return 0;
+    saltlen = hex2bin(p, hash_start - p, salt_bin);
+    if (saltlen <= 0) return 0;
+    hash_start++;
+    if (hashlen - (int)(hash_start - hashstr) < 32) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5);
+    prmd5(md5, hexpass, 32);
+
+    /* MD5(md5hex(pass) + binary_salt) */
+    memcpy(buf, hexpass, 32);
+    memcpy(buf + 32, salt_bin, saltlen);
+    rhash_msg(RHASH_MD5, buf, 32 + saltlen, md5_2);
+    prmd5(md5_2, computed, 32);
+
+    return strncasecmp(computed, hash_start, 32) == 0;
+}
+
+/* MANGOS (e540): SHA1(UC(user) + ":" + UC(pass)) — "40hex:username" */
+static int verify_mangos(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20];
+    char computed[41], buf[512];
+    const char *colon, *user;
+    int i, blen, userlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    user = colon + 1;
+    userlen = hashlen - 41;
+    if (userlen < 0) return 0;
+
+    blen = 0;
+    for (i = 0; i < userlen && blen < (int)sizeof(buf) - 2; i++)
+        buf[blen++] = toupper((unsigned char)user[i]);
+    buf[blen++] = ':';
+    for (i = 0; i < passlen && blen < (int)sizeof(buf) - 1; i++)
+        buf[blen++] = toupper(pass[i]);
+
+    SHA1((unsigned char *)buf, blen, sha1);
+    prmd5(sha1, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* YAF-SHA1 (e459): SHA1(UTF16LE(pass) + base64_decode(salt)) — "b64hash:b64salt" */
+static int verify_yafsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20], salt_bin[256], buf[2048];
+    char computed_b64[32];
+    const char *colon;
+    int salt_len, hash_b64_len, elen, i, ulen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hash_b64_len = colon - hashstr;
+    salt_len = base64_decode(colon + 1, hashlen - hash_b64_len - 1, salt_bin, sizeof(salt_bin));
+    if (salt_len <= 0) return 0;
+
+    /* Convert password to UTF-16LE */
+    ulen = 0;
+    for (i = 0; i < passlen && ulen + 2 + salt_len <= (int)sizeof(buf); i++) {
+        buf[ulen++] = pass[i];
+        buf[ulen++] = 0;
+    }
+    memcpy(buf + ulen, salt_bin, salt_len);
+    SHA1(buf, ulen + salt_len, sha1);
+
+    elen = b64_encode(sha1, 20, computed_b64);
+    computed_b64[elen] = 0;
+    return hash_b64_len == elen && memcmp(computed_b64, hashstr, elen) == 0;
+}
+
+/* PROGRESSENCODE (e536): CRC-based progress encoding — 16-char string */
+static int verify_progressencode(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char padded[1024], dest[17];
+    int padlen;
+    if (hashlen != 16) return 0;
+    if (passlen >= (int)sizeof(padded) - 16) return 0;
+    memcpy(padded, pass, passlen);
+    /* Pad to 16-byte boundary */
+    padlen = passlen;
+    if (padlen % 16) {
+        memset(padded + padlen, 0, 16 - (padlen % 16));
+        padlen += 16 - (padlen % 16);
+    }
+    myprogress(padded, padlen, dest);
+    return memcmp(dest, hashstr, 16) == 0;
+}
+
+/* MURMUR64A (e829): MurmurHash64A(pass, len, hex_seed) — salted compute */
+static void compute_murmur64a(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    uint64_t seed64 = 0, mh;
+    int i;
+    for (i = 0; i < saltlen; i++) {
+        unsigned char c = salt[i];
+        seed64 <<= 4;
+        if (c >= '0' && c <= '9') seed64 |= c - '0';
+        else if (c >= 'a' && c <= 'f') seed64 |= c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') seed64 |= c - 'A' + 10;
+    }
+    mh = murmur64a(pass, passlen, seed64);
+    /* Big-endian output */
+    dest[0] = (mh >> 56) & 0xff; dest[1] = (mh >> 48) & 0xff;
+    dest[2] = (mh >> 40) & 0xff; dest[3] = (mh >> 32) & 0xff;
+    dest[4] = (mh >> 24) & 0xff; dest[5] = (mh >> 16) & 0xff;
+    dest[6] = (mh >> 8) & 0xff;  dest[7] = mh & 0xff;
+}
+
+/* LEET-SHA512-WRL-USER (e444): SHA512(pass+user) XOR WRL(user+pass) — "128hex:user" */
+static int verify_leet(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha512[64], wrl[64], xored[64];
+    char computed[129], buf[2048];
+    const char *colon, *user;
+    int userlen, i;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 128) return 0;
+    user = colon + 1;
+    userlen = hashlen - 129;
+    if (userlen < 0 || passlen + userlen > (int)sizeof(buf)) return 0;
+
+    /* SHA512(pass + user) */
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, user, userlen);
+    compute_sha512((unsigned char *)buf, passlen + userlen, NULL, 0, sha512);
+
+    /* WHIRLPOOL(user + pass) */
+    memcpy(buf, user, userlen);
+    memcpy(buf + userlen, pass, passlen);
+    compute_whirlpool((unsigned char *)buf, userlen + passlen, NULL, 0, wrl);
+
+    /* XOR */
+    for (i = 0; i < 64; i++)
+        xored[i] = sha512[i] ^ wrl[i];
+
+    prmd5(xored, computed, 128);
+    return strncasecmp(computed, hashstr, 128) == 0;
+}
+
+/* SHA1-SALT-SPECIAL (e445): 10-iteration SHA1 with dash-formatted salt
+ * Format: "--salt----pass----" iterated. Hash is "40hex:salt" */
+static int verify_sha1saltspecial(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1[20];
+    char buf[2048], hexhash[41];
+    const char *colon, *salt;
+    int saltlen, blen, x;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen + passlen + 60 > (int)sizeof(buf)) return 0;
+
+    /* Build: "--salt----pass----" */
+    blen = 0;
+    buf[blen++] = '-'; buf[blen++] = '-';
+    memcpy(buf + blen, salt, saltlen); blen += saltlen;
+    buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-';
+    memcpy(buf + blen, pass, passlen); blen += passlen;
+    buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-';
+
+    SHA1((unsigned char *)buf, blen, sha1);
+
+    /* 9 more iterations: SHA1(hex(prev) + "-" + pass ... ) */
+    /* Format for iterations: "--salt--" + hexhash + "-" + pass + "----" */
+    for (x = 0; x < 9; x++) {
+        prmd5(sha1, hexhash, 40);
+        blen = 0;
+        buf[blen++] = '-'; buf[blen++] = '-';
+        memcpy(buf + blen, salt, saltlen); blen += saltlen;
+        buf[blen++] = '-'; buf[blen++] = '-';
+        memcpy(buf + blen, hexhash, 40); blen += 40;
+        buf[blen++] = '-';
+        memcpy(buf + blen, pass, passlen); blen += passlen;
+        buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-'; buf[blen++] = '-';
+        SHA1((unsigned char *)buf, blen, sha1);
+    }
+
+    prmd5(sha1, hexhash, 40);
+    return strncasecmp(hexhash, hashstr, 40) == 0;
+}
+
+/* ================================================================= */
+/* Phase 5: MD4UTF16 (NTLM) variant types                            */
+/* ================================================================= */
+
+/* MD4UTF16SQL3 (e787): NTLM(mysql3_hex(pass)) — unsalted */
+static void compute_ntlm_sql3(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char sql3bin[8];
+    char sql3hex[17];
+    compute_mysql3(pass, passlen, NULL, 0, sql3bin);
+    prmd5(sql3bin, sql3hex, 16);
+    compute_ntlm((unsigned char *)sql3hex, 16, NULL, 0, dest);
+}
+
+/* MD4UTF16BASE64 (e788): NTLM(base64(pass)) — unsalted */
+static void compute_ntlm_base64(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char b64[512];
+    int blen = b64_encode(pass, passlen, b64);
+    compute_ntlm((unsigned char *)b64, blen, NULL, 0, dest);
+}
+
+/* MD4UTF16BASE64SHA256 (e791): NTLM(base64(SHA256_hex(pass))) — unsalted */
+static void compute_ntlm_base64sha256(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char sha256[32];
+    char hexsha[65], b64[256];
+    int blen;
+    compute_sha256(pass, passlen, NULL, 0, sha256);
+    prmd5(sha256, hexsha, 64);
+    blen = b64_encode((unsigned char *)hexsha, 64, b64);
+    compute_ntlm((unsigned char *)b64, blen, NULL, 0, dest);
+}
+
+/* MD4UTF16MD5PASSMD5SALT (e783): NTLM(UTF16LE(md5hex(pass)+md5hex(salt)))
+ * Input: "32hex:salt:password" — hash is NTLM of UTF16LE(md5(pass)+md5(salt)) */
+static int verify_ntlm_md5passmd5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5p[16], md5s[16], ntlm[16];
+    char hexpass[33], hexsalt[33], combined[65], computed[33];
+    const char *colon, *salt;
+    int saltlen, i, ulen;
+    unsigned char ubuf[256];
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 33;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5p);
+    prmd5(md5p, hexpass, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)salt, saltlen, md5s);
+    prmd5(md5s, hexsalt, 32);
+
+    /* UTF16LE(md5hex(pass) + md5hex(salt)) */
+    ulen = 0;
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass[i]; ubuf[ulen++] = 0; }
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
+    MD4(ubuf, ulen, ntlm);
+    prmd5(ntlm, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* MD4UTF16MD5MD5PASSMD5SALT (e784): NTLM(UTF16LE(md5(md5hex(pass))+md5hex(salt)))
+ * Two MD5 levels on pass, one on salt */
+static int verify_ntlm_md5md5passmd5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5p[16], md5p2[16], md5s[16], ntlm[16];
+    char hexpass[33], hexpass2[33], hexsalt[33], computed[33];
+    const char *colon, *salt;
+    int saltlen, i, ulen;
+    unsigned char ubuf[256];
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 33;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5p);
+    prmd5(md5p, hexpass, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hexpass, 32, md5p2);
+    prmd5(md5p2, hexpass2, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)salt, saltlen, md5s);
+    prmd5(md5s, hexsalt, 32);
+
+    ulen = 0;
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass2[i]; ubuf[ulen++] = 0; }
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
+    MD4(ubuf, ulen, ntlm);
+    prmd5(ntlm, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* MD4UTF16MD5PASSMD5SHA1SALT (e785): NTLM(UTF16LE(md5hex(pass)+md5(sha1hex(salt))))
+ * md5hex(pass) + md5hex(sha1(salt)) → UTF16LE → MD4 */
+static int verify_ntlm_md5passmd5sha1salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5p[16], sha1s[20], md5sha1s[16], ntlm[16];
+    char hexpass[33], hexsha1[41], hexmd5sha1[33], computed[33];
+    const char *colon, *salt;
+    int saltlen, i, ulen;
+    unsigned char ubuf[256];
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 33;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5p);
+    prmd5(md5p, hexpass, 32);
+    SHA1((unsigned char *)salt, saltlen, sha1s);
+    prmd5(sha1s, hexsha1, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)hexsha1, 32, md5sha1s);
+    prmd5(md5sha1s, hexmd5sha1, 32);
+
+    ulen = 0;
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass[i]; ubuf[ulen++] = 0; }
+    for (i = 0; i < 32; i++) { ubuf[ulen++] = hexmd5sha1[i]; ubuf[ulen++] = 0; }
+    MD4(ubuf, ulen, ntlm);
+    prmd5(ntlm, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* ================================================================== */
+/* Phase 6: Unsalted SHA1 CAP/UC/TRUNC compositions                   */
+/* ================================================================== */
+
+/* --- Group A: Simple compute types (HT) --- */
+
+/* SHA1BASE64MD5UC (e747): MD5(pass)→UC hex→base64→SHA1 */
+static void compute_sha1base64md5uc(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char md5h[16], sha1h[20];
+    char hex[33], b64[128];
+    int b64len;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5UC(md5h, hex, 32);
+    b64len = b64_encode((unsigned char *)hex, 32, b64);
+    SHA1((unsigned char *)b64, b64len, sha1h);
+    memcpy(dest, sha1h, 20);
+}
+
+/* SHA1MD5UCSHA1BASE64 (e696): base64(pass)→SHA1→hex→MD5→UC hex→SHA1 */
+static void compute_sha1md5ucsha1base64(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char sha1h[20], md5h[16];
+    char b64[512], hex[41], uchex[33];
+    int b64len;
+    (void)salt; (void)saltlen;
+    if (passlen > 384) return;
+    b64len = b64_encode(pass, passlen, b64);
+    SHA1((unsigned char *)b64, b64len, sha1h);
+    prmd5(sha1h, hex, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 40, md5h);
+    prmd5UC(md5h, uchex, 32);
+    SHA1((unsigned char *)uchex, 32, sha1h);
+    memcpy(dest, sha1h, 20);
+}
+
+/* SHA1MD5MD5UCMD5UC (e717): MD5(pass)→UC→MD5→UC→MD5→hex→SHA1 */
+static void compute_sha1md5md5ucmd5uc(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char h[16], sha1h[20];
+    char hex[33];
+    (void)salt; (void)saltlen;
+    /* MD5(pass)→UC hex */
+    rhash_msg(RHASH_MD5, pass, passlen, h);
+    prmd5UC(h, hex, 32);
+    /* MD5(UC)→UC hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h);
+    prmd5UC(h, hex, 32);
+    /* MD5(UC)→lower hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h);
+    prmd5(h, hex, 32);
+    /* SHA1(hex) */
+    SHA1((unsigned char *)hex, 32, sha1h);
+    memcpy(dest, sha1h, 20);
+}
+
+/* SHA1MD5MD5UCMD5MD5UC (e756): MD5→UC→MD5→hex→MD5→UC→MD5→hex→SHA1 */
+static void compute_sha1md5md5ucmd5md5uc(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char h[16], sha1h[20];
+    char hex[33];
+    (void)salt; (void)saltlen;
+    /* Step 1: MD5(pass)→UC hex */
+    rhash_msg(RHASH_MD5, pass, passlen, h);
+    prmd5UC(h, hex, 32);
+    /* Step 2: MD5(UC)→lower hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h);
+    prmd5(h, hex, 32);
+    /* Now sha1md5md5uc path: */
+    /* Step 3: MD5(hex)→UC hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h);
+    prmd5UC(h, hex, 32);
+    /* Step 4: MD5(UC)→lower hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h);
+    prmd5(h, hex, 32);
+    /* SHA1(hex) */
+    SHA1((unsigned char *)hex, 32, sha1h);
+    memcpy(dest, sha1h, 20);
+}
+
+/* SHA1MD5RAWUCMD5RAW (e709): MD5raw(MD5raw(MD5raw(pass)))→UC hex→SHA1 */
+static void compute_sha1md5rawucmd5raw(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char h1[16], h2[16], h3[16], sha1h[20];
+    char hex[33];
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, h1);
+    rhash_msg(RHASH_MD5, h1, 16, h2);
+    rhash_msg(RHASH_MD5, h2, 16, h3);
+    prmd5UC(h3, hex, 32);
+    SHA1((unsigned char *)hex, 32, sha1h);
+    memcpy(dest, sha1h, 20);
+}
+
+/* MD5SHA1MD5SHA1MD5SHA1MD5SHA1MD5SHA1MD5SHA1 (e522):
+ * 12-step: SHA1→MD5→SHA1→MD5→SHA1→MD5→SHA1→MD5→SHA1→MD5→SHA1→MD5 */
+static void compute_md5sha1x6(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char sh[20], mh[16];
+    char hex[41];
+    int i;
+    (void)salt; (void)saltlen;
+    SHA1(pass, passlen, sh);
+    for (i = 0; i < 5; i++) {
+        prmd5(sh, hex, 40);
+        rhash_msg(RHASH_MD5, (unsigned char *)hex, 40, mh);
+        prmd5(mh, hex, 32);
+        SHA1((unsigned char *)hex, 32, sh);
+    }
+    /* Final: SHA1→hex(40)→MD5 */
+    prmd5(sh, hex, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 40, mh);
+    memcpy(dest, mh, 16);
+}
+
+/* --- Group B: CAP verify types (HTV unsalted) --- */
+
+/* SHA1MD51CAP (e664): MD5(pass)→hex, enumerate single-char CAP, SHA1 each */
+static int verify_sha1md51cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5h[16], sha1h[20];
+    char hex[33], computed[41];
+    int y;
+    if (hashlen < 40) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5(md5h, hex, 32);
+    for (y = 0; y < 32; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            SHA1((unsigned char *)hex, 32, sha1h);
+            prmd5(sha1h, computed, 40);
+            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            hex[y] = tolower((unsigned char)hex[y]);
+        }
+    }
+    return 0;
+}
+
+/* SHA1MD51CAPMD5 (e733): MD5(pass)→hex, then falls into SHA1MD5x1CAP.
+ * Total: MD5(pass)→hex, then MD5^N(hex)→hex2, both CAP strategies→SHA1.
+ * Input format: "40hexhash:N:password" (salted) or "40hexhash:password" (unsalted, N=1).
+ * For hashpipe we always use N=1 since it falls through with one pre-step. */
+static int verify_sha1md51capmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5h[16], sha1h[20];
+    char hex[33], computed[41];
+    int y, j, niter = 1, i;
+    const char *colon;
+    if (hashlen < 40) return 0;
+    /* Parse optional :N salt */
+    if (hashlen > 40 && hashstr[40] == ':') {
+        colon = hashstr + 41;
+        niter = atoi(colon);
+        if (niter < 1) niter = 1;
+    }
+    /* MD5(pass) → hex (SHA1MD51CAPMD5 pre-step) */
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5(md5h, hex, 32);
+    /* MD5^N(hex) from x1CAP loop */
+    for (i = 0; i < niter; i++) {
+        rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, md5h);
+        prmd5(md5h, hex, 32);
+    }
+    /* Strategy 1: single-position CAP */
+    for (y = 0; y < 32; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            SHA1((unsigned char *)hex, 32, sha1h);
+            prmd5(sha1h, computed, 40);
+            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            hex[y] = tolower((unsigned char)hex[y]);
+        }
+    }
+    /* Strategy 2: letter-class CAP */
+    for (j = 'a'; j <= 'f'; j++) {
+        for (y = 0; y < 32; y++) {
+            if (isupper((unsigned char)hex[y]))
+                hex[y] = tolower((unsigned char)hex[y]);
+            if (hex[y] == j)
+                hex[y] = toupper((unsigned char)hex[y]);
+        }
+        SHA1((unsigned char *)hex, 32, sha1h);
+        prmd5(sha1h, computed, 40);
+        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    }
+    return 0;
+}
+
+/* SHA1SHA11CAP (e737): SHA1(pass)→hex, single-position CAP + letter-class CAP */
+static int verify_sha1sha11cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1h[20], sha1r[20];
+    char hex[41], computed[41];
+    int y, j;
+    if (hashlen < 40) return 0;
+    SHA1(pass, passlen, sha1h);
+    prmd5(sha1h, hex, 40);
+    /* Strategy 1: single-position capitalize */
+    for (y = 0; y < 40; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            SHA1((unsigned char *)hex, 40, sha1r);
+            prmd5(sha1r, computed, 40);
+            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            hex[y] = tolower((unsigned char)hex[y]);
+        }
+    }
+    /* Strategy 2: letter-class capitalize (all occurrences of one letter) */
+    for (j = 'a'; j <= 'f'; j++) {
+        /* Reset to all lowercase, then capitalize all 'j's */
+        for (y = 0; y < 40; y++) {
+            if (isupper((unsigned char)hex[y]))
+                hex[y] = tolower((unsigned char)hex[y]);
+            if (hex[y] == j)
+                hex[y] = toupper((unsigned char)hex[y]);
+        }
+        SHA1((unsigned char *)hex, 40, sha1r);
+        prmd5(sha1r, computed, 40);
+        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    }
+    return 0;
+}
+
+/* --- Group C: TRUNC+CAP verify types (HTV salted, salt=truncation length) --- */
+
+/* SHA1SHA1CAPTRUNC (e656): SHA1→hex, CAP first lowercase, TRUNC to salt length,
+ * try left-prefix and right-suffix, SHA1 each */
+static int verify_sha1sha1captrunc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1h[20], sha1r[20];
+    char hex[41], computed[41];
+    const char *colon, *saltstr;
+    int trunclen, y;
+    /* Parse hash:trunclen */
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltstr = colon + 1;
+    trunclen = atoi(saltstr);
+    if (trunclen < 20 || trunclen > 40) return 0;
+    SHA1(pass, passlen, sha1h);
+    prmd5(sha1h, hex, 40);
+    /* CAP: capitalize first lowercase char */
+    for (y = 0; y < 40; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            break;
+        }
+    }
+    /* Left-aligned prefix */
+    SHA1((unsigned char *)hex, trunclen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* Right-aligned suffix */
+    SHA1((unsigned char *)(hex + (40 - trunclen)), trunclen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    return 0;
+}
+
+/* SHA1MD6CAPTRUNC (e657): MD6-128→hex, CAP first lowercase, TRUNC, SHA1 */
+static int verify_sha1md6captrunc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md6h[16], sha1r[20];
+    char hex[33], computed[41];
+    const char *colon, *saltstr;
+    int trunclen, y;
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltstr = colon + 1;
+    trunclen = atoi(saltstr);
+    if (trunclen < 20 || trunclen > 32) return 0;
+    md6_hash(128, (unsigned char *)pass, (uint64_t)passlen * 8, md6h);
+    prmd5(md6h, hex, 32);
+    /* CAP: capitalize first lowercase char */
+    for (y = 0; y < 32; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            break;
+        }
+    }
+    SHA1((unsigned char *)hex, trunclen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    return 0;
+}
+
+/* --- Group D: Iterated CAP verify (HTV salted, salt=iteration count) --- */
+
+/* SHA1MD5x1CAP (e749): MD5^N(pass)→hex, enumerate CAP, SHA1 each.
+ * Salt = iteration count N. */
+static int verify_sha1md5x1cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5h[16], sha1h[20];
+    char hex[33], computed[41];
+    const char *colon, *saltstr;
+    int niter, i, y, j;
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltstr = colon + 1;
+    niter = atoi(saltstr);
+    if (niter < 1 || niter > 100000) return 0;
+    /* Apply N iterations of MD5 hex */
+    memcpy(hex, pass, passlen < 32 ? passlen : 32);
+    {
+        const unsigned char *inp = pass;
+        int inlen = passlen;
+        for (i = 0; i < niter; i++) {
+            rhash_msg(RHASH_MD5, inp, inlen, md5h);
+            prmd5(md5h, hex, 32);
+            inp = (unsigned char *)hex;
+            inlen = 32;
+        }
+    }
+    /* Strategy 1: single-position CAP */
+    for (y = 0; y < 32; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            SHA1((unsigned char *)hex, 32, sha1h);
+            prmd5(sha1h, computed, 40);
+            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            hex[y] = tolower((unsigned char)hex[y]);
+        }
+    }
+    /* Strategy 2: letter-class CAP */
+    for (j = 'a'; j <= 'f'; j++) {
+        for (y = 0; y < 32; y++) {
+            if (isupper((unsigned char)hex[y]))
+                hex[y] = tolower((unsigned char)hex[y]);
+            if (hex[y] == j)
+                hex[y] = toupper((unsigned char)hex[y]);
+        }
+        SHA1((unsigned char *)hex, 32, sha1h);
+        prmd5(sha1h, computed, 40);
+        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    }
+    return 0;
+}
+
+/* ================================================================== */
+/* Phase 7: Salted SHA1 compositions                                   */
+/* ================================================================== */
+
+/* --- Helper: parse "real_salt trunc_len" from combined salt field --- */
+static int parse_truncsalt(const char *s, int slen,
+    char *salt, int *saltlen, int *trunclen)
+{
+    int i;
+    for (i = slen - 1; i >= 0; i--) {
+        if (s[i] == ' ') {
+            *trunclen = atoi(s + i + 1);
+            *saltlen = i;
+            memcpy(salt, s, i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* --- Helper: parse "real_salt pepper" from combined salt field --- */
+static int parse_saltpepper(const char *s, int slen,
+    char *salt, int *saltlen, char *pepper, int *peplen)
+{
+    const char *sp = memchr(s, ' ', slen);
+    if (!sp) {
+        *saltlen = slen; memcpy(salt, s, slen); salt[slen] = 0;
+        *peplen = 0; pepper[0] = 0;
+        return 1;
+    }
+    *saltlen = sp - s;
+    *peplen = slen - *saltlen - 1;
+    memcpy(salt, s, *saltlen); salt[*saltlen] = 0;
+    memcpy(pepper, sp + 1, *peplen); pepper[*peplen] = 0;
+    return 1;
+}
+
+/* --- Generic TRUNC+SALT verify helper ---
+ * innerhex[0..hexlen-1] = hex string of inner hash
+ * salt_before: 0=hex+salt, 1=salt+hex
+ * try_right: 1=also try right-aligned suffix */
+static int verify_sha1_truncsalt(const char *hashstr, int hashlen,
+    const char *innerhex, int hexlen, int salt_before, int try_right)
+{
+    unsigned char sha1r[20];
+    char computed[41], buf[512];
+    const char *colon, *saltpart;
+    int saltpartlen, trunclen;
+    char real_salt[256];
+    int real_saltlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltpartlen = hashlen - 41;
+    if (saltpartlen < 1 || saltpartlen > 250) return 0;
+    if (!parse_truncsalt(saltpart, saltpartlen, real_salt, &real_saltlen, &trunclen))
+        return 0;
+    if (trunclen < 20 || trunclen > hexlen) return 0;
+
+    /* Left-aligned prefix */
+    if (salt_before) {
+        memcpy(buf, real_salt, real_saltlen);
+        memcpy(buf + real_saltlen, innerhex, trunclen);
+        SHA1((unsigned char *)buf, real_saltlen + trunclen, sha1r);
+    } else {
+        memcpy(buf, innerhex, trunclen);
+        memcpy(buf + trunclen, real_salt, real_saltlen);
+        SHA1((unsigned char *)buf, trunclen + real_saltlen, sha1r);
+    }
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* Right-aligned suffix */
+    if (try_right) {
+        if (salt_before) {
+            memcpy(buf, real_salt, real_saltlen);
+            memcpy(buf + real_saltlen, innerhex + (hexlen - trunclen), trunclen);
+            SHA1((unsigned char *)buf, real_saltlen + trunclen, sha1r);
+        } else {
+            memcpy(buf, innerhex + (hexlen - trunclen), trunclen);
+            memcpy(buf + trunclen, real_salt, real_saltlen);
+            SHA1((unsigned char *)buf, trunclen + real_saltlen, sha1r);
+        }
+        prmd5(sha1r, computed, 40);
+        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    }
+    return 0;
+}
+
+/* --- 7A: TRUNC+SALT types --- */
+
+/* SHA1MD5TRUNCSALT (e683): SHA1(md5hex(pass)[0:N] + salt), left only */
+static int verify_sha1md5truncsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[16]; char hex[33];
+    rhash_msg(RHASH_MD5, pass, passlen, h);
+    prmd5(h, hex, 32);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 32, 0, 0);
+}
+
+/* SHA1SHA1TRUNCSALT (e739): SHA1(sha1hex(pass)[0:N] + salt), left only */
+static int verify_sha1sha1truncsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[20]; char hex[41];
+    SHA1(pass, passlen, h);
+    prmd5(h, hex, 40);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 40, 0, 0);
+}
+
+/* SHA1WRLUCTRUNCSALT (e672): SHA1(WRL_UC_hex(pass)[0:N] + salt), left only */
+static int verify_sha1wrluctruncsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[64]; char hex[129];
+    rhash_msg(RHASH_WHIRLPOOL, pass, passlen, h);
+    prmd5(h, hex, 128);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 128, 0, 0);
+}
+
+/* SHA1SHA256TRUNCSALT (e678): SHA1(sha256hex(pass)[0:N/tail] + salt), L+R */
+static int verify_sha1sha256truncsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[32]; char hex[65];
+    SHA256(pass, passlen, h);
+    prmd5(h, hex, 64);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 64, 0, 1);
+}
+
+/* SHA1SHA256TRUNCMD5SALT (e679): md5(pass)→hex, sha256(hex)→hex, trunc+salt L+R */
+static int verify_sha1sha256truncmd5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sh[32]; char md5hex[33], hex[65];
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, md5hex, 32);
+    SHA256((unsigned char *)md5hex, 32, sh);
+    prmd5(sh, hex, 64);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 64, 0, 1);
+}
+
+/* SHA1SALTSHA256TRUNC (e725): SHA1(salt + sha256hex(pass)[0:N/tail]), L+R */
+static int verify_sha1saltsha256trunc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[32]; char hex[65];
+    SHA256(pass, passlen, h);
+    prmd5(h, hex, 64);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 64, 1, 1);
+}
+
+/* SHA1SALTSHA256TRUNCMD5 (e726): md5(pass)→hex, sha256→hex, salt+trunc L+R */
+static int verify_sha1saltsha256truncmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sh[32]; char md5hex[33], hex[65];
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, md5hex, 32);
+    SHA256((unsigned char *)md5hex, 32, sh);
+    prmd5(sh, hex, 64);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 64, 1, 1);
+}
+
+/* SHA1SALTSHA256UCTRUNC (e691): SHA1(salt + SHA256_UC_hex(pass)[0:N/tail]), L+R */
+static int verify_sha1saltsha256uctrunc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[32]; char hex[65];
+    SHA256(pass, passlen, h);
+    prmd5UC(h, hex, 64);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 64, 1, 1);
+}
+
+/* SHA1SALTSHA512UCTRUNC (e690): SHA1(salt + SHA512_UC_hex(pass)[0:N/tail]), L+R */
+static int verify_sha1saltsha512uctrunc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char h[64]; char hex[129];
+    SHA512(pass, passlen, h);
+    prmd5UC(h, hex, 128);
+    return verify_sha1_truncsalt(hashstr, hashlen, hex, 128, 1, 1);
+}
+
+/* --- 7B: PEPPER types ---
+ * Salt field format: "real_salt pepper" (space-separated).
+ * hashpipe has no -j flag; pepper is embedded in salt field. */
+
+/* SHA1SALTMD5PASSPEPPER (e602): SHA1(salt + md5hex(pass) + pepper) */
+static int verify_sha1saltmd5passpepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5h[16], sha1r[20];
+    char hex[33], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5(md5h, hex, 32);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex, 32);
+    memcpy(buf + saltlen + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTMD5UCPASSPEPPER (e651): SHA1(salt + MD5UC_hex(pass) + pepper) */
+static int verify_sha1saltmd5ucpasspepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char md5h[16], sha1r[20];
+    char hex[33], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5UC(md5h, hex, 32);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex, 32);
+    memcpy(buf + saltlen + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTSHA1PASSPEPPER (e681): SHA1(salt + sha1hex(pass) + pepper) */
+static int verify_sha1saltsha1passpepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], sha1r[20];
+    char hex[41], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, hex, 40);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex, 40);
+    memcpy(buf + saltlen + 40, pepper, peplen);
+    SHA1((unsigned char *)buf, saltlen + 40 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTMD5MD5PASSPEPPER (e719): SHA1(salt + md5hex(md5hex(pass)) + pepper) */
+static int verify_sha1saltmd5md5passpepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex1[33], hex2[33], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex1, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex1, 32, mh);
+    prmd5(mh, hex2, 32);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex2, 32);
+    memcpy(buf + saltlen + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTMD5SHA1PASSPEPPER (e742): SHA1(salt + md5hex(sha1hex(pass)) + pepper) */
+static int verify_sha1saltmd5sha1passpepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], mh[16], sha1r[20];
+    char shex[41], mhex[33], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, shex, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)shex, 40, mh);
+    prmd5(mh, mhex, 32);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, mhex, 32);
+    memcpy(buf + saltlen + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-MD5PEPPER-MD5SALT (e597): SHA1(md5hex(md5hex(pass) + salt) + pepper) */
+static int verify_sha1_md5pepper_md5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], inner[65], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(inner, hex, 32);
+    memcpy(inner + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + saltlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(buf, hex, 32);
+    memcpy(buf + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-MD5PEPPER-MD5SALTMD5PASS (e596):
+ * SHA1(md5hex(md5hex(salt) + md5hex(pass)) + pepper) */
+static int verify_sha1_md5pepper_md5saltmd5pass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char passhex[33], salthex[33], combined[65], hex[33];
+    char computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, passhex, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)salt, saltlen, mh);
+    prmd5(mh, salthex, 32);
+    memcpy(combined, salthex, 32);
+    memcpy(combined + 32, passhex, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)combined, 64, mh);
+    prmd5(mh, hex, 32);
+    memcpy(buf, hex, 32);
+    memcpy(buf + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-MD5PEPPER-MD5MD5SALT (e611):
+ * MD5(pass)→hex, MD5(hex)→hex2, MD5(hex2+salt)→hex3, SHA1(hex3+pepper) */
+static int verify_sha1_md5pepper_md5md5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], inner[256], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, mh);
+    prmd5(mh, hex, 32);
+    memcpy(inner, hex, 32);
+    memcpy(inner + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + saltlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(buf, hex, 32);
+    memcpy(buf + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-MD5CAPPEPPER-MD5SALT (e654):
+ * MD5(md5hex(pass)+salt)→hex, CAP first lowercase, SHA1(CAPped+pepper) */
+static int verify_sha1_md5cappepper_md5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], inner[256], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen, y;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(inner, hex, 32);
+    memcpy(inner + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + saltlen, mh);
+    prmd5(mh, hex, 32);
+    for (y = 0; y < 32; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            break;
+        }
+    }
+    memcpy(buf, hex, 32);
+    memcpy(buf + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-PEPPER-MD5SALT (e677):
+ * MD5(md5hex(pass)+salt)→hex, SHA1(pepper + hex) */
+static int verify_sha1_pepper_md5salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], inner[256], computed[41], buf[512];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(inner, hex, 32);
+    memcpy(inner + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + saltlen, mh);
+    prmd5(mh, hex, 32);
+    memcpy(buf, pepper, peplen);
+    memcpy(buf + peplen, hex, 32);
+    SHA1((unsigned char *)buf, peplen + 32, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* --- 7C: 1BYTE-SALT types ---
+ * Salt is "0xNN" hex byte. */
+
+static int parse_1salt(const char *s, int slen)
+{
+    if (slen >= 4 && s[0] == '0' && s[1] == 'x')
+        return (int)strtol(s, NULL, 16);
+    if (slen >= 7 && s[0] == '$' && s[1] == 'H' && s[2] == 'E' && s[3] == 'X' && s[4] == '[') {
+        char tmp[8]; int i;
+        for (i = 0; i < 6 && s[5+i] != ']' && 5+i < slen; i++)
+            tmp[i] = s[5+i];
+        tmp[i] = 0;
+        return (int)strtol(tmp, NULL, 16);
+    }
+    if (slen == 1) return (unsigned char)s[0];
+    return atoi(s);
+}
+
+/* SHA1MD5BASE641SALT (e649): base64(pass)→md5hex→append 1 byte→SHA1
+ * Salt = "0xNN" */
+static int verify_sha1md5base641salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], computed[41];
+    const char *colon, *saltpart;
+    int saltbyte, b64len;
+    char b64[512];
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltbyte = parse_1salt(saltpart, hashlen - 41);
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+
+    if (passlen > 384) return 0;
+    b64len = b64_encode(pass, passlen, b64);
+    rhash_msg(RHASH_MD5, (unsigned char *)b64, b64len, mh);
+    prmd5(mh, hex, 32);
+    hex[32] = (char)saltbyte;
+    SHA1((unsigned char *)hex, 33, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SHA512TRUNC1SALT (e638): SHA512(pass)→hex(128), trunc to N,
+ * append 1 byte, SHA1. Salt = "N 0xNN" */
+static int verify_sha1sha512trunc1salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[64], sha1r[20];
+    char hex[129], computed[41], buf[256];
+    const char *colon, *saltpart;
+    int saltpartlen, trunclen, saltbyte;
+    char trunc_s[32], byte_s[32];
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltpartlen = hashlen - 41;
+    /* Parse "trunclen 0xNN" */
+    {
+        const char *sp = memchr(saltpart, ' ', saltpartlen);
+        if (!sp) return 0;
+        memcpy(trunc_s, saltpart, sp - saltpart); trunc_s[sp - saltpart] = 0;
+        trunclen = atoi(trunc_s);
+        memcpy(byte_s, sp + 1, saltpart + saltpartlen - sp - 1);
+        byte_s[saltpart + saltpartlen - sp - 1] = 0;
+        saltbyte = parse_1salt(byte_s, strlen(byte_s));
+    }
+    if (trunclen < 21 || trunclen > 128) return 0;
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+
+    SHA512(pass, passlen, sh);
+    prmd5(sh, hex, 128);
+    hex[trunclen] = (char)saltbyte;
+    SHA1((unsigned char *)hex, trunclen + 1, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SHA1PASS-TRUNC1SALT (e639):
+ * SHA1(pass)→hex(40)+pass[0:3]→SHA1→hex(40), append 1 byte, SHA1
+ * Salt = "0xNN" */
+static int verify_sha1sha1passtrunc1salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], sha1r[20];
+    char hex[45], computed[41];
+    const char *colon, *saltpart;
+    int saltbyte;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltbyte = parse_1salt(saltpart, hashlen - 41);
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+    if (passlen < 3) return 0;
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, hex, 40);
+    memcpy(hex + 40, pass, 3);
+    SHA1((unsigned char *)hex, 43, sh);
+    prmd5(sh, hex, 40);
+    hex[40] = (char)saltbyte;
+    SHA1((unsigned char *)hex, 41, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA11SALTMD5UC (e718): 1-byte salt pre/appended to MD5UC_hex(pass), SHA1
+ * Tries 5 combinations of salt placement. Salt is single byte char. */
+static int verify_sha11saltmd5uc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[35], computed[41], buf[36];
+    const char *colon, *saltpart;
+    int saltbyte, i;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltbyte = parse_1salt(saltpart, hashlen - 41);
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5UC(mh, hex + 2, 32);
+
+    /* 5 combinations from mdxfind: */
+    hex[0] = hex[1] = hex[34] = hex[35] = (char)saltbyte;
+    /* 1: salt(1) + md5uchex(32) = hex[1..33], SHA1(33) */
+    SHA1((unsigned char *)(hex + 1), 33, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* 2: md5uchex(32) + salt(1) = hex[2..34], SHA1(33) */
+    SHA1((unsigned char *)(hex + 2), 33, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* 3: salt(1) + md5uchex(32) + salt(1) = hex[1..34], SHA1(34) */
+    SHA1((unsigned char *)(hex + 1), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* 4: salt(2) + md5uchex(32) = hex[0..33], SHA1(34) */
+    SHA1((unsigned char *)(hex + 0), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* 5: md5uchex(32) + salt(2) = hex[2..35], SHA1(34) */
+    SHA1((unsigned char *)(hex + 2), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    return 0;
+}
+
+/* SHA11SALTMD5SHA256 (e763): SHA256(pass)→hex(64), MD5(hex)→UC hex(32),
+ * then same 5-combo 1-byte-salt as SHA11SALTMD5UC */
+static int verify_sha11saltmd5sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[32], mh[16], sha1r[20];
+    char shex[65], hex[35], computed[41];
+    const char *colon, *saltpart;
+    int saltbyte;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltbyte = parse_1salt(saltpart, hashlen - 41);
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+
+    SHA256(pass, passlen, sh);
+    prmd5(sh, shex, 64);
+    rhash_msg(RHASH_MD5, (unsigned char *)shex, 64, mh);
+    prmd5(mh, hex + 2, 32);  /* lowercase, not UC — this type is not a UC variant */
+
+    hex[0] = hex[1] = hex[34] = hex[35] = (char)saltbyte;
+    /* Same 5 combos as SHA11SALTMD5UC */
+    SHA1((unsigned char *)(hex + 1), 33, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    SHA1((unsigned char *)(hex + 2), 33, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    SHA1((unsigned char *)(hex + 1), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    SHA1((unsigned char *)(hex + 0), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    SHA1((unsigned char *)(hex + 2), 34, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    return 0;
+}
+
+/* SHA1SHA1MD5MD5PASS1SALT (e687):
+ * md5hex(pass) + pass → MD5 → hex → SHA1 → hex(40), append 1 byte, SHA1
+ * Also tries md5hex(pass) + ":" + pass variant. Salt = "0xNN" */
+static int verify_sha1sha1md5md5pass1salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sh[20], sha1r[20];
+    char hex[41], inner[512], computed[41];
+    const char *colon, *saltpart;
+    int saltbyte;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltbyte = parse_1salt(saltpart, hashlen - 41);
+    if (saltbyte < 9 || saltbyte > 127) return 0;
+    if (passlen > 400) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, inner, 32);
+
+    /* Variant 1: md5hex(pass) + pass */
+    memcpy(inner + 32, pass, passlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + passlen, mh);
+    prmd5(mh, hex, 32);
+    SHA1((unsigned char *)hex, 32, sh);
+    prmd5(sh, hex, 40);
+    hex[40] = (char)saltbyte;
+    SHA1((unsigned char *)hex, 41, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* Variant 2: md5hex(pass) + ":" + pass */
+    inner[32] = ':';
+    memcpy(inner + 33, pass, passlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 33 + passlen, mh);
+    prmd5(mh, hex, 32);
+    SHA1((unsigned char *)hex, 32, sh);
+    prmd5(sh, hex, 40);
+    hex[40] = (char)saltbyte;
+    SHA1((unsigned char *)hex, 41, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    return 0;
+}
+
+/* --- 7D: Other salted types --- */
+
+/* SHA1MD5DSALT (e590): MD5(pass+salt)→hex + separator + salt → SHA1
+ * Tries 4 separator variants: ":", no sep, 1-byte-salt appended. */
+static int verify_sha1md5dsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char buf[512], computed[41];
+    const char *colon, *salt;
+    int saltlen, y;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200 || passlen > 400) return 0;
+
+    /* MD5(pass + salt) → hex into buf[0..31] */
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, passlen + saltlen, mh);
+    prmd5(mh, buf, 32);
+
+    /* Build "md5hex:salt\0" in buf */
+    buf[32] = ':';
+    memcpy(buf + 33, salt, saltlen);
+    buf[33 + saltlen] = 0;
+
+    /* mdcur[0]: SHA1(buf, passlen + saltlen + 1) */
+    SHA1((unsigned char *)buf, passlen + saltlen + 1, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* mdcur[2]: SHA1(buf, passlen + saltlen) */
+    SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* mdcur[3]: SHA1(buf, passlen + 1) */
+    SHA1((unsigned char *)buf, passlen + 1, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* Rebuild as "md5hex + salt\0" (no colon) for mdcur[1] */
+    memcpy(buf + 32, salt, saltlen);
+    buf[32 + saltlen] = 0;
+    SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+
+    /* Variant 4: 1-byte append at [32], SHA1(buf, passlen+1) for bytes 9..126 */
+    if (passlen >= 32) {
+        for (y = 9; y < 127; y++) {
+            if (y == 10) y = ' ';
+            buf[32] = (char)y;
+            SHA1((unsigned char *)buf, passlen + 1, sha1r);
+            prmd5(sha1r, computed, 40);
+            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* SHA1MD5MD5DSALT (e591): md5hex(md5hex(pass))→hex, then same as SHA1MD5DSALT */
+static int verify_sha1md5md5dsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16];
+    char hex[33];
+    /* MD5(pass) → hex, then verify as SHA1MD5DSALT with hex as "password" */
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, hex, 32);
+    return verify_sha1md5dsalt(hashstr, hashlen, (unsigned char *)hex, 32);
+}
+
+/* SHA1MD5SALTPASSPEPPER (e607):
+ * MD5(salt+pass)→hex, SHA1(hex + pepper). Salt field = "salt pepper" */
+static int verify_sha1md5saltpasspepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char buf[512], computed[41];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+
+    /* MD5(salt + pass) */
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, pass, passlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, saltlen + passlen, mh);
+    /* mdxfind layout: buf[0..saltlen-1]=salt, buf[saltlen..saltlen+31]=md5hex,
+     * then pepper at buf[32..32+peplen-1]. SHA1(buf, 32+peplen) */
+    prmd5(mh, buf + saltlen, 32);
+    memcpy(buf + 32, pepper, peplen);
+    SHA1((unsigned char *)buf, 32 + peplen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1MD5xSALT (e736): MD5^N(pass)→hex + salt → SHA1.
+ * Salt field = "N salt" (iteration count, space, real salt) */
+static int verify_sha1md5xsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], computed[41], buf[256];
+    const char *colon, *saltpart, *sp;
+    int saltpartlen, niter, i;
+    char real_salt[256];
+    int real_saltlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    saltpartlen = hashlen - 41;
+    /* Parse "N salt" */
+    sp = memchr(saltpart, ' ', saltpartlen);
+    if (!sp) return 0;
+    niter = atoi(saltpart);
+    if (niter < 1 || niter > 100000) return 0;
+    real_saltlen = saltpartlen - (sp - saltpart) - 1;
+    memcpy(real_salt, sp + 1, real_saltlen);
+
+    /* MD5^N(pass) */
+    {
+        const unsigned char *inp = pass;
+        int inlen = passlen;
+        for (i = 0; i < niter; i++) {
+            rhash_msg(RHASH_MD5, inp, inlen, mh);
+            prmd5(mh, hex, 32);
+            inp = (unsigned char *)hex;
+            inlen = 32;
+        }
+    }
+    memcpy(buf, hex, 32);
+    memcpy(buf + 32, real_salt, real_saltlen);
+    SHA1((unsigned char *)buf, 32 + real_saltlen, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTSHA1CAP (e744): SHA1(pass)→hex, CAP first lowercase, salt+hex→SHA1 */
+static int verify_sha1saltsha1cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], sha1r[20];
+    char hex[41], computed[41], buf[256];
+    const char *colon, *salt;
+    int saltlen, y;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, hex, 40);
+    for (y = 0; y < 40; y++) {
+        if (islower((unsigned char)hex[y])) {
+            hex[y] = toupper((unsigned char)hex[y]);
+            break;
+        }
+    }
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex, 40);
+    SHA1((unsigned char *)buf, saltlen + 40, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SALTMD5UCMD5UC (e757): MD5(pass)→UC→MD5(UC)→UC→salt prepend→SHA1 */
+static int verify_sha1saltmd5ucmd5uc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], computed[41], buf[256];
+    const char *colon, *salt;
+    int saltlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5UC(mh, hex, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, mh);
+    prmd5UC(mh, hex, 32);
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, hex, 32);
+    SHA1((unsigned char *)buf, saltlen + 32, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1MD5UC-MD5UCSALT (e692): MD5(pass)→UC→MD5(UC+salt)→UC→SHA1 */
+static int verify_sha1md5uc_md5ucsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex[33], inner[256], computed[41];
+    const char *colon, *salt;
+    int saltlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5UC(mh, hex, 32);
+    memcpy(inner, hex, 32);
+    memcpy(inner + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)inner, 32 + saltlen, mh);
+    prmd5UC(mh, hex, 32);
+    SHA1((unsigned char *)hex, 32, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-MD5UCMD5UCPASSMD5UCSALT (e662):
+ * MD5(pass)→UC→MD5(UC)→UC + MD5(salt)→UC→SHA1 of concatenation */
+static int verify_sha1_md5ucmd5ucpassmd5ucsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16], sha1r[20];
+    char hex1[33], hex2[33], computed[41], buf[65];
+    const char *colon, *salt;
+    int saltlen, y;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5UC(mh, hex1, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex1, 32, mh);
+    prmd5UC(mh, hex1, 32);
+
+    rhash_msg(RHASH_MD5, (unsigned char *)salt, saltlen, mh);
+    prmd5(mh, hex2, 32);
+    for (y = 0; y < 32; y++)
+        if (islower((unsigned char)hex2[y]))
+            hex2[y] = toupper((unsigned char)hex2[y]);
+
+    memcpy(buf, hex1, 32);
+    memcpy(buf + 32, hex2, 32);
+    SHA1((unsigned char *)buf, 64, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-SALTSHA1U16 (e824): SHA1(UTF16LE(user:pass)), then SHA1(hex_salt_raw + sha1_raw)
+ * Salt field = hex-encoded salt, user in salt too (complex). */
+static int verify_sha1_saltsha1u16(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], sha1r[20], rawsalt[128];
+    char utf16[512], computed[41];
+    const char *colon, *salt;
+    int saltlen, rawlen, u16len, i;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    salt = colon + 1;
+    saltlen = hashlen - 41;
+    if (saltlen < 1 || saltlen > 200) return 0;
+
+    /* Convert "admin:password" to UTF16LE(user) + ':' + UTF16LE(pass) */
+    {
+        const char *user = "admin";
+        int ulen = 5;
+        u16len = 0;
+        for (i = 0; i < ulen; i++) { utf16[u16len++] = user[i]; utf16[u16len++] = 0; }
+        utf16[u16len++] = ':';  /* single ASCII byte, NOT UTF16LE */
+        for (i = 0; i < passlen; i++) { utf16[u16len++] = pass[i]; utf16[u16len++] = 0; }
+    }
+    SHA1((unsigned char *)utf16, u16len, sh);
+
+    /* Hex-decode salt to raw binary (stop at first invalid hex pair, matching get32) */
+    rawlen = 0;
+    for (i = 0; i + 1 < saltlen; i += 2) {
+        int hi, lo;
+        unsigned char c = (unsigned char)salt[i];
+        if (c >= '0' && c <= '9') hi = c - '0';
+        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
+        else break;
+        c = (unsigned char)salt[i+1];
+        if (c >= '0' && c <= '9') lo = c - '0';
+        else if (c >= 'a' && c <= 'f') lo = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') lo = c - 'A' + 10;
+        else break;
+        if (rawlen >= 128) break;
+        rawsalt[rawlen++] = (unsigned char)((hi << 4) | lo);
+    }
+    memcpy(rawsalt + rawlen, sh, 20);
+    SHA1(rawsalt, rawlen + 20, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1SHA1TRUNC-SHA1PASS-3 (e684):
+ * SHA1(pass)→hex(40)+pass[0:3]→SHA1→hex(40)→TRUNC→SHA1
+ * Falls through to SHA1SHA1TRUNC logic. Salt = trunc length. */
+static int verify_sha1sha1trunc_sha1pass_3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], sha1r[20];
+    char hex[45], computed[41];
+    const char *colon, *saltpart;
+    int trunclen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    trunclen = atoi(saltpart);
+    if (trunclen < 20 || trunclen > 40) return 0;
+    if (passlen < 3) return 0;
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, hex, 40);
+    memcpy(hex + 40, pass, 3);
+    SHA1((unsigned char *)hex, 43, sh);
+    prmd5(sh, hex, 40);
+
+    /* Left-aligned */
+    SHA1((unsigned char *)hex, trunclen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    /* Right-aligned */
+    SHA1((unsigned char *)(hex + (40 - trunclen)), trunclen, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    return 0;
+}
+
+/* SHA1USERSQL3 (e474): mysql3(pass) → user:mysql3hex → SHA1
+ * Salt field = user */
+static int verify_sha1usersql3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1r[20];
+    char m3hex[17], computed[41], buf[256];
+    const char *colon, *user;
+    int userlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    user = colon + 1;
+    userlen = hashlen - 41;
+    if (userlen < 0 || userlen > 200) return 0;
+
+    mysql3_hex(pass, passlen, m3hex);
+    memcpy(buf, user, userlen);
+    buf[userlen] = ':';
+    memcpy(buf + userlen + 1, m3hex, 16);
+    SHA1((unsigned char *)buf, userlen + 17, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-HMAC-MD5 (e680): HMAC-MD5(key=user, data=pass) → hex → SHA1
+ * Salt field = user/key */
+static int verify_sha1_hmac_md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char hmac[16], sha1r[20];
+    char hex[33], computed[41];
+    const char *colon, *key;
+    int keylen;
+    unsigned int mdlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    key = colon + 1;
+    keylen = hashlen - 41;
+    if (keylen < 0 || keylen > 200) return 0;
+
+    HMAC(EVP_md5(), key, keylen, pass, passlen, hmac, &mdlen);
+    prmd5(hmac, hex, 32);
+    SHA1((unsigned char *)hex, 32, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* SHA1-SALT-UTF16-PEPPER (e446): complex — reverse pass, lowercase, strip spaces,
+ * UTF16LE(salt + reversed_pass + pepper), SHA1 */
+static int verify_sha1_salt_utf16_pepper(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sha1r[20];
+    char reversed[256], combined[512], utf16[1024], computed[41];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen, i, rlen, clen, u16len;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 41, salt, &saltlen, pepper, &peplen);
+    if (passlen > 200) return 0;
+
+    /* Reverse pass, lowercase, strip spaces */
+    rlen = 0;
+    for (i = passlen - 1; i >= 0; i--) {
+        char c = pass[i];
+        if (c != ' ') {
+            if (isupper((unsigned char)c)) c = tolower((unsigned char)c);
+            reversed[rlen++] = c;
+        }
+    }
+    /* Build: salt + reversed + pepper */
+    clen = 0;
+    memcpy(combined + clen, salt, saltlen); clen += saltlen;
+    memcpy(combined + clen, reversed, rlen); clen += rlen;
+    memcpy(combined + clen, pepper, peplen); clen += peplen;
+    /* Convert to UTF16LE */
+    u16len = 0;
+    for (i = 0; i < clen; i++) {
+        utf16[u16len++] = combined[i];
+        utf16[u16len++] = 0;
+    }
+    SHA1((unsigned char *)utf16, u16len, sha1r);
+    prmd5(sha1r, computed, 40);
+    return strncasecmp(computed, hashstr, 40) == 0;
+}
+
+/* ================================================================== */
+/* Phase 8: MD5 pepper types                                          */
+/* ================================================================== */
+
+/* MD5-MD5MD5PASSSALT-PEP (e819): md5(md5(md5(pass) + salt) + pepper)
+ * Salt field = "salt pepper" */
+static int verify_md5_md5md5passsalt_pep(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16];
+    char hex[33], buf[512], computed[33];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 33, salt, &saltlen, pepper, &peplen);
+
+    /* md5(pass) → hex */
+    rhash_msg(RHASH_MD5, pass, passlen, mh);
+    prmd5(mh, buf, 32);
+    /* md5(md5hex + salt) → hex */
+    memcpy(buf + 32, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32 + saltlen, mh);
+    prmd5(mh, buf, 32);
+    /* md5(md5hex + pepper) */
+    memcpy(buf + 32, pepper, peplen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32 + peplen, mh);
+    prmd5(mh, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* MD5-MD5MD5PASSSALT-PEP2 (e821): md5(md5(md5(pass + salt)) + pepper)
+ * Salt field = "salt pepper" */
+static int verify_md5_md5md5passsalt_pep2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char mh[16];
+    char buf[512], computed[33];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 33, salt, &saltlen, pepper, &peplen);
+
+    /* md5(pass + salt) → hex */
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, salt, saltlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, passlen + saltlen, mh);
+    prmd5(mh, buf, 32);
+    /* md5(md5hex) → hex */
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32, mh);
+    prmd5(mh, buf, 32);
+    /* md5(md5hex + pepper) */
+    memcpy(buf + 32, pepper, peplen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32 + peplen, mh);
+    prmd5(mh, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
+/* MD5-SALT-SHA1PEPPASS (e822): md5(salt + sha1hex(pepper + pass))
+ * Salt field = "salt pepper" */
+static int verify_md5_salt_sha1peppass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char sh[20], mh[16];
+    char sha1hex[41], buf[512], computed[33];
+    const char *colon, *saltpart;
+    char salt[256], pepper[256];
+    int saltlen, peplen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    saltpart = colon + 1;
+    parse_saltpepper(saltpart, hashlen - 33, salt, &saltlen, pepper, &peplen);
+
+    /* sha1(pepper + pass) → hex */
+    memcpy(buf, pepper, peplen);
+    memcpy(buf + peplen, pass, passlen);
+    SHA1((unsigned char *)buf, peplen + passlen, sh);
+    prmd5(sh, sha1hex, 40);
+    /* md5(salt + sha1hex) */
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, sha1hex, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, saltlen + 40, mh);
+    prmd5(mh, computed, 32);
+    return strncasecmp(computed, hashstr, 32) == 0;
+}
+
 /* ---- Chain arrays for types needing HTC registration ---- */
 static struct chain_step chain_md5sha1ucmd5uc[] = { SU_MD5, SU_SHA1, S_MD5 };
 /* chain_md5md5ucsha1md5md5 defined earlier */
@@ -10188,7 +12955,7 @@ static void init_hashtypes(void)
     HT("NULL",          16, 0, compute_null, "70617373776f7264313233000a000000:password123");
     HT("MYSQL3",         8, 0, compute_mysql3, "0b034ec713f89a68:password123");
     HT("LM",           16, 0, compute_lm, "e52cac67419a9a22664345140a852f61:PASSWORD123");
-    HT("NTLMH",        16, HTF_COMPOSED, compute_ntlmh, NULL);
+    HTV("NTLMH",        0, verify_ntlmh, "b3f4b4d05705228f87ed95e91e25bc70:$HEX[c0ffeebabe]");
     HT("SKYPE",        16, HTF_SALTED, compute_skype, "229922b8b59931e6f8bfd223eb006806:chloe01:password123");
     HT("RMD320",       40, 0, compute_rmd320, NULL);
     HT("SHA1DRU",      20, 0, compute_sha1dru, "d5e8e759bb5c48d9adb0b0d640ab030cba3e3b01:password123");
@@ -10285,7 +13052,7 @@ static void init_hashtypes(void)
     Hashtypes[find_type_index("MD4UTF16MD5x")].iter_fn = (hashfn_t)compute_ntlm;
     HT("MD4UTF16SHA1x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16sha1x, NULL);
     Hashtypes[find_type_index("MD4UTF16SHA1x")].iter_fn = (hashfn_t)compute_ntlm;
-    HT("MD4UTF16revBASE64x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16revbase64x, NULL);
+    HT("MD4UTF16revBASE64x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16revbase64x, "c0a08297890abfed6dd7be5356ff2130:1:password123");
     Hashtypes[find_type_index("MD4UTF16revBASE64x")].iter_fn = (hashfn_t)compute_ntlm;
     HT("MD4UTF16SHA256x",32,HTF_COMPOSED, compute_md4utf16sha256, NULL);
     HT("SHA1MD5UCx",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5ucx, NULL);
@@ -10791,6 +13558,117 @@ static void init_hashtypes(void)
     HTV("NSEC3",       0, verify_nsec3, "44jvntvfj82gq27k8ps7pqrjlo5h9c58:.x.net:1:00:password123");
     HTV("DOMINO5",     0, verify_domino5, "173127311326bb6eeacdfef5c2791514:password123");
     HTV("DOMINO6",     0, verify_domino6, "(G0000101iBosJ2cVSZqu):password123");
+
+    /* Phase 1: Crypt-based verify types */
+    HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
+    HTV("MD5CRYPT",    0, verify_md5crypt, "$1$rndSa1t$Qprc9yqwxuXgLPGQYn8/M1:password123");
+    HTV("JUNIPERIVE",  0, verify_md5crypt, "$1$rndSa1t$Qprc9yqwxuXgLPGQYn8/M1:password123");
+    HTV("SHA256CRYPT",  0, verify_sha256crypt, "$5$rndSa1t$128qLp1GH7Qcc2/kyO/.6dtTlHHiHyRcNMAdCAFSjU1:password123");
+    HTV("SHA512CRYPT",  0, verify_sha512crypt, "$6$rndSa1t$DOby8RCDS9bqigcwmpaMwAlFOxGdrhVKkZNgli1bqKDoKl0w62cJ3BF6ze4AF0vY3wvOj6iLJNUc.D45MxjTM0:password123");
+    HTV("SHA512CRYPTMD5", 0, verify_sha512cryptmd5, "$6$rndSa1t$VEiMRPskJtV5DgDifIJPozJKKcU9qnofAewMbRvGQz0F5pG6kimj02ELUVsQOozdhtM1X8Qya4d9HzW7Wistg/:password123");
+    HTV("MD5DESCRYPT",  0, verify_md5descrypt, "a090d5a8fd2dec240048fc92bf704dc0:..:password");
+    HTV("MD4DESCRYPT",  0, verify_md4descrypt, "1eecdf5abc568f7822aa9a00ff39e876:..:password");
+    HTV("SHA1DESCRYPT", 0, verify_sha1descrypt, "4ac9fce4c379eeaafa815a81da1bd451be87ea52:..:password");
+    HTV("MD4UTF16DESCRYPT", 0, verify_md4utf16descrypt, "6c29032ff65d0cab0b4f83cda5af788e:..:password");
+    HTV("BCRYPT256",   0, verify_bcrypt256, "$2a$12$DG3Vk1qDyvwkh96yaCuf6.HqWPKac6Ur7nOitGIbrN05iqtnveM7C:password123");
+
+    /* Phase 2: PBKDF2/KDF verify types */
+    HTV("PBKDF2-MD5",    0, verify_pbkdf2md5, "md5:100:dGVzdA:42hb/sqDoUziU7MbHP76e0LKwSoHJcSdDS6RMaywNFs=:password123");
+    HTV("PBKDF2-SHA1",   0, verify_pbkdf2sha1, "sha1:100:dGVzdA:JTkptWKRlhEnUcwCFCdX/7Q8iyU=:password123");
+    HTV("PBKDF2-SHA256", 0, verify_pbkdf2sha256, "sha256:100:dGVzdA:EzztVA6V4NTgoFma1UJYNBCjBI3mqya9:password123");
+    HTV("PBKDF2-SHA512", 0, verify_pbkdf2sha512, "sha512:100:dGVzdA:fUaRYJbFLqw4Gz7AEjFLetYNcozT25qdphhFs+kY5REqO9NCFlt2Y256Lyx78m4jcLd7RB96inePiMCpYgxjNw==:password123");
+    HTV("PKCS5S2",       0, verify_pkcs5s2, "{PKCS5S2}AAAAAAAAAAAAAAAAAAAAAN+2N9jMqA4+E7Ij9E+o21oauMEHYxLsge+y//Qrfg8E:password123");
+    HTV("CISCO8",        0, verify_cisco8, "$8$rndSa1tRndSa1t$oV/qTxtgTZT3qQxAqKfTYwiAut3fNrrjbDr1aEYt6Yo:password123");
+
+    /* Phase 3: Base64 salted verify types */
+    HTV("SSHA1BASE64",   0, verify_ssha1base64, "{SSHA}5vmqYXnhk1zUO+N3U/Qz0DsgALfLHQD3:password123");
+    HTV("SSHA256BASE64", 0, verify_ssha256base64, "{SSHA256}XhimPozJJ9oqxpCbQauJQprG3UyKnCIqQuXnN5t6Hv4O/bDZ:password123");
+    HTV("SSHA512BASE64", 0, verify_ssha512base64, "{SSHA512}Ez2Xp55xerUzNyNXPfxuGDxgzItJLkWWY86Rikkvqs64xKnzjdtMdHrGwd6a3r4YSgTuOx+vKeLn0EK/KKmEDnRlc3Q=:password123");
+
+    /* Phase 4: Format-specific types */
+    HTV("PHPBB3MD5",     0, verify_phpbb3md5, "$H$9rndSa1tXzz3PJ.hT4y5reUgL7cbu6.:password123");
+    HTV("PHPS",          0, verify_phps, "$PHPS$3031$216cb30ddee43eced3bb76fd38e0b7df:password123");
+    HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
+    HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk=:AQIDBA==:password123");
+    HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
+    HT("MURMUR64A",      8, HTF_SALTED, compute_murmur64a, "ae8450e53d91404d:1234:password123");
+    HTV("LEET-SHA512-WRL-USER", 0, verify_leet, "a6d30e2e854f1d4cac651ceaf60653eb1bf1f65b94a5a5b74ec2cab0db1cd2884900951ce38285648a56772b20245ead162c3851306108ae5dc42cdcf0c85e33:testuser:password123");
+    HTV("SHA1-SALT-SPECIAL", 0, verify_sha1saltspecial, "f92ee20c177b89de3bfd27ca288411edeb9ff042:xy:password123");
+
+    /* Phase 5: MD4UTF16 (NTLM) variant types */
+    HT("MD4UTF16SQL3",   16, 0, compute_ntlm_sql3, "0f99d3030517365fa5ddf811049bba9b:password123");
+    HT("MD4UTF16BASE64", 16, 0, compute_ntlm_base64, "664e71493273a450547f4a95b09b334c:password123");
+    HT("MD4UTF16BASE64SHA256", 16, 0, compute_ntlm_base64sha256, "e665c60de247442660bf1b08cb990450:password123");
+    HTV("MD4UTF16MD5PASSMD5SALT", 0, verify_ntlm_md5passmd5salt, "6adbba6f0d932b60b5976c680e9bf785:12345:password123");
+    HTV("MD4UTF16MD5MD5PASSMD5SALT", 0, verify_ntlm_md5md5passmd5salt, "cdb3fdeb0157b72ee2687b8247dc8cd9:testsalt:password123");
+    HTV("MD4UTF16MD5PASSMD5SHA1SALT", 0, verify_ntlm_md5passmd5sha1salt, "7580dc2df5377815adfadf80e3e3d7bb:testsalt:password123");
+
+    /* Phase 6: Unsalted SHA1 CAP/UC/TRUNC compositions */
+    /* Group A: Simple compute */
+    HT("SHA1BASE64MD5UC",  20, 0, compute_sha1base64md5uc, "d9ea5668f450ddcf51e01233b05ec377783d4290:password123");
+    HT("SHA1MD5UCSHA1BASE64", 20, 0, compute_sha1md5ucsha1base64, "fe7995dc1f0a5bfcbe57f0e9db45ee5e5c4c921b:password123");
+    HT("SHA1MD5MD5UCMD5UC", 20, 0, compute_sha1md5md5ucmd5uc, "1e661ee6c7c98dba76ebf558a8e87d32c2a32dac:password123");
+    HT("SHA1MD5MD5UCMD5MD5UC", 20, 0, compute_sha1md5md5ucmd5md5uc, "e7d24dcb61b4123f5e89fd4a18a783094c1c179d:password123");
+    HT("SHA1MD5RAWUCMD5RAW", 20, 0, compute_sha1md5rawucmd5raw, "342253134b68aeed85df679708153d6c6dfb5391:password123");
+    HT("MD5SHA1MD5SHA1MD5SHA1MD5SHA1MD5SHA1MD5SHA1", 16, 0, compute_md5sha1x6, "12d206e7dea1f4a352997ccb85be4812:password123");
+    /* Group B: CAP verify (unsalted) */
+    HTV("SHA1MD51CAP",    0, verify_sha1md51cap, "09936cb4c466edfde7c94569792dc39163bf2984:password123");
+    HTV("SHA1MD51CAPMD5", 0, verify_sha1md51capmd5, "19743a66812323e2a7d1d3598a49e1bbab41389f:password123");
+    HTV("SHA1SHA11CAP",   0, verify_sha1sha11cap, "df5dfb781656c687d63c337c142537d0d9055da1:password123");
+    /* Group C: TRUNC+CAP verify (salt=truncation length) */
+    HTV("SHA1SHA1CAPTRUNC", 0, verify_sha1sha1captrunc, "df5dfb781656c687d63c337c142537d0d9055da1:40:password123");
+    HTV("SHA1MD6CAPTRUNC",  0, verify_sha1md6captrunc, "dc336305f2c4a0ec98fdc5be57429176da2b7701:32:password123");
+    /* Group D: Iterated CAP verify (salt=iteration count) */
+    HTV("SHA1MD5x1CAP",  0, verify_sha1md5x1cap, "09936cb4c466edfde7c94569792dc39163bf2984:1:password123");
+
+    /* Phase 7: Salted SHA1 compositions */
+    /* 7A: TRUNC+SALT */
+    HTV("SHA1MD5TRUNCSALT", 0, verify_sha1md5truncsalt, "f98326e072780bdba37b7b1cc144f6dd7b18cba5:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 32:password123");
+    HTV("SHA1SHA1TRUNCSALT", 0, verify_sha1sha1truncsalt, "1a42a781654831a7459659b44001c0c291711ec2:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 40:password123");
+    HTV("SHA1WRLUCTRUNCSALT", 0, verify_sha1wrluctruncsalt, "76b863a553ad0cf1bb8da94f9a0d427f1e6ca395:1122334455667788 128:password123");
+    HTV("SHA1SHA256TRUNCSALT", 0, verify_sha1sha256truncsalt, "dacff3bff50db6dcacee1f52d6bc22ccbe8184b9:Salt 63:password123");
+    HTV("SHA1SHA256TRUNCMD5SALT", 0, verify_sha1sha256truncmd5salt, "23101d128277f9cdc7bc3f1ffdd13f868c722743:1122334455667788 63:password123");
+    HTV("SHA1SALTSHA256TRUNC", 0, verify_sha1saltsha256trunc, "28f11333c2180248c75695abdfb0ce84df9239b6:1122334455667788 64:password123");
+    HTV("SHA1SALTSHA256TRUNCMD5", 0, verify_sha1saltsha256truncmd5, "a032180fd741fa38d10fa1991ce8236628648be6:1122334455667788 64:password123");
+    HTV("SHA1SALTSHA256UCTRUNC", 0, verify_sha1saltsha256uctrunc, "0426f616d4c9a448828ca51996a17223ec7016d5:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 64:password123");
+    HTV("SHA1SALTSHA512UCTRUNC", 0, verify_sha1saltsha512uctrunc, "dade4eca35da0d63d9f335440921ac4a64ef9d36:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 128:password123");
+    /* 7B: PEPPER */
+    HTV("SHA1SALTMD5PASSPEPPER", 0, verify_sha1saltmd5passpepper, "01b32171d9bddde3007607d436a702681479cccc:1122334455667788 1122334455667788:password123");
+    HTV("SHA1SALTMD5UCPASSPEPPER", 0, verify_sha1saltmd5ucpasspepper, "210fc68b2e04fb19979a9cc1405bd8383357bce0:1122334455667788 1122334455667788:password123");
+    HTV("SHA1SALTSHA1PASSPEPPER", 0, verify_sha1saltsha1passpepper, "96b733c2fc488733362d18938063c27852f7dd3b:1122334455667788 1122334455667788:password123");
+    HTV("SHA1SALTMD5MD5PASSPEPPER", 0, verify_sha1saltmd5md5passpepper, "ff988c10889bf8e9305e42aa6c947ad3f67d0319:1122334455667788 1122334455667788:password123");
+    HTV("SHA1SALTMD5SHA1PASSPEPPER", 0, verify_sha1saltmd5sha1passpepper, "66a1108561a94314c05dd789b23a0bf3509edae9:1122334455667788 1122334455667788:password123");
+    HTV("SHA1-MD5PEPPER-MD5SALT", 0, verify_sha1_md5pepper_md5salt, "bfe4f8b9a5a9d291f1a711ce22e719f69e65e3ab:1122334455667788 1122334455667788:password123");
+    HTV("SHA1-MD5PEPPER-MD5SALTMD5PASS", 0, verify_sha1_md5pepper_md5saltmd5pass, "640a2a8b1444c45ba6cd88e28fc7c8d47a68b650:KMo), 1122334455667788:password123");
+    HTV("SHA1-MD5PEPPER-MD5MD5SALT", 0, verify_sha1_md5pepper_md5md5salt, "2ddcb3e59782e68347ce0e52183c3c8ab8553b56:1122334455667788 1122334455667788:password123");
+    HTV("SHA1-MD5CAPPEPPER-MD5SALT", 0, verify_sha1_md5cappepper_md5salt, "f9aa819520756eb6bad66c7ddc9777d9e8041c98:1122334455667788 1122334455667788:password123");
+    HTV("SHA1-PEPPER-MD5SALT", 0, verify_sha1_pepper_md5salt, "b0a272ab3102c397f593f32968491c6b30ee529e:1122334455667788 1122334455667788:password123");
+    /* 7C: 1BYTE-SALT */
+    HTV("SHA1MD5BASE641SALT", 0, verify_sha1md5base641salt, "50ec647b191131375430af03c03c7e94f188470b:0x09:password123");
+    HTV("SHA1SHA512TRUNC1SALT", 0, verify_sha1sha512trunc1salt, "7a41e88b8e77d5fcf190144f31d90f96205b71a1:128 0x09:password123");
+    HTV("SHA1SHA1PASS-TRUNC1SALT", 0, verify_sha1sha1passtrunc1salt, "21b3f0a412fc7d47ba9e249a723f492b107fa1ec:0x09:password123");
+    HTV("SHA11SALTMD5UC", 0, verify_sha11saltmd5uc, "576ff2bfc44117616a672085311ebe8c12d32772:$HEX[09]:password123");
+    HTV("SHA11SALTMD5SHA256", 0, verify_sha11saltmd5sha256, "1fbe24e8ee1bfb36376dc8715af1c2eb15764c05:$HEX[09]:password123");
+    HTV("SHA1SHA1MD5MD5PASS1SALT", 0, verify_sha1sha1md5md5pass1salt, "125a2e1803fb08fb9f14523573f0e3b6f426ce67:0x09:password123");
+    /* 7D: Other salted */
+    HTV("SHA1MD5DSALT", 0, verify_sha1md5dsalt, "0d9e801c8ce150ad07cb69cc220d4cfa2b358d83:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123");
+    HTV("SHA1MD5MD5DSALT", 0, verify_sha1md5md5dsalt, "29e4ac58c1233cd331820c19fbd56894c107b4de:1122334455667788:password123");
+    HTV("SHA1MD5SALTPASSPEPPER", 0, verify_sha1md5saltpasspepper, "786aab530907a783e9c25a2c7326ab7907ebf798:1122334455667788 1122334455667788:password123");
+    HTV("SHA1MD5xSALT", 0, verify_sha1md5xsalt, "12d66f224a0fbdf4b7371400f9fece702d4c48a5:1 Salt:password123");
+    HTV("SHA1SALTSHA1CAP", 0, verify_sha1saltsha1cap, "963456f4db8d33521a7db3fb42aef0b69fdc346a:1122334455667788:password123");
+    HTV("SHA1SALTMD5UCMD5UC", 0, verify_sha1saltmd5ucmd5uc, "f64fcfa112d86a86ae338ea17486b5fdfde00830:1122334455667788:password123");
+    HTV("SHA1MD5UC-MD5UCSALT", 0, verify_sha1md5uc_md5ucsalt, "10edef8e8978c5bc48790ce2180d188667e9fc53:1122334455667788:password123");
+    HTV("SHA1-MD5UCMD5UCPASSMD5UCSALT", 0, verify_sha1_md5ucmd5ucpassmd5ucsalt, "1e17927889edd68d1cd51b698c12785459db4c9d:1122334455667788:password123");
+    HTV("SHA1-SALTSHA1U16", 0, verify_sha1_saltsha1u16, "c4e9682c8036602551bb1798e4bc85bbc8f83217:aabb0011:password123");
+    HTV("SHA1-SALT-UTF16-PEPPER", 0, verify_sha1_salt_utf16_pepper, "8477431034949d2552f59f29d754eb5894b7c56c:f5g= of8=:password123");
+    HTV("SHA1SHA1TRUNC-SHA1PASS-3", 0, verify_sha1sha1trunc_sha1pass_3, "909eceefbc2417ede0444615de5eee9db5c8239f:40:password123");
+    HTV("SHA1USERSQL3", 0, verify_sha1usersql3, "5d38c6ca00b8dfc5c637eac7c9ff5a7af0d600ff:1122334455667788:password123");
+    HTV("SHA1-HMAC-MD5", 0, verify_sha1_hmac_md5, "359c696447a6e84ab2532c38c6c0f081ec58c09a:1122334455667788:password123");
+
+    /* Phase 8: MD5 pepper types */
+    HTV("MD5-MD5MD5PASSSALT-PEP", 0, verify_md5_md5md5passsalt_pep, "ee7c5e3d9be506a265c21e426add16ec:Salt Pepper:password123");
+    HTV("MD5-MD5MD5PASSSALT-PEP2", 0, verify_md5_md5md5passsalt_pep2, "047fa549f1df6605aca81502bb2952af:Salt Pepper:password123");
+    HTV("MD5-SALT-SHA1PEPPASS", 0, verify_md5_salt_sha1peppass, "18c133153bfd1b331afcde5f81fd0809:Salt Pepper:password123");
 
     #undef HT
     #undef HTC
@@ -13163,6 +16041,54 @@ static void init_rates(void)
         {876, 240LL}, {877, 611340LL}, {878, 5355245LL}, {879, 3549919LL},
         {880, 1997303LL}, {881, 4538035LL}, {882, 295776LL}, {883, 98651LL},
         {884, 7050LL},
+        /* Phase 1: Crypt */
+        {500, 307854LL}, {501, 282154LL}, {502, 290598LL}, {511, 5008LL},
+        {512, 455LL}, {513, 510LL}, {538, 343LL}, {573, 285648LL},
+        {574, 282562LL}, {577, 5LL},
+        /* Phase 2: PBKDF2/KDF */
+        {529, 37LL}, {530, 6931LL}, {531, 5358LL}, {532, 10449LL},
+        {533, 6040LL}, {534, 53LL},
+        /* Phase 3: SSHA base64 */
+        {833, 3500550LL}, {835, 1947255LL}, {836, 1404498LL},
+        /* Phase 4: Format-specific */
+        {444, 527029LL}, {445, 282006LL}, {446, 2371926LL}, {459, 3449799LL},
+        {474, 2427946LL}, {536, 3277075LL}, {537, 2467LL}, {540, 2284335LL},
+        {829, 72252720LL}, {885, 4005LL}, {886, 1685366LL},
+        /* Phase 5: MD4UTF16 variants */
+        {783, 1850696LL}, {784, 1452312LL}, {785, 1520184LL},
+        {787, 4348447LL}, {788, 4493704LL}, {791, 1029550LL},
+        /* Phase 6: Unsalted SHA1 CAP/UC/TRUNC */
+        {522, 401433LL}, {656, 1703761LL}, {657, 321453LL}, {664, 1752548LL},
+        {696, 1565880LL}, {709, 1222324LL}, {717, 1186114LL}, {733, 296834LL},
+        {737, 1852812LL}, {747, 2161880LL}, {749, 1622375LL}, {756, 953558LL},
+        /* Phase 7A: TRUNC+SALT */
+        {672, 871716LL}, {678, 1328958LL}, {679, 1130237LL}, {683, 1696942LL},
+        {690, 1122899LL}, {691, 1453593LL}, {725, 1403345LL}, {726, 1117040LL},
+        {739, 1875366LL},
+        /* Phase 7B: PEPPER */
+        {596, 998821LL}, {597, 1391795LL}, {602, 1539333LL}, {607, 1549434LL},
+        {611, 1088895LL}, {651, 1611141LL}, {654, 1403749LL}, {677, 1386932LL},
+        {681, 1722003LL}, {719, 1177212LL}, {742, 1259901LL},
+        /* Phase 7C: 1BYTE-SALT */
+        {638, 1407074LL}, {639, 2256863LL}, {649, 2618314LL}, {687, 1571804LL},
+        {718, 2682830LL}, {763, 1449107LL},
+        /* Phase 7D: Other salted */
+        {590, 1605970LL}, {591, 1188061LL}, {662, 762620LL}, {680, 600561LL},
+        {684, 1262847LL}, {692, 1204318LL}, {736, 1465326LL}, {744, 1391799LL},
+        {757, 1184746LL}, {824, 1712245LL},
+        /* Phase 8: MD5 pepper */
+        {819, 2055403LL}, {821, 2013299LL}, {822, 2986567LL},
+        /* Previously unbenched salted-compute types */
+        {364, 1112395LL}, {365, 1158997LL}, {366, 1644836LL}, {378, 1084385LL},
+        {466, 1098003LL}, {467, 1112824LL}, {469, 1670365LL}, {470, 838985LL},
+        {471, 1131693LL}, {473, 1110172LL}, {514, 728292LL}, {515, 1619152LL},
+        {516, 1617562LL}, {517, 1695952LL}, {518, 1659164LL}, {519, 1663274LL},
+        {528, 1155560LL}, {557, 631530LL}, {575, 1490254LL}, {576, 1551059LL},
+        {587, 1167205LL}, {589, 1131106LL}, {598, 1126958LL}, {603, 987594LL},
+        {619, 697284LL}, {627, 623838LL}, {633, 878792LL}, {637, 405441LL},
+        {669, 1144968LL}, {685, 1136455LL}, {720, 1237217LL}, {735, 1215215LL},
+        {738, 1863682LL}, {751, 1853275LL}, {759, 1875234LL},
+        {789, 4741402LL}, {817, 2426002LL}, {818, 3173427LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
@@ -13312,14 +16238,14 @@ int main(int argc, char **argv)
     }
 
     if (outfile) {
-        Outfp = fopen(outfile, "w");
+        Outfp = fopen(outfile, "wb");
         if (!Outfp) {
             perror(outfile);
             exit(1);
         }
     }
     if (errfile) {
-        Errfp = fopen(errfile, "w");
+        Errfp = fopen(errfile, "wb");
         if (!Errfp) {
             perror(errfile);
             exit(1);
@@ -13385,10 +16311,13 @@ int main(int argc, char **argv)
 
     /* Process input files or stdin */
     if (optind >= argc) {
+#ifdef _WIN32
+        setmode(0, O_BINARY);
+#endif
         process_input(stdin);
     } else {
         for (i = optind; i < argc; i++) {
-            FILE *fp = fopen(argv[i], "r");
+            FILE *fp = fopen(argv[i], "rb");
             if (!fp) {
                 perror(argv[i]);
                 continue;
