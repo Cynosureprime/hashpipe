@@ -1,4 +1,19 @@
 *.o
 *.exe
+*.a
 /hashpipe
 .claude/
+
+# make deps build artifacts
+deps/
+openssl/
+gosthash/
+bcrypt-master/
+yescrypt/
+mutils/
+sph_*.h
+mhash.h
+rhash.h
+rhash_torrent.h
+md6.h
+Judy.h
