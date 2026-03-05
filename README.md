@@ -11,7 +11,7 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 ## Usage
 
 ```
-hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-V] [-h] [file ...]
+hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-b spec] [-B] [-V] [-h] [file ...]
 ```
 
 ### Options
@@ -24,9 +24,13 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-
 
 **`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect
 
-**`-o F`** — Output verified results to file (default: stdout)
+**`-o F`** — Append verified results to file (default: stdout)
 
-**`-e F`** — Output unresolved lines to file (default: stderr)
+**`-O F`** — Write verified results to file, truncating if it exists (default: stdout)
+
+**`-e F`** — Append unresolved lines to file (default: stderr)
+
+**`-E F`** — Write unresolved lines to file, truncating if it exists (default: stderr)
 
 **`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
 

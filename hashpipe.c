@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.24 2026/03/04 14:57:16 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.26 2026/03/04 23:55:50 dlr Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,31 +26,35 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.24 202
 
 /* OpenSSL extra */
 #include <openssl/hmac.h>
-#include <openssl/rc4.h>
-#include <openssl/md4.h>
+
+/* Local DES type — forward declaration (implementation below) */
+typedef struct { uint32_t sk[32]; } hp_des_ks;
+static void hp_des_setkey(hp_des_ks *ks, const unsigned char *key);
+static void hp_des_encrypt(const unsigned char *in, unsigned char *out, const hp_des_ks *ks, int enc);
+static void hp_des_odd_parity(unsigned char *key);
+
 #ifndef OPENSSL_NO_MDC2
 #include <openssl/mdc2.h>
 #else
 /* MDC2 fallback for builds where OpenSSL disables MDC2 (e.g. Ubuntu no-mdc2).
  * Based on OpenSSL 1.0.1e crypto/mdc2/mdc2dgst.c (Eric Young).
  * Suggested by @0xVavaldi (GitHub PR #1). */
-#include <openssl/des.h>
 #define MDC2_BLOCK		8
 #define MDC2_DIGEST_LENGTH	16
 static void mdc2_body_blk(unsigned char h[8], unsigned char hh[8],
 			   const unsigned char blk[8])
 {
-	DES_key_schedule ks;
+	hp_des_ks ks;
 	unsigned char out1[8], out2[8];
 	int j;
 	h[0] = (h[0] & 0x9f) | 0x40;
 	hh[0] = (hh[0] & 0x9f) | 0x20;
-	DES_set_odd_parity((DES_cblock *)h);
-	DES_set_key_unchecked((DES_cblock *)h, &ks);
-	DES_ecb_encrypt((DES_cblock *)blk, (DES_cblock *)out1, &ks, DES_ENCRYPT);
-	DES_set_odd_parity((DES_cblock *)hh);
-	DES_set_key_unchecked((DES_cblock *)hh, &ks);
-	DES_ecb_encrypt((DES_cblock *)blk, (DES_cblock *)out2, &ks, DES_ENCRYPT);
+	hp_des_odd_parity(h);
+	hp_des_setkey(&ks, h);
+	hp_des_encrypt(blk, out1, &ks, 1);
+	hp_des_odd_parity(hh);
+	hp_des_setkey(&ks, hh);
+	hp_des_encrypt(blk, out2, &ks, 1);
 	for (j = 0; j < 8; j++) { out1[j] ^= blk[j]; out2[j] ^= blk[j]; }
 	memcpy(h, out1, 4); memcpy(h + 4, out2 + 4, 4);
 	memcpy(hh, out2, 4); memcpy(hh + 4, out1 + 4, 4);
@@ -108,6 +112,8 @@ static unsigned char *MDC2(const unsigned char *d, size_t n, unsigned char *md)
 /* Other hash libraries */
 #include <mhash.h>
 #include <rhash.h>
+#include "RHash-master/librhash/sha256.h"
+#include "RHash-master/librhash/sha512.h"
 #include "md6.h"
 #include "gosthash/gost2012/streebog.h"
 
@@ -140,6 +146,224 @@ int get_nprocs() {
 #else
 int get_nprocs() { return 1; }
 #endif
+
+/* ---- Local RC4 (replaces deprecated OpenSSL RC4) ---- */
+typedef struct { unsigned char S[256]; int i, j; } hp_rc4_key;
+static void hp_rc4_set_key(hp_rc4_key *k, int len, const unsigned char *data)
+{
+    int i, j = 0;
+    for (i = 0; i < 256; i++) k->S[i] = i;
+    for (i = 0; i < 256; i++) {
+        j = (j + k->S[i] + data[i % len]) & 0xff;
+        unsigned char t = k->S[i]; k->S[i] = k->S[j]; k->S[j] = t;
+    }
+    k->i = k->j = 0;
+}
+static void hp_rc4(hp_rc4_key *k, size_t len, const unsigned char *in, unsigned char *out)
+{
+    size_t n;
+    int i = k->i, j = k->j;
+    for (n = 0; n < len; n++) {
+        i = (i + 1) & 0xff;
+        j = (j + k->S[i]) & 0xff;
+        unsigned char t = k->S[i]; k->S[i] = k->S[j]; k->S[j] = t;
+        out[n] = in[n] ^ k->S[(k->S[i] + k->S[j]) & 0xff];
+    }
+    k->i = i; k->j = j;
+}
+
+/* ---- Local DES (replaces deprecated OpenSSL DES) ---- */
+/* Based on Eric Young's public domain DES — combined SP-box approach */
+/* hp_des_ks typedef is above (forward-declared for MDC2 fallback) */
+
+static const uint32_t hp_SP[8][64] = {
+ {0x01010400,0x00000000,0x00010000,0x01010404,0x01010004,0x00010404,0x00000004,0x00010000,
+  0x00000400,0x01010400,0x01010404,0x00000400,0x01000404,0x01010004,0x01000000,0x00000004,
+  0x00000404,0x01000400,0x01000400,0x00010400,0x00010400,0x01010000,0x01010000,0x01000404,
+  0x00010004,0x01000004,0x01000004,0x00010004,0x00000000,0x00000404,0x00010404,0x01000000,
+  0x00010000,0x01010404,0x00000004,0x01010000,0x01010400,0x01000000,0x01000000,0x00000400,
+  0x01010004,0x00010000,0x00010400,0x01000004,0x00000400,0x00000004,0x01000404,0x00010404,
+  0x01010404,0x00010004,0x01010000,0x01000404,0x01000004,0x00000404,0x00010404,0x01010400,
+  0x00000404,0x01000400,0x01000400,0x00000000,0x00010004,0x00010400,0x00000000,0x01010004},
+ {0x80108020,0x80008000,0x00008000,0x00108020,0x00100000,0x00000020,0x80100020,0x80008020,
+  0x80000020,0x80108020,0x80108000,0x80000000,0x80008000,0x00100000,0x00000020,0x80100020,
+  0x00108000,0x00100020,0x80008020,0x00000000,0x80000000,0x00008000,0x00108020,0x80100000,
+  0x00100020,0x80000020,0x00000000,0x00108000,0x00008020,0x80108000,0x80100000,0x00008020,
+  0x00000000,0x00108020,0x80100020,0x00100000,0x80008020,0x80100000,0x80108000,0x00008000,
+  0x80100000,0x80008000,0x00000020,0x80108020,0x00108020,0x00000020,0x00008000,0x80000000,
+  0x00008020,0x80108000,0x00100000,0x80000020,0x00100020,0x80008020,0x80000020,0x00100020,
+  0x00108000,0x00000000,0x80008000,0x00008020,0x80000000,0x80100020,0x80108020,0x00108000},
+ {0x00000208,0x08020200,0x00000000,0x08020008,0x08000200,0x00000000,0x00020208,0x08000200,
+  0x00020008,0x08000008,0x08000008,0x00020000,0x08020208,0x00020008,0x08020000,0x00000208,
+  0x08000000,0x00000008,0x08020200,0x00000200,0x00020200,0x08020000,0x08020008,0x00020208,
+  0x08000208,0x00020200,0x00020000,0x08000208,0x00000008,0x08020208,0x00000200,0x08000000,
+  0x08020200,0x08000000,0x00020008,0x00000208,0x00020000,0x08020200,0x08000200,0x00000000,
+  0x00000200,0x00020008,0x08020208,0x08000200,0x08000008,0x00000200,0x00000000,0x08020008,
+  0x08000208,0x00020000,0x08000000,0x08020208,0x00000008,0x00020208,0x00020200,0x08000008,
+  0x08020000,0x08000208,0x00000208,0x08020000,0x00020208,0x00000008,0x08020008,0x00020200},
+ {0x00802001,0x00002081,0x00002081,0x00000080,0x00802080,0x00800081,0x00800001,0x00002001,
+  0x00000000,0x00802000,0x00802000,0x00802081,0x00000081,0x00000000,0x00800080,0x00800001,
+  0x00000001,0x00002000,0x00800000,0x00802001,0x00000080,0x00800000,0x00002001,0x00002080,
+  0x00800081,0x00000001,0x00002080,0x00800080,0x00002000,0x00802080,0x00802081,0x00000081,
+  0x00800080,0x00800001,0x00802000,0x00802081,0x00000081,0x00000000,0x00000000,0x00802000,
+  0x00002080,0x00800080,0x00800081,0x00000001,0x00802001,0x00002081,0x00002081,0x00000080,
+  0x00802081,0x00000081,0x00000001,0x00002000,0x00800001,0x00002001,0x00802080,0x00800081,
+  0x00002001,0x00002080,0x00800000,0x00802001,0x00000080,0x00800000,0x00002000,0x00802080},
+ {0x00000100,0x02080100,0x02080000,0x42000100,0x00080000,0x00000100,0x40000000,0x02080000,
+  0x40080100,0x00080000,0x02000100,0x40080100,0x42000100,0x42080000,0x00080100,0x40000000,
+  0x02000000,0x40080000,0x40080000,0x00000000,0x40000100,0x42080100,0x42080100,0x02000100,
+  0x42080000,0x40000100,0x00000000,0x42000000,0x02080100,0x02000000,0x42000000,0x00080100,
+  0x00080000,0x42000100,0x00000100,0x02000000,0x40000000,0x02080000,0x42000100,0x40080100,
+  0x02000100,0x40000000,0x42080000,0x02080100,0x40080100,0x00000100,0x02000000,0x42080000,
+  0x42080100,0x00080100,0x42000000,0x42080100,0x02080000,0x00000000,0x40080000,0x42000000,
+  0x00080100,0x02000100,0x40000100,0x00080000,0x00000000,0x40080000,0x02080100,0x40000100},
+ {0x20000010,0x20400000,0x00004000,0x20404010,0x20400000,0x00000010,0x20404010,0x00400000,
+  0x20004000,0x00404010,0x00400000,0x20000010,0x00400010,0x20004000,0x20000000,0x00004010,
+  0x00000000,0x00400010,0x20004010,0x00004000,0x00404000,0x20004010,0x00000010,0x20400010,
+  0x20400010,0x00000000,0x00404010,0x20404000,0x00004010,0x00404000,0x20404000,0x20000000,
+  0x20004000,0x00000010,0x20400010,0x00404000,0x20404010,0x00400000,0x00004010,0x20000010,
+  0x00400000,0x20004000,0x20000000,0x00004010,0x20000010,0x20404010,0x00404000,0x20400000,
+  0x00404010,0x20404000,0x00000000,0x20400010,0x00000010,0x00004000,0x20400000,0x00404010,
+  0x00004000,0x00400010,0x20004010,0x00000000,0x20404000,0x20000000,0x00400010,0x20004010},
+ {0x00200000,0x04200002,0x04000802,0x00000000,0x00000800,0x04000802,0x00200802,0x04200800,
+  0x04200802,0x00200000,0x00000000,0x04000002,0x00000002,0x04000000,0x04200002,0x00000802,
+  0x04000800,0x00200802,0x00200002,0x04000800,0x04000002,0x04200000,0x04200800,0x00200002,
+  0x04200000,0x00000800,0x00000802,0x04200802,0x00200800,0x00000002,0x04000000,0x00200800,
+  0x04000000,0x00200800,0x00200000,0x04000802,0x04000802,0x04200002,0x04200002,0x00000002,
+  0x00200002,0x04000000,0x04000800,0x00200000,0x04200800,0x00000802,0x00200802,0x04200800,
+  0x00000802,0x04000002,0x04200802,0x04200000,0x00200800,0x00000000,0x00000002,0x04200802,
+  0x00000000,0x00200802,0x04200000,0x00000800,0x04000002,0x04000800,0x00000800,0x00200002},
+ {0x10001040,0x00001000,0x00040000,0x10041040,0x10000000,0x10001040,0x00000040,0x10000000,
+  0x00040040,0x10040000,0x10041040,0x00041000,0x10041000,0x00041040,0x00001000,0x00000040,
+  0x10040000,0x10000040,0x10001000,0x00001040,0x00041000,0x00040040,0x10040040,0x10041000,
+  0x00001040,0x00000000,0x00000000,0x10040040,0x10000040,0x10001000,0x00041040,0x00040000,
+  0x00041040,0x00040000,0x10041000,0x00001000,0x00000040,0x10040040,0x00001000,0x00041040,
+  0x10001000,0x00000040,0x10000040,0x10040000,0x10040040,0x10000000,0x00040000,0x10001040,
+  0x00000000,0x10041040,0x00040040,0x10000040,0x10040000,0x10001000,0x10001040,0x00000000,
+  0x10041040,0x00041000,0x00041000,0x00001040,0x00001040,0x00040040,0x10000000,0x10041000}
+};
+
+/* PC1 — permuted choice 1 (56 bits from 64-bit key) */
+static const unsigned char hp_pc1[56] = {
+ 57,49,41,33,25,17, 9, 1,58,50,42,34,26,18,10, 2,59,51,43,35,27,19,11, 3,60,52,44,36,
+ 63,55,47,39,31,23,15, 7,62,54,46,38,30,22,14, 6,61,53,45,37,29,21,13, 5,28,20,12, 4
+};
+/* PC2 — permuted choice 2 (48 bits from 56) */
+static const unsigned char hp_pc2[48] = {
+ 14,17,11,24, 1, 5, 3,28,15, 6,21,10,23,19,12, 4,26, 8,16, 7,27,20,13, 2,
+ 41,52,31,37,47,55,30,40,51,45,33,48,44,49,39,56,34,53,46,42,50,36,29,32
+};
+static const unsigned char hp_shifts[16] = {1,1,2,2,2,2,2,2,1,2,2,2,2,2,2,1};
+
+static void hp_des_setkey(hp_des_ks *ks, const unsigned char *key)
+{
+    uint32_t c = 0, d = 0;
+    int i, j;
+    /* Apply PC1 */
+    for (i = 0; i < 28; i++) {
+        int bit = hp_pc1[i] - 1;
+        if (key[bit >> 3] & (0x80 >> (bit & 7))) c |= (1U << (27 - i));
+    }
+    for (i = 0; i < 28; i++) {
+        int bit = hp_pc1[i + 28] - 1;
+        if (key[bit >> 3] & (0x80 >> (bit & 7))) d |= (1U << (27 - i));
+    }
+    for (i = 0; i < 16; i++) {
+        /* Left rotate C and D */
+        for (j = 0; j < hp_shifts[i]; j++) {
+            c = ((c << 1) | (c >> 27)) & 0x0fffffff;
+            d = ((d << 1) | (d >> 27)) & 0x0fffffff;
+        }
+        /* Apply PC2 to get 48-bit subkey, stored as 2x32 */
+        uint64_t cd = ((uint64_t)c << 28) | d;
+        uint32_t sk0 = 0, sk1 = 0;
+        for (j = 0; j < 24; j++) {
+            int bit = hp_pc2[j] - 1;
+            if (cd & (1ULL << (55 - bit))) sk0 |= (1U << (23 - j));
+        }
+        for (j = 0; j < 24; j++) {
+            int bit = hp_pc2[j + 24] - 1;
+            if (cd & (1ULL << (55 - bit))) sk1 |= (1U << (23 - j));
+        }
+        /* Rearrange into SP-box lookup format */
+        ks->sk[i*2]   = ((sk0 >> 18) & 0x3f) | (((sk0 >> 12) & 0x3f) << 8) |
+                         (((sk0 >> 6) & 0x3f) << 16) | ((sk0 & 0x3f) << 24);
+        ks->sk[i*2+1] = ((sk1 >> 18) & 0x3f) | (((sk1 >> 12) & 0x3f) << 8) |
+                         (((sk1 >> 6) & 0x3f) << 16) | ((sk1 & 0x3f) << 24);
+    }
+}
+
+#define HP_DES_ROUND(l,r,ks0,ks1) do { \
+    uint32_t work = ((r >> 4) | (r << 28)) ^ ks0; \
+    l ^= hp_SP[0][(work) & 0x3f] ^ hp_SP[2][(work >> 8) & 0x3f] ^ \
+         hp_SP[4][(work >> 16) & 0x3f] ^ hp_SP[6][(work >> 24) & 0x3f]; \
+    work = r ^ ks1; \
+    l ^= hp_SP[1][(work) & 0x3f] ^ hp_SP[3][(work >> 8) & 0x3f] ^ \
+         hp_SP[5][(work >> 16) & 0x3f] ^ hp_SP[7][(work >> 24) & 0x3f]; \
+} while(0)
+
+static void hp_des_encrypt(const unsigned char *in, unsigned char *out,
+    const hp_des_ks *ks, int enc)
+{
+    uint32_t l, r, work;
+    int i;
+    /* Read input as big-endian 32-bit words */
+    l = ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) | in[3];
+    r = ((uint32_t)in[4] << 24) | ((uint32_t)in[5] << 16) | ((uint32_t)in[6] << 8) | in[7];
+    /* Initial Permutation */
+    work = ((l >> 4) ^ r) & 0x0f0f0f0f; r ^= work; l ^= (work << 4);
+    work = ((l >> 16) ^ r) & 0x0000ffff; r ^= work; l ^= (work << 16);
+    work = ((r >> 2) ^ l) & 0x33333333; l ^= work; r ^= (work << 2);
+    work = ((r >> 8) ^ l) & 0x00ff00ff; l ^= work; r ^= (work << 8);
+    r = ((r << 1) | (r >> 31)); l = ((l << 1) | (l >> 31));
+    /* 16 Feistel rounds */
+    if (enc) {
+        for (i = 0; i < 32; i += 4) {
+            HP_DES_ROUND(l, r, ks->sk[i], ks->sk[i+1]);
+            HP_DES_ROUND(r, l, ks->sk[i+2], ks->sk[i+3]);
+        }
+    } else {
+        for (i = 30; i >= 0; i -= 4) {
+            HP_DES_ROUND(l, r, ks->sk[i], ks->sk[i+1]);
+            HP_DES_ROUND(r, l, ks->sk[i-2], ks->sk[i-1]);
+        }
+    }
+    /* Final Permutation (inverse of IP) */
+    l = ((l >> 1) | (l << 31)); r = ((r >> 1) | (r << 31));
+    work = ((l >> 8) ^ r) & 0x00ff00ff; r ^= work; l ^= (work << 8);
+    work = ((l >> 2) ^ r) & 0x33333333; r ^= work; l ^= (work << 2);
+    work = ((r >> 16) ^ l) & 0x0000ffff; l ^= work; r ^= (work << 16);
+    work = ((r >> 4) ^ l) & 0x0f0f0f0f; l ^= work; r ^= (work << 4);
+    /* Write output */
+    out[0] = r >> 24; out[1] = r >> 16; out[2] = r >> 8; out[3] = r;
+    out[4] = l >> 24; out[5] = l >> 16; out[6] = l >> 8; out[7] = l;
+}
+
+static void hp_des3_encrypt(const unsigned char *in, unsigned char *out,
+    hp_des_ks *k1, hp_des_ks *k2, hp_des_ks *k3, int enc)
+{
+    unsigned char tmp[8];
+    if (enc) {
+        hp_des_encrypt(in, tmp, k1, 1);
+        hp_des_encrypt(tmp, tmp, k2, 0);
+        hp_des_encrypt(tmp, out, k3, 1);
+    } else {
+        hp_des_encrypt(in, tmp, k3, 0);
+        hp_des_encrypt(tmp, tmp, k2, 1);
+        hp_des_encrypt(tmp, out, k1, 0);
+    }
+}
+
+static void hp_des_odd_parity(unsigned char *key)
+{
+    int i, j, b;
+    for (i = 0; i < 8; i++) {
+        b = 0;
+        for (j = 1; j < 8; j++) if (key[i] & (1 << j)) b++;
+        if ((b & 1) == 0) key[i] ^= 1; else key[i] &= ~1;
+        if (!(b & 1)) key[i] |= 1;
+    }
+}
 
 /* ---- MurmurHash64A (inline, from mdxfind.c) ---- */
 
@@ -351,9 +575,101 @@ struct workspace {
     unsigned char vpassbuf[MAXLINE];
     unsigned char decoded[MAXLINE];
     unsigned char *testvec;  /* malloc'd TESTVECSIZE+16 buffer for $TESTVEC[] */
+    /* Pre-allocated rhash contexts (avoid malloc/free per hash) */
+    rhash rctx_md5;
+    rhash rctx_sha1;
+    rhash rctx_sha256;
+    rhash rctx_sha512;
+    rhash rctx_md4;
+    rhash rctx_sha224;
+    rhash rctx_sha384;
+    rhash rctx_whirlpool;
 };
 
 static __thread struct workspace *WS;
+
+static void ws_init_rhash(struct workspace *ws)
+{
+    ws->rctx_md5 = rhash_init(RHASH_MD5);
+    ws->rctx_sha1 = rhash_init(RHASH_SHA1);
+    ws->rctx_sha256 = rhash_init(RHASH_SHA256);
+    ws->rctx_sha512 = rhash_init(RHASH_SHA512);
+    ws->rctx_md4 = rhash_init(RHASH_MD4);
+    ws->rctx_sha224 = rhash_init(RHASH_SHA224);
+    ws->rctx_sha384 = rhash_init(RHASH_SHA384);
+    ws->rctx_whirlpool = rhash_init(RHASH_WHIRLPOOL);
+}
+
+static void ws_free_rhash(struct workspace *ws)
+{
+    if (ws->rctx_md5) rhash_free(ws->rctx_md5);
+    if (ws->rctx_sha1) rhash_free(ws->rctx_sha1);
+    if (ws->rctx_sha256) rhash_free(ws->rctx_sha256);
+    if (ws->rctx_sha512) rhash_free(ws->rctx_sha512);
+    if (ws->rctx_md4) rhash_free(ws->rctx_md4);
+    if (ws->rctx_sha224) rhash_free(ws->rctx_sha224);
+    if (ws->rctx_sha384) rhash_free(ws->rctx_sha384);
+    if (ws->rctx_whirlpool) rhash_free(ws->rctx_whirlpool);
+}
+
+/* Map rhash hash_id to pre-allocated WS context.  Returns NULL if no
+ * pre-allocated context (caller falls back to rhash_init/free). */
+static inline rhash ws_rctx(unsigned hash_id)
+{
+    if (!WS) return NULL;
+    switch (hash_id) {
+    case RHASH_MD5:       return WS->rctx_md5;
+    case RHASH_SHA1:      return WS->rctx_sha1;
+    case RHASH_SHA256:    return WS->rctx_sha256;
+    case RHASH_SHA512:    return WS->rctx_sha512;
+    case RHASH_MD4:       return WS->rctx_md4;
+    case RHASH_SHA224:    return WS->rctx_sha224;
+    case RHASH_SHA384:    return WS->rctx_sha384;
+    case RHASH_WHIRLPOOL: return WS->rctx_whirlpool;
+    default: return NULL;
+    }
+}
+
+/* Drop-in replacement for rhash_msg that reuses pre-allocated WS context.
+ * Falls back to real rhash_msg when WS is not set or hash_id is unknown. */
+static int ws_rhash_msg(unsigned hash_id, const void *message, size_t length, unsigned char *result)
+{
+    rhash ctx = ws_rctx(hash_id);
+    if (ctx) {
+        rhash_reset(ctx);
+        rhash_update(ctx, message, length);
+        rhash_final(ctx, result);
+        return 0;
+    }
+    return rhash_msg(hash_id, message, length, result);
+}
+
+/* Drop-in replacement for rhash_init that reuses pre-allocated WS context.
+ * The returned handle must NOT be passed to rhash_free — use ws_rhash_done(). */
+static rhash ws_rhash_init(unsigned hash_id)
+{
+    rhash ctx = ws_rctx(hash_id);
+    if (ctx) { rhash_reset(ctx); return ctx; }
+    return rhash_init(hash_id);
+}
+
+/* Counterpart to ws_rhash_init — only frees if context was dynamically allocated
+ * (i.e. not one of the pre-allocated WS contexts). */
+static void ws_rhash_done(rhash ctx)
+{
+    if (!WS) { rhash_free(ctx); return; }
+    if (ctx == WS->rctx_md5 || ctx == WS->rctx_sha1 ||
+        ctx == WS->rctx_sha256 || ctx == WS->rctx_sha512 ||
+        ctx == WS->rctx_md4 || ctx == WS->rctx_sha224 ||
+        ctx == WS->rctx_sha384 || ctx == WS->rctx_whirlpool)
+        return;  /* pre-allocated — don't free */
+    rhash_free(ctx);
+}
+
+/* Redirect all rhash_msg / rhash_init / rhash_free to WS-aware versions */
+#define rhash_msg  ws_rhash_msg
+#define rhash_init ws_rhash_init
+#define rhash_free ws_rhash_done
 
 /* ---- Hash type flags ---- */
 
@@ -5572,15 +5888,10 @@ static int verify_ntlmh(const char *hashstr, int hashlen,
     return 0;
 }
 
-/* LM hash — DES-based, needs special handling */
-/* For simplicity, we'll use OpenSSL DES */
-#include <openssl/des.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-
-static void lm_des_key(const unsigned char *raw7, DES_key_schedule *ks)
+/* LM hash — DES-based */
+static void lm_des_key(const unsigned char *raw7, hp_des_ks *ks)
 {
-    DES_cblock key;
+    unsigned char key[8];
     key[0] = raw7[0] >> 1;
     key[1] = ((raw7[0] & 0x01) << 6) | (raw7[1] >> 2);
     key[2] = ((raw7[1] & 0x03) << 5) | (raw7[2] >> 3);
@@ -5590,14 +5901,14 @@ static void lm_des_key(const unsigned char *raw7, DES_key_schedule *ks)
     key[6] = ((raw7[5] & 0x3F) << 1) | (raw7[6] >> 7);
     key[7] = raw7[6] & 0x7F;
     { int i; for (i = 0; i < 8; i++) key[i] = (key[i] << 1) & 0xfe; }
-    DES_set_key_unchecked(&key, ks);
+    hp_des_setkey(ks, key);
 }
 
 static void compute_lm(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
     unsigned char upass[14];
-    DES_key_schedule ks;
+    hp_des_ks ks;
     static const unsigned char lm_magic[] = "KGS!@#$%";
     int i;
     (void)salt; (void)saltlen;
@@ -5605,11 +5916,10 @@ static void compute_lm(const unsigned char *pass, int passlen,
     for (i = 0; i < passlen && i < 14; i++)
         upass[i] = (pass[i] >= 'a' && pass[i] <= 'z') ? pass[i] - 32 : pass[i];
     lm_des_key(upass, &ks);
-    DES_ecb_encrypt((DES_cblock *)lm_magic, (DES_cblock *)dest, &ks, DES_ENCRYPT);
+    hp_des_encrypt(lm_magic, dest, &ks, 1);
     lm_des_key(upass + 7, &ks);
-    DES_ecb_encrypt((DES_cblock *)lm_magic, (DES_cblock *)(dest + 8), &ks, DES_ENCRYPT);
+    hp_des_encrypt(lm_magic, dest + 8, &ks, 1);
 }
-#pragma GCC diagnostic pop
 
 /* RMD320 — RIPEMD-320 (rhash provides this) */
 static void compute_rmd320(const unsigned char *pass, int passlen,
@@ -8633,9 +8943,8 @@ static int verify_macosx7(const char *hashstr, int hashlen,
 static int verify_desencrypt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
-    unsigned char expected_ct[8], salt_bin[8];
-    DES_cblock deskey, desct;
-    DES_key_schedule desks;
+    unsigned char expected_ct[8], salt_bin[8], deskey[8], desct[8];
+    hp_des_ks desks;
     const char *colon;
     int hpart;
 
@@ -8649,8 +8958,8 @@ static int verify_desencrypt(const char *hashstr, int hashlen,
 
     memset(deskey, 0, 8);
     memcpy(deskey, pass, passlen < 8 ? passlen : 8);
-    DES_set_key_unchecked(&deskey, &desks);
-    DES_ecb_encrypt((DES_cblock *)salt_bin, &desct, &desks, DES_ENCRYPT);
+    hp_des_setkey(&desks, deskey);
+    hp_des_encrypt(salt_bin, desct, &desks, 1);
     return memcmp(desct, expected_ct, 8) == 0;
 }
 
@@ -8658,9 +8967,9 @@ static int verify_desencrypt(const char *hashstr, int hashlen,
 static int verify_des3encrypt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
-    unsigned char expected_ct[8], salt_bin[8];
-    DES_cblock deskey1, deskey2, deskey3, desct;
-    DES_key_schedule desks1, desks2, desks3;
+    unsigned char expected_ct[8], salt_bin[8], desct[8];
+    unsigned char deskey1[8], deskey2[8], deskey3[8];
+    hp_des_ks desks1, desks2, desks3;
     const char *colon;
     int hpart;
 
@@ -8676,10 +8985,10 @@ static int verify_des3encrypt(const char *hashstr, int hashlen,
     if (passlen >= 8) memcpy(deskey1, pass, 8); else memcpy(deskey1, pass, passlen);
     if (passlen > 8) { if (passlen >= 16) memcpy(deskey2, pass+8, 8); else memcpy(deskey2, pass+8, passlen-8); }
     if (passlen > 16) { if (passlen >= 24) memcpy(deskey3, pass+16, 8); else memcpy(deskey3, pass+16, passlen-16); }
-    DES_set_key_unchecked(&deskey1, &desks1);
-    DES_set_key_unchecked(&deskey2, &desks2);
-    DES_set_key_unchecked(&deskey3, &desks3);
-    DES_ecb3_encrypt((DES_cblock *)salt_bin, &desct, &desks1, &desks2, &desks3, DES_ENCRYPT);
+    hp_des_setkey(&desks1, deskey1);
+    hp_des_setkey(&desks2, deskey2);
+    hp_des_setkey(&desks3, deskey3);
+    hp_des3_encrypt(salt_bin, desct, &desks1, &desks2, &desks3, 1);
     return memcmp(desct, expected_ct, 8) == 0;
 }
 
@@ -8688,7 +8997,7 @@ static int verify_racf(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     unsigned char expected[8], euser[8], deskey[8], ciphertext[8];
-    DES_key_schedule ks;
+    hp_des_ks ks;
     const char *colon, *username;
     int hpart, ulen, x;
 
@@ -8713,7 +9022,7 @@ static int verify_racf(const char *hashstr, int hashlen,
           deskey[x] = val;
       }
     }
-    DES_set_key_unchecked((DES_cblock *)deskey, &ks);
+    hp_des_setkey(&ks, deskey);
 
     /* Uppercase username, pad to 8 with spaces, convert to EBCDIC */
     for (x = 0; x < 8; x++) {
@@ -8721,7 +9030,7 @@ static int verify_racf(const char *hashstr, int hashlen,
         if (c >= 'a' && c <= 'z') c -= 32;
         euser[x] = a2e[(unsigned char)c];
     }
-    DES_ecb_encrypt((DES_cblock *)euser, (DES_cblock *)ciphertext, &ks, DES_ENCRYPT);
+    hp_des_encrypt(euser, ciphertext, &ks, 1);
     return memcmp(ciphertext, expected, 8) == 0;
 }
 
@@ -9041,7 +9350,7 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
     { unsigned char utf16[1024];
       int u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16));
       if (u16len <= 0) return 0;
-      MD4(utf16, u16len, ntlm);
+      rhash_msg(RHASH_MD4, utf16, u16len, ntlm);
     }
 
     /* K1 = HMAC-MD5(ntlm, usage_type=1) */
@@ -9058,9 +9367,9 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
     HMAC(EVP_md5(), k1, 16, enc_bin + data_len, 16, k3, &hmac_len);
 
     /* RC4 decrypt */
-    { RC4_KEY rc4key;
-      RC4_set_key(&rc4key, 16, k3);
-      RC4(&rc4key, data_len, enc_bin, decrypted);
+    { hp_rc4_key rc4key;
+      hp_rc4_set_key(&rc4key, 16, k3);
+      hp_rc4(&rc4key, data_len, enc_bin, decrypted);
     }
 
     /* Verify: bytes 14-15 must be '2','0' and bytes 16-27 must be ASCII digits */
@@ -9280,52 +9589,52 @@ static int verify_mysqlsha256crypt(const char *hashstr, int hashlen,
 
       /* sha256crypt algorithm */
       /* B = sha256(pass + salt + pass) */
-      SHA256_CTX ctx;
-      SHA256_Init(&ctx);
-      SHA256_Update(&ctx, pass, passlen);
-      SHA256_Update(&ctx, salt_bin, saltlen);
-      SHA256_Update(&ctx, pass, passlen);
-      SHA256_Final(alt, &ctx);
+      sha256_ctx ctx;
+      rhash_sha256_init(&ctx);
+      rhash_sha256_update(&ctx, pass, passlen);
+      rhash_sha256_update(&ctx, salt_bin, saltlen);
+      rhash_sha256_update(&ctx, pass, passlen);
+      rhash_sha256_final(&ctx, alt);
 
       /* A = sha256(pass + salt + alt_result[0..passlen-1]) */
-      SHA256_Init(&ctx);
-      SHA256_Update(&ctx, pass, passlen);
-      SHA256_Update(&ctx, salt_bin, saltlen);
+      rhash_sha256_init(&ctx);
+      rhash_sha256_update(&ctx, pass, passlen);
+      rhash_sha256_update(&ctx, salt_bin, saltlen);
       for (x = passlen; x > 32; x -= 32)
-          SHA256_Update(&ctx, alt, 32);
-      SHA256_Update(&ctx, alt, x);
+          rhash_sha256_update(&ctx, alt, 32);
+      rhash_sha256_update(&ctx, alt, x);
       for (x = passlen; x != 0; x >>= 1) {
-          if (x & 1) SHA256_Update(&ctx, alt, 32);
-          else SHA256_Update(&ctx, pass, passlen);
+          if (x & 1) rhash_sha256_update(&ctx, alt, 32);
+          else rhash_sha256_update(&ctx, pass, passlen);
       }
-      SHA256_Final(digest, &ctx);
+      rhash_sha256_final(&ctx, digest);
 
       /* DP = sha256(pass repeated passlen times) */
-      SHA256_Init(&ctx);
+      rhash_sha256_init(&ctx);
       for (x = 0; x < passlen; x++)
-          SHA256_Update(&ctx, pass, passlen);
-      SHA256_Final(alt, &ctx);
+          rhash_sha256_update(&ctx, pass, passlen);
+      rhash_sha256_final(&ctx, alt);
       memset(P, 0, sizeof(P));
       for (x = 0; x < passlen; x += 32)
           memcpy(P + x, alt, (passlen - x > 32) ? 32 : (passlen - x));
 
       /* DS = sha256(salt repeated 16+digest[0] times) */
-      SHA256_Init(&ctx);
+      rhash_sha256_init(&ctx);
       for (x = 0; x < (int)(16 + digest[0]); x++)
-          SHA256_Update(&ctx, salt_bin, saltlen);
-      SHA256_Final(alt, &ctx);
+          rhash_sha256_update(&ctx, salt_bin, saltlen);
+      rhash_sha256_final(&ctx, alt);
       for (x = 0; x < saltlen; x += 32)
           memcpy(S + x, alt, (saltlen - x > 32) ? 32 : (saltlen - x));
 
       for (rnd = 0; rnd < rounds; rnd++) {
-          SHA256_Init(&ctx);
-          if (rnd & 1) SHA256_Update(&ctx, P, passlen);
-          else SHA256_Update(&ctx, digest, 32);
-          if (rnd % 3) SHA256_Update(&ctx, S, saltlen);
-          if (rnd % 7) SHA256_Update(&ctx, P, passlen);
-          if (rnd & 1) SHA256_Update(&ctx, digest, 32);
-          else SHA256_Update(&ctx, P, passlen);
-          SHA256_Final(digest, &ctx);
+          rhash_sha256_init(&ctx);
+          if (rnd & 1) rhash_sha256_update(&ctx, P, passlen);
+          else rhash_sha256_update(&ctx, digest, 32);
+          if (rnd % 3) rhash_sha256_update(&ctx, S, saltlen);
+          if (rnd % 7) rhash_sha256_update(&ctx, P, passlen);
+          if (rnd & 1) rhash_sha256_update(&ctx, digest, 32);
+          else rhash_sha256_update(&ctx, P, passlen);
+          rhash_sha256_final(&ctx, digest);
       }
 
       /* Encode with sha256crypt transposition + phpitoa64 */
@@ -9781,7 +10090,7 @@ static int verify_md4descrypt(const char *hashstr, int hashlen,
     di = get_desinfo();
     s = bsd_crypt_des(passbuf, colon + 1, desout, di);
     if (!s) return 0;
-    MD4((unsigned char *)s, strlen(s), md4);
+    rhash_msg(RHASH_MD4, (unsigned char *)s, strlen(s), md4);
     prmd5(md4, computed, 32);
     return strncasecmp(computed, hashstr, 32) == 0;
 }
@@ -9835,7 +10144,7 @@ static int verify_md4utf16descrypt(const char *hashstr, int hashlen,
     if (!s) return 0;
     u16len = utf8_to_utf16le((unsigned char *)s, strlen(s), utf16, sizeof(utf16));
     if (u16len <= 0) return 0;
-    MD4(utf16, u16len, md4);
+    rhash_msg(RHASH_MD4, utf16, u16len, md4);
     prmd5(md4, computed, 32);
     return strncasecmp(computed, hashstr, 32) == 0;
 }
@@ -9938,55 +10247,55 @@ static int do_sha256crypt(const char *pass, int passlen,
     char *result, int resultmax)
 {
     unsigned char digest[32], P[256], S[32], alt[32];
-    SHA256_CTX ctx;
+    sha256_ctx ctx;
     int x, rnd;
 
     /* B = sha256(pass + salt + pass) */
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, pass, passlen);
-    SHA256_Update(&ctx, salt, saltlen);
-    SHA256_Update(&ctx, pass, passlen);
-    SHA256_Final(alt, &ctx);
+    rhash_sha256_init(&ctx);
+    rhash_sha256_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha256_update(&ctx, salt, saltlen);
+    rhash_sha256_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha256_final(&ctx, alt);
 
     /* A = sha256(pass + salt + alt[0..passlen-1]) */
-    SHA256_Init(&ctx);
-    SHA256_Update(&ctx, pass, passlen);
-    SHA256_Update(&ctx, salt, saltlen);
+    rhash_sha256_init(&ctx);
+    rhash_sha256_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha256_update(&ctx, salt, saltlen);
     for (x = passlen; x > 32; x -= 32)
-        SHA256_Update(&ctx, alt, 32);
-    SHA256_Update(&ctx, alt, x);
+        rhash_sha256_update(&ctx, alt, 32);
+    rhash_sha256_update(&ctx, alt, x);
     for (x = passlen; x != 0; x >>= 1) {
-        if (x & 1) SHA256_Update(&ctx, alt, 32);
-        else SHA256_Update(&ctx, pass, passlen);
+        if (x & 1) rhash_sha256_update(&ctx, alt, 32);
+        else rhash_sha256_update(&ctx, (const unsigned char *)pass, passlen);
     }
-    SHA256_Final(digest, &ctx);
+    rhash_sha256_final(&ctx, digest);
 
     /* DP = sha256(pass * passlen) */
-    SHA256_Init(&ctx);
+    rhash_sha256_init(&ctx);
     for (x = 0; x < passlen; x++)
-        SHA256_Update(&ctx, pass, passlen);
-    SHA256_Final(alt, &ctx);
+        rhash_sha256_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha256_final(&ctx, alt);
     memset(P, 0, sizeof(P));
     for (x = 0; x < passlen; x += 32)
         memcpy(P + x, alt, (passlen - x > 32) ? 32 : (passlen - x));
 
     /* DS = sha256(salt * (16+digest[0])) */
-    SHA256_Init(&ctx);
+    rhash_sha256_init(&ctx);
     for (x = 0; x < (int)(16 + digest[0]); x++)
-        SHA256_Update(&ctx, salt, saltlen);
-    SHA256_Final(alt, &ctx);
+        rhash_sha256_update(&ctx, salt, saltlen);
+    rhash_sha256_final(&ctx, alt);
     for (x = 0; x < saltlen; x += 32)
         memcpy(S + x, alt, (saltlen - x > 32) ? 32 : (saltlen - x));
 
     for (rnd = 0; rnd < rounds; rnd++) {
-        SHA256_Init(&ctx);
-        if (rnd & 1) SHA256_Update(&ctx, P, passlen);
-        else SHA256_Update(&ctx, digest, 32);
-        if (rnd % 3) SHA256_Update(&ctx, S, saltlen);
-        if (rnd % 7) SHA256_Update(&ctx, P, passlen);
-        if (rnd & 1) SHA256_Update(&ctx, digest, 32);
-        else SHA256_Update(&ctx, P, passlen);
-        SHA256_Final(digest, &ctx);
+        rhash_sha256_init(&ctx);
+        if (rnd & 1) rhash_sha256_update(&ctx, P, passlen);
+        else rhash_sha256_update(&ctx, digest, 32);
+        if (rnd % 3) rhash_sha256_update(&ctx, S, saltlen);
+        if (rnd % 7) rhash_sha256_update(&ctx, P, passlen);
+        if (rnd & 1) rhash_sha256_update(&ctx, digest, 32);
+        else rhash_sha256_update(&ctx, P, passlen);
+        rhash_sha256_final(&ctx, digest);
     }
 
     /* Encode */
@@ -10049,51 +10358,51 @@ static int do_sha512crypt(const char *pass, int passlen,
     char *result, int resultmax)
 {
     unsigned char digest[64], P[256], S[64], alt[64];
-    SHA512_CTX ctx;
+    sha512_ctx ctx;
     int x, rnd;
 
-    SHA512_Init(&ctx);
-    SHA512_Update(&ctx, pass, passlen);
-    SHA512_Update(&ctx, salt, saltlen);
-    SHA512_Update(&ctx, pass, passlen);
-    SHA512_Final(alt, &ctx);
+    rhash_sha512_init(&ctx);
+    rhash_sha512_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha512_update(&ctx, salt, saltlen);
+    rhash_sha512_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha512_final(&ctx, alt);
 
-    SHA512_Init(&ctx);
-    SHA512_Update(&ctx, pass, passlen);
-    SHA512_Update(&ctx, salt, saltlen);
+    rhash_sha512_init(&ctx);
+    rhash_sha512_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha512_update(&ctx, salt, saltlen);
     for (x = passlen; x > 64; x -= 64)
-        SHA512_Update(&ctx, alt, 64);
-    SHA512_Update(&ctx, alt, x);
+        rhash_sha512_update(&ctx, alt, 64);
+    rhash_sha512_update(&ctx, alt, x);
     for (x = passlen; x != 0; x >>= 1) {
-        if (x & 1) SHA512_Update(&ctx, alt, 64);
-        else SHA512_Update(&ctx, pass, passlen);
+        if (x & 1) rhash_sha512_update(&ctx, alt, 64);
+        else rhash_sha512_update(&ctx, (const unsigned char *)pass, passlen);
     }
-    SHA512_Final(digest, &ctx);
+    rhash_sha512_final(&ctx, digest);
 
-    SHA512_Init(&ctx);
+    rhash_sha512_init(&ctx);
     for (x = 0; x < passlen; x++)
-        SHA512_Update(&ctx, pass, passlen);
-    SHA512_Final(alt, &ctx);
+        rhash_sha512_update(&ctx, (const unsigned char *)pass, passlen);
+    rhash_sha512_final(&ctx, alt);
     memset(P, 0, sizeof(P));
     for (x = 0; x < passlen; x += 64)
         memcpy(P + x, alt, (passlen - x > 64) ? 64 : (passlen - x));
 
-    SHA512_Init(&ctx);
+    rhash_sha512_init(&ctx);
     for (x = 0; x < (int)(16 + digest[0]); x++)
-        SHA512_Update(&ctx, salt, saltlen);
-    SHA512_Final(alt, &ctx);
+        rhash_sha512_update(&ctx, salt, saltlen);
+    rhash_sha512_final(&ctx, alt);
     for (x = 0; x < saltlen; x += 64)
         memcpy(S + x, alt, (saltlen - x > 64) ? 64 : (saltlen - x));
 
     for (rnd = 0; rnd < rounds; rnd++) {
-        SHA512_Init(&ctx);
-        if (rnd & 1) SHA512_Update(&ctx, P, passlen);
-        else SHA512_Update(&ctx, digest, 64);
-        if (rnd % 3) SHA512_Update(&ctx, S, saltlen);
-        if (rnd % 7) SHA512_Update(&ctx, P, passlen);
-        if (rnd & 1) SHA512_Update(&ctx, digest, 64);
-        else SHA512_Update(&ctx, P, passlen);
-        SHA512_Final(digest, &ctx);
+        rhash_sha512_init(&ctx);
+        if (rnd & 1) rhash_sha512_update(&ctx, P, passlen);
+        else rhash_sha512_update(&ctx, digest, 64);
+        if (rnd % 3) rhash_sha512_update(&ctx, S, saltlen);
+        if (rnd % 7) rhash_sha512_update(&ctx, P, passlen);
+        if (rnd & 1) rhash_sha512_update(&ctx, digest, 64);
+        else rhash_sha512_update(&ctx, P, passlen);
+        rhash_sha512_final(&ctx, digest);
     }
 
     /* sha512crypt transposition encoding */
@@ -10746,7 +11055,7 @@ static int verify_ntlm_md5passmd5salt(const char *hashstr, int hashlen,
     ulen = 0;
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass[i]; ubuf[ulen++] = 0; }
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
-    MD4(ubuf, ulen, ntlm);
+    rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
     return strncasecmp(computed, hashstr, 32) == 0;
 }
@@ -10778,7 +11087,7 @@ static int verify_ntlm_md5md5passmd5salt(const char *hashstr, int hashlen,
     ulen = 0;
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass2[i]; ubuf[ulen++] = 0; }
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
-    MD4(ubuf, ulen, ntlm);
+    rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
     return strncasecmp(computed, hashstr, 32) == 0;
 }
@@ -10810,7 +11119,7 @@ static int verify_ntlm_md5passmd5sha1salt(const char *hashstr, int hashlen,
     ulen = 0;
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexpass[i]; ubuf[ulen++] = 0; }
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexmd5sha1[i]; ubuf[ulen++] = 0; }
-    MD4(ubuf, ulen, ntlm);
+    rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
     return strncasecmp(computed, hashstr, 32) == 0;
 }
@@ -11756,7 +12065,7 @@ static int verify_sha11saltmd5uc(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     unsigned char mh[16], sha1r[20];
-    char hex[35], computed[41], buf[36];
+    char hex[36], computed[41], buf[36];
     const char *colon, *saltpart;
     int saltbyte, i;
 
@@ -11801,7 +12110,7 @@ static int verify_sha11saltmd5sha256(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     unsigned char sh[32], mh[16], sha1r[20];
-    char shex[65], hex[35], computed[41];
+    char shex[65], hex[36], computed[41];
     const char *colon, *saltpart;
     int saltbyte;
 
@@ -14080,24 +14389,13 @@ static struct batch *alloc_batch(void)
     struct batch *b;
 
     possess(FreeLock);
-    if (FreeHead) {
-        b = FreeHead;
-        FreeHead = b->next;
-        release(FreeLock);
-    } else {
-        release(FreeLock);
-        b = malloc(sizeof(struct batch));
-        if (!b) {
-            fprintf(stderr, "hashpipe: out of memory\n");
-            exit(1);
-        }
-        b->ws = malloc(sizeof(struct workspace));
-        if (!b->ws) {
-            fprintf(stderr, "hashpipe: out of memory (workspace)\n");
-            exit(1);
-        }
-        b->ws->testvec = malloc(TESTVECSIZE + 16);
+    while (!FreeHead) {
+        /* Wait for a worker to return a batch */
+        wait_for(FreeLock, NOT_TO_BE, 0);
     }
+    b = FreeHead;
+    FreeHead = b->next;
+    twist(FreeLock, BY, -1);
     b->count = 0;
     b->bufused = 0;
     b->hot_type = GlobalHotType;
@@ -14113,7 +14411,7 @@ static void free_batch(struct batch *b)
     possess(FreeLock);
     b->next = FreeHead;
     FreeHead = b;
-    twist(FreeLock, BY, 0);
+    twist(FreeLock, BY, +1);
 }
 
 /* Enqueue a batch for workers */
@@ -14966,10 +15264,11 @@ static void update_batch_limit(int type_idx)
         if (!WS) {
             tmp_ws = (struct workspace *)calloc(1, sizeof(*tmp_ws));
             tmp_ws->testvec = malloc(TESTVECSIZE + 16);
+            ws_init_rhash(tmp_ws);
             WS = tmp_ws;
         }
         ht->rate = bench_one_type_timed(type_idx, 0.2);
-        if (tmp_ws) { WS = NULL; free(tmp_ws->testvec); free(tmp_ws); }
+        if (tmp_ws) { WS = NULL; ws_free_rhash(tmp_ws); free(tmp_ws->testvec); free(tmp_ws); }
         if (ht->rate <= 0) ht->rate = 1;
     }
     limit = (int)((double)ht->rate * TARGET_BATCH_SECS);
@@ -15724,6 +16023,7 @@ static void bench_worker(void *dummy)
     struct workspace *ws = (struct workspace *)calloc(1, sizeof(*ws));
     (void)dummy;
     ws->testvec = malloc(TESTVECSIZE + 16);
+    ws_init_rhash(ws);
     WS = ws;
     for (;;) {
         int idx;
@@ -15796,15 +16096,17 @@ static void run_benchmark(void)
 static void usage(int brief)
 {
     fprintf(stderr,
-        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o outfile] [-e errfile] [-b spec] [-B] [-V] [-h] [file ...]\n"
+        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-b spec] [-B] [-V] [-h] [file ...]\n"
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
         "  -q N   Iteration step size (reserved, default: 128)\n"
         "  -m S   Only try types in S (e.g., -m e1,e8,1000); add 'auto' to fallback\n"
         "         Bare numbers are hashcat modes; eN selects internal index\n"
-        "  -o F   Output verified results to file (default: stdout)\n"
-        "  -e F   Output unresolved lines to file (default: stderr)\n"
+        "  -o F   Append verified results to file (default: stdout)\n"
+        "  -O F   Write verified results to file (truncate)\n"
+        "  -e F   Append unresolved lines to file (default: stderr)\n"
+        "  -E F   Write unresolved lines to file (truncate)\n"
         "  -b S   Benchmark selected types (e.g., -b e1-10,e15)\n"
         "  -B     Benchmark all registered types\n"
         "  -V     Print version and exit\n"
@@ -15851,244 +16153,225 @@ static void usage(int brief)
 static void init_rates(void)
 {
     static const struct { int idx; long long rate; } bench_rates[] = {
-        {1, 4184148LL}, {2, 4153321LL}, {3, 4765041LL}, {4, 282977LL},
-        {5, 976136LL}, {6, 3217276LL}, {7, 4382271LL}, {8, 996034LL},
-        {9, 859570LL}, {10, 852252LL}, {11, 765507LL}, {12, 772145LL},
-        {13, 612942LL}, {14, 600547LL}, {15, 3310131LL}, {16, 5316008LL},
-        {17, 2511681LL}, {18, 5665854LL}, {19, 3239696LL}, {20, 4230709LL},
-        {21, 2083518LL}, {22, 3363363LL}, {23, 2246589LL}, {24, 2251020LL},
-        {25, 318958LL}, {26, 318609LL}, {27, 276587LL}, {28, 280091LL},
-        {29, 204133LL}, {30, 138516LL}, {31, 1773198LL}, {32, 663618LL},
-        {33, 2014513LL}, {34, 475165LL}, {35, 396973LL}, {36, 399501LL},
-        {37, 366123LL}, {38, 364139LL}, {39, 2116831LL}, {40, 1785104LL},
-        {41, 3023781LL}, {42, 2140735LL}, {43, 1775758LL}, {44, 2992236LL},
-        {45, 2125886LL}, {46, 1779069LL}, {47, 2987481LL}, {48, 2183196LL},
-        {49, 1790011LL}, {50, 2177323LL}, {51, 1822120LL}, {52, 2056393LL},
-        {53, 2043180LL}, {54, 1719279LL}, {55, 1719801LL}, {56, 1797796LL},
-        {57, 1770923LL}, {58, 1572764LL}, {59, 1581031LL}, {60, 171612LL},
-        {61, 174516LL}, {62, 172899LL}, {63, 171505LL}, {64, 308054LL},
-        {65, 308646LL}, {66, 251681LL}, {67, 249786LL}, {68, 549500LL},
-        {69, 551396LL}, {70, 361713LL}, {71, 258596LL}, {72, 583931LL},
-        {73, 587316LL}, {74, 178062LL}, {75, 178079LL}, {76, 1557275LL},
-        {77, 1554176LL}, {78, 394544LL}, {79, 392587LL}, {80, 310513LL},
-        {81, 307212LL}, {82, 303065LL}, {83, 306754LL}, {84, 741438LL},
-        {85, 726608LL}, {86, 741092LL}, {87, 736684LL}, {88, 801275LL},
-        {89, 803647LL}, {90, 809558LL}, {91, 796557LL}, {92, 1355077LL},
-        {93, 1352300LL}, {94, 698745LL}, {95, 524379LL}, {96, 589635LL},
-        {97, 950062LL}, {98, 915857LL}, {99, 1089232LL}, {100, 1088534LL},
-        {101, 1070351LL}, {102, 1080685LL}, {103, 1374810LL}, {104, 1351018LL},
-        {105, 416474LL}, {106, 417729LL}, {107, 370088LL}, {108, 369414LL},
-        {109, 151126LL}, {110, 152684LL}, {111, 2264680LL}, {112, 2224097LL},
-        {113, 2202794LL}, {114, 2220347LL}, {115, 5215962LL}, {116, 770898LL},
-        {117, 770086LL}, {118, 5782943LL}, {119, 127139LL}, {120, 126830LL},
-        {121, 1978721LL}, {122, 1890022LL}, {123, 1764223LL}, {124, 471829LL},
-        {125, 368238LL}, {126, 1543229LL}, {127, 1506882LL}, {128, 1291871LL},
-        {129, 1239744LL}, {130, 1131616LL}, {131, 1104934LL}, {132, 1574574LL},
-        {133, 1475605LL}, {134, 1268179LL}, {135, 1223285LL}, {136, 1118366LL},
-        {137, 1100059LL}, {138, 1556342LL}, {139, 1500752LL}, {140, 1285070LL},
-        {141, 1250926LL}, {142, 1120837LL}, {143, 1099323LL}, {144, 1559376LL},
-        {145, 1461470LL}, {146, 1247259LL}, {147, 1202147LL}, {148, 1097050LL},
-        {149, 1079652LL}, {150, 1522183LL}, {151, 1464036LL}, {152, 1260876LL},
-        {153, 1212732LL}, {154, 1086279LL}, {155, 1072781LL}, {156, 1925986LL},
-        {157, 1888792LL}, {158, 1299831LL}, {159, 1249078LL}, {160, 707932LL},
-        {161, 620051LL}, {162, 550874LL}, {163, 543569LL}, {164, 549679LL},
-        {165, 540568LL}, {166, 518624LL}, {167, 506783LL}, {168, 517097LL},
-        {169, 507164LL}, {170, 2069811LL}, {171, 1994577LL}, {172, 444753LL},
-        {173, 438756LL}, {174, 282156LL}, {175, 281630LL}, {176, 285024LL},
-        {177, 204393LL}, {178, 478186LL}, {179, 489481LL}, {180, 435767LL},
-        {181, 280361LL}, {182, 573442LL}, {183, 1721969LL}, {184, 473468LL},
-        {185, 506936LL}, {186, 374915LL}, {187, 1558904LL}, {188, 415797LL},
-        {189, 236117LL}, {190, 163756LL}, {191, 254156LL}, {192, 233494LL},
-        {193, 1564004LL}, {194, 408180LL}, {195, 237992LL}, {196, 1349277LL},
-        {197, 275778LL}, {198, 271800LL}, {199, 618836LL}, {200, 289139LL},
-        {201, 1773670LL}, {202, 3625286LL}, {203, 524429LL}, {204, 174331LL},
-        {205, 292877LL}, {206, 214796LL}, {207, 1188026LL}, {208, 77620LL},
-        {209, 1499235LL}, {210, 1281814LL}, {211, 205041LL}, {212, 393600LL},
-        {213, 343747LL}, {214, 242114LL}, {215, 229931LL}, {216, 194312LL},
-        {217, 195687LL}, {218, 173166LL}, {219, 793450LL}, {220, 782533LL},
-        {221, 792368LL}, {222, 772972LL}, {223, 778288LL}, {224, 412711LL},
-        {225, 399785LL}, {226, 409488LL}, {227, 111890LL}, {228, 127549LL},
-        {229, 57475LL}, {230, 44679LL}, {231, 1280588LL}, {232, 3368556LL},
-        {233, 1630014LL}, {234, 548208LL}, {235, 476680LL}, {236, 684890LL},
-        {237, 1767801LL}, {238, 557467LL}, {239, 555235LL}, {240, 319555LL},
-        {241, 415421LL}, {242, 396455LL}, {243, 1367828LL}, {244, 976492LL},
-        {245, 251514LL}, {246, 467549LL}, {247, 406179LL}, {248, 410005LL},
-        {249, 277430LL}, {250, 470926LL}, {251, 296721LL}, {252, 1602985LL},
-        {253, 1784752LL}, {254, 1162652LL}, {255, 1107750LL}, {256, 283497LL},
-        {257, 215246LL}, {258, 527442LL}, {259, 323411LL}, {260, 1682584LL},
-        {261, 1142526LL}, {262, 1718428LL}, {263, 3201236LL}, {264, 2555106LL},
-        {265, 1399106LL}, {266, 428985LL}, {267, 1406246LL}, {268, 983603LL},
-        {269, 1422172LL}, {270, 419946LL}, {271, 485315LL}, {272, 290909LL},
-        {273, 2442941LL}, {274, 469595LL}, {275, 2397876LL}, {276, 805136LL},
-        {277, 1052743LL}, {278, 1797780LL}, {279, 538877LL}, {280, 458125LL},
-        {281, 534537LL}, {282, 1124371LL}, {283, 1802637LL}, {284, 1783441LL},
-        {285, 1205525LL}, {286, 1788923LL}, {287, 486922LL}, {288, 291570LL},
-        {289, 330237LL}, {290, 192763LL}, {291, 204280LL}, {292, 193611LL},
-        {293, 296334LL}, {294, 275630LL}, {295, 208757LL}, {296, 195712LL},
-        {297, 363175LL}, {298, 412725LL}, {299, 202093LL}, {300, 216926LL},
-        {301, 210424LL}, {302, 224822LL}, {303, 1526076LL}, {304, 1047560LL},
-        {305, 418367LL}, {306, 775515LL}, {307, 630650LL}, {308, 1135824LL},
-        {309, 420317LL}, {310, 456449LL}, {311, 1145339LL}, {312, 1376408LL},
-        {313, 968829LL}, {314, 414318LL}, {315, 759411LL}, {316, 614110LL},
-        {317, 293675LL}, {318, 265003LL}, {319, 192533LL}, {320, 219963LL},
-        {321, 190355LL}, {322, 356911LL}, {323, 354819LL}, {324, 211703LL},
-        {325, 210194LL}, {326, 321277LL}, {327, 316120LL}, {328, 292923LL},
-        {329, 297969LL}, {330, 200329LL}, {331, 147052LL}, {332, 138481LL},
-        {333, 344706LL}, {334, 489529LL}, {335, 3668496LL}, {336, 2164994LL},
-        {337, 413652LL}, {338, 395635LL}, {339, 237317LL}, {340, 582972LL},
-        {341, 373163LL}, {342, 317861LL}, {343, 880519LL}, {344, 718458LL},
-        {345, 595741LL}, {346, 2945322LL}, {347, 1780013LL}, {348, 1175985LL},
-        {349, 894239LL}, {350, 1767621LL}, {351, 2049623LL}, {352, 477865LL},
-        {353, 3554766LL}, {354, 1691383LL}, {355, 1110517LL}, {356, 1128916LL},
-        {357, 1662942LL}, {358, 572412LL}, {359, 413908LL}, {360, 480911LL},
-        {361, 255051LL}, {362, 481404LL}, {363, 1628653LL}, {367, 1013870LL},
-        {368, 1289578LL}, {369, 2294910LL}, {370, 1870542LL}, {371, 1292477LL},
-        {372, 3018493LL}, {373, 3005558LL}, {374, 367072LL}, {375, 1427882LL},
-        {376, 547849LL}, {377, 391691LL}, {379, 1163575LL}, {380, 818495LL},
-        {381, 800247LL}, {382, 314465LL}, {383, 3361691LL}, {384, 550434LL},
-        {385, 1722879LL}, {386, 834199LL}, {387, 254797LL}, {388, 837504LL},
-        {389, 272852LL}, {390, 857451LL}, {391, 233325LL}, {392, 858108LL},
-        {393, 234612LL}, {394, 3199343LL}, {395, 1799015LL}, {396, 349650LL},
-        {397, 430881LL}, {398, 698380LL}, {399, 1389396LL}, {400, 1148742LL},
-        {401, 378180LL}, {402, 497804LL}, {403, 497432LL}, {404, 695274LL},
-        {405, 1849714LL}, {406, 929341LL}, {407, 1720549LL}, {408, 1056889LL},
-        {409, 747750LL}, {410, 3352671LL}, {411, 3007701LL}, {412, 1256839LL},
-        {413, 1238055LL}, {414, 1723895LL}, {415, 181450LL}, {416, 1565551LL},
-        {417, 1737128LL}, {418, 1302413LL}, {419, 409933LL}, {420, 607024LL},
-        {421, 606359LL}, {422, 801522LL}, {423, 790678LL}, {424, 346957LL},
-        {425, 107753617LL}, {427, 353322LL}, {428, 350262LL}, {430, 348029LL},
-        {431, 350085LL}, {434, 1861918LL}, {435, 1824741LL}, {436, 64087LL},
-        {437, 252902LL}, {438, 416425LL}, {439, 1004107LL}, {440, 485874LL},
-        {441, 1763962LL}, {442, 500172LL}, {443, 898373LL}, {447, 1313081LL},
-        {448, 331436LL}, {449, 3198857LL}, {450, 5LL}, {451, 5LL},
-        {452, 5LL}, {453, 1861395LL}, {454, 1225012LL}, {455, 1747LL},
-        {456, 28105439LL}, {457, 798505LL}, {458, 1061728LL}, {460, 527651LL},
-        {461, 3147LL}, {462, 271066LL}, {463, 2041198LL}, {464, 347758LL},
-        {465, 569534LL}, {468, 1240965LL}, {472, 1264005LL}, {475, 332660LL},
-        {476, 316138LL}, {477, 299056LL}, {478, 666123LL}, {479, 341313LL},
-        {480, 244778LL}, {481, 151005LL}, {482, 223741LL}, {483, 448331LL},
-        {484, 393710LL}, {485, 390200LL}, {486, 674403LL}, {487, 1181620LL},
-        {488, 718013LL}, {489, 508147LL}, {490, 1940673LL}, {491, 331086LL},
-        {492, 299645LL}, {493, 241364LL}, {494, 238997LL}, {495, 564997LL},
-        {496, 2405025LL}, {497, 1367915LL}, {498, 2083418LL}, {499, 1801092LL},
-        {503, 492497LL}, {504, 1115911LL}, {505, 861184LL}, {506, 1140917LL},
-        {507, 561715LL}, {508, 1163226LL}, {509, 139391LL}, {510, 370989LL},
-        {520, 488660LL}, {521, 1685352LL}, {522, 89694LL}, {523, 340397LL},
-        {524, 3573401LL}, {525, 3449718LL}, {526, 2722457LL}, {527, 2388522LL},
-        {539, 283365LL}, {541, 1590710LL}, {542, 1604153LL}, {543, 157201LL},
-        {544, 323134LL}, {545, 518053LL}, {546, 1700042LL}, {547, 1127966LL},
-        {548, 225149LL}, {549, 267653LL}, {550, 262945LL}, {551, 916357LL},
-        {552, 344569LL}, {553, 505992LL}, {554, 592342LL}, {555, 523485LL},
-        {556, 532619LL}, {558, 1755467LL}, {559, 887929LL}, {560, 747247LL},
-        {561, 484678LL}, {562, 266576LL}, {563, 460021LL}, {564, 232818LL},
-        {565, 155168LL}, {566, 104598LL}, {567, 408546LL}, {568, 402059LL},
-        {569, 314236LL}, {570, 2370060LL}, {571, 260959LL}, {572, 407712LL},
-        {578, 1199835LL}, {579, 415235LL}, {580, 172656LL}, {581, 254291LL},
-        {582, 159923LL}, {583, 162964LL}, {584, 120525LL}, {585, 154095LL},
-        {586, 885241LL}, {588, 341237LL}, {592, 331687LL}, {593, 141721LL},
-        {594, 342807LL}, {595, 335228LL}, {599, 143236LL}, {600, 280552LL},
-        {601, 436547LL}, {604, 215507LL}, {605, 217458LL}, {606, 211775LL},
-        {608, 209947LL}, {609, 209910LL}, {610, 206460LL}, {612, 210325LL},
-        {613, 133867LL}, {614, 98181LL}, {615, 207207LL}, {616, 209106LL},
-        {617, 345407LL}, {618, 126586LL}, {620, 212300LL}, {621, 210247LL},
-        {622, 210765LL}, {623, 194433LL}, {624, 210608LL}, {625, 210689LL},
-        {626, 210453LL}, {628, 370398LL}, {629, 335028LL}, {630, 217457LL},
-        {631, 340416LL}, {632, 224638LL}, {634, 229352LL}, {635, 278690LL},
-        {636, 221057LL}, {640, 431367LL}, {641, 445555LL}, {642, 168582LL},
-        {643, 440756LL}, {644, 188948LL}, {645, 409024LL}, {646, 232850LL},
-        {647, 155637LL}, {648, 225596LL}, {650, 337283LL}, {652, 1238648LL},
-        {653, 298612LL}, {655, 391619LL}, {658, 394135LL}, {659, 1206548LL},
-        {660, 176613LL}, {661, 262050LL}, {663, 387398LL}, {665, 1183910LL},
-        {666, 409185LL}, {667, 341847LL}, {668, 313040LL}, {670, 350609LL},
-        {671, 241220LL}, {673, 223567LL}, {674, 234882LL}, {675, 151731LL},
-        {682, 871534LL}, {686, 319782LL}, {688, 394506LL}, {689, 245667LL},
-        {693, 390983LL}, {694, 3510677LL}, {695, 553224LL}, {697, 145796LL},
-        {698, 201268LL}, {699, 229741LL}, {700, 409712LL}, {701, 414026LL},
-        {702, 468732LL}, {703, 1654308LL}, {704, 880221LL}, {705, 420731LL},
-        {706, 257824LL}, {707, 459548LL}, {708, 97159LL}, {710, 301592LL},
-        {711, 298681LL}, {712, 142617LL}, {713, 133291LL}, {714, 401232LL},
-        {715, 142040LL}, {716, 333090LL}, {721, 308562LL}, {722, 267998LL},
-        {723, 203120LL}, {724, 329464LL}, {727, 394464LL}, {728, 394368LL},
-        {729, 393359LL}, {730, 398357LL}, {731, 368747LL}, {732, 426355LL},
-        {734, 369602LL}, {740, 349157LL}, {741, 316769LL}, {743, 941262LL},
-        {745, 231249LL}, {746, 376832LL}, {748, 323317LL}, {750, 153113LL},
-        {752, 422887LL}, {753, 401537LL}, {754, 396220LL}, {755, 207316LL},
-        {758, 317004LL}, {760, 143236LL}, {761, 135762LL}, {762, 226386LL},
-        {764, 211249LL}, {765, 418976LL}, {766, 270135LL}, {767, 1117038LL},
-        {768, 496730LL}, {769, 492517LL}, {770, 424587LL}, {771, 432605LL},
-        {772, 390142LL}, {773, 355393LL}, {774, 264583LL}, {775, 649494LL},
-        {776, 360480LL}, {777, 1446142LL}, {778, 455664LL}, {779, 419830LL},
-        {780, 261473LL}, {781, 1005062LL}, {782, 621135LL}, {786, 1431914LL},
-        {790, 349211LL}, {792, 231386LL}, {793, 208678LL}, {794, 186815LL},
-        {795, 183000LL}, {796, 167076LL}, {797, 166832LL}, {798, 193712LL},
-        {799, 331596LL}, {800, 2105379LL}, {801, 1992058LL}, {802, 1984238LL},
-        {803, 1390085LL}, {804, 1338384LL}, {805, 628506LL}, {806, 971939LL},
-        {807, 957041LL}, {808, 582128LL}, {809, 747979LL}, {810, 732413LL},
-        {811, 892239LL}, {812, 899090LL}, {813, 589941LL}, {814, 751504LL},
-        {815, 740375LL}, {816, 751092LL}, {820, 760561LL}, {823, 940978LL},
-        {825, 1226642LL}, {826, 502566LL}, {827, 897983LL}, {828, 1236630LL},
-        {830, 79188036LL}, {831, 1324961LL}, {832, 1314939LL}, {834, 1806326LL},
-        {837, 124372LL}, {838, 125236LL}, {839, 111172LL}, {840, 111886LL},
-        {841, 2648787LL}, {842, 2594592LL}, {843, 2632009LL}, {844, 5284524LL},
-        {845, 3172941LL}, {846, 4023442LL}, {847, 4203886LL},
-        {848, 5323019LL}, {849, 2025534LL}, {850, 3940874LL}, {851, 3942488LL},
-        {852, 1730767LL}, {853, 5671481LL}, {854, 2020116LL}, {855, 6611722LL},
-        {856, 5679280LL}, {857, 5247548LL}, {858, 6025016LL}, {859, 4921983LL},
-        {860, 3031865LL}, {861, 7162399LL}, {862, 6901372LL}, {863, 2720320LL},
-        {864, 2909721LL}, {865, 4729197LL}, {866, 39990LL}, {867, 6311LL},
-        {868, 6689LL}, {869, 21692LL}, {870, 13573LL}, {871, 11293LL},
-        {872, 1335787LL}, {873, 1343596LL}, {874, 473090LL}, {875, 655LL},
-        {876, 240LL}, {877, 611340LL}, {878, 5355245LL}, {879, 3549919LL},
-        {880, 1997303LL}, {881, 4538035LL}, {882, 295776LL}, {883, 98651LL},
-        {884, 7050LL},
-        /* Phase 1: Crypt */
-        {500, 307854LL}, {501, 282154LL}, {502, 290598LL}, {511, 5008LL},
-        {512, 455LL}, {513, 510LL}, {538, 343LL}, {573, 285648LL},
-        {574, 282562LL}, {577, 5LL},
-        /* Phase 2: PBKDF2/KDF */
-        {529, 37LL}, {530, 6931LL}, {531, 5358LL}, {532, 10449LL},
-        {533, 6040LL}, {534, 53LL},
-        /* Phase 3: SSHA base64 */
-        {833, 3500550LL}, {835, 1947255LL}, {836, 1404498LL},
-        /* Phase 4: Format-specific */
-        {444, 527029LL}, {445, 282006LL}, {446, 2371926LL}, {459, 3449799LL},
-        {474, 2427946LL}, {536, 3277075LL}, {537, 2467LL}, {540, 2284335LL},
-        {829, 72252720LL}, {885, 4005LL}, {886, 1685366LL},
-        /* Phase 5: MD4UTF16 variants */
-        {783, 1850696LL}, {784, 1452312LL}, {785, 1520184LL},
-        {787, 4348447LL}, {788, 4493704LL}, {791, 1029550LL},
-        /* Phase 6: Unsalted SHA1 CAP/UC/TRUNC */
-        {522, 401433LL}, {656, 1703761LL}, {657, 321453LL}, {664, 1752548LL},
-        {696, 1565880LL}, {709, 1222324LL}, {717, 1186114LL}, {733, 296834LL},
-        {737, 1852812LL}, {747, 2161880LL}, {749, 1622375LL}, {756, 953558LL},
-        /* Phase 7A: TRUNC+SALT */
-        {672, 871716LL}, {678, 1328958LL}, {679, 1130237LL}, {683, 1696942LL},
-        {690, 1122899LL}, {691, 1453593LL}, {725, 1403345LL}, {726, 1117040LL},
-        {739, 1875366LL},
-        /* Phase 7B: PEPPER */
-        {596, 998821LL}, {597, 1391795LL}, {602, 1539333LL}, {607, 1549434LL},
-        {611, 1088895LL}, {651, 1611141LL}, {654, 1403749LL}, {677, 1386932LL},
-        {681, 1722003LL}, {719, 1177212LL}, {742, 1259901LL},
-        /* Phase 7C: 1BYTE-SALT */
-        {638, 1407074LL}, {639, 2256863LL}, {649, 2618314LL}, {687, 1571804LL},
-        {718, 2682830LL}, {763, 1449107LL},
-        /* Phase 7D: Other salted */
-        {590, 1605970LL}, {591, 1188061LL}, {662, 762620LL}, {680, 600561LL},
-        {684, 1262847LL}, {692, 1204318LL}, {736, 1465326LL}, {744, 1391799LL},
-        {757, 1184746LL}, {824, 1712245LL},
-        /* Phase 8: MD5 pepper */
-        {819, 2055403LL}, {821, 2013299LL}, {822, 2986567LL},
-        /* Previously unbenched salted-compute types */
-        {364, 1112395LL}, {365, 1158997LL}, {366, 1644836LL}, {378, 1084385LL},
-        {466, 1098003LL}, {467, 1112824LL}, {469, 1670365LL}, {470, 838985LL},
-        {471, 1131693LL}, {473, 1110172LL}, {514, 728292LL}, {515, 1619152LL},
-        {516, 1617562LL}, {517, 1695952LL}, {518, 1659164LL}, {519, 1663274LL},
-        {528, 1155560LL}, {557, 631530LL}, {575, 1490254LL}, {576, 1551059LL},
-        {587, 1167205LL}, {589, 1131106LL}, {598, 1126958LL}, {603, 987594LL},
-        {619, 697284LL}, {627, 623838LL}, {633, 878792LL}, {637, 405441LL},
-        {669, 1144968LL}, {685, 1136455LL}, {720, 1237217LL}, {735, 1215215LL},
-        {738, 1863682LL}, {751, 1853275LL}, {759, 1875234LL},
-        {789, 4741402LL}, {817, 2426002LL}, {818, 3173427LL},
+        {1, 5823550LL}, {2, 5772013LL}, {3, 7276492LL}, {4, 245262LL},
+        {5, 973665LL}, {6, 2712702LL}, {7, 3783735LL}, {8, 3976075LL},
+        {9, 1801750LL}, {10, 1794007LL}, {11, 1408414LL}, {12, 1377418LL},
+        {13, 526988LL}, {14, 526838LL}, {15, 2742083LL}, {16, 4566659LL},
+        {17, 2340577LL}, {18, 5235387LL}, {19, 3058179LL}, {20, 3974257LL},
+        {21, 1970203LL}, {22, 3171683LL}, {23, 2123735LL}, {24, 2162537LL},
+        {25, 301566LL}, {26, 302420LL}, {27, 261683LL}, {28, 269764LL},
+        {29, 194839LL}, {30, 130389LL}, {31, 2584409LL}, {32, 676368LL},
+        {33, 2950833LL}, {34, 1918635LL}, {35, 889979LL}, {36, 895425LL},
+        {37, 702099LL}, {38, 706983LL}, {39, 1965715LL}, {40, 1506656LL},
+        {41, 2712287LL}, {42, 1916542LL}, {43, 1581013LL}, {44, 2692444LL},
+        {45, 1932128LL}, {46, 1588832LL}, {47, 2655051LL}, {48, 1899882LL},
+        {49, 1610442LL}, {50, 1954662LL}, {51, 1616177LL}, {52, 1862807LL},
+        {53, 1856351LL}, {54, 1583259LL}, {55, 1559946LL}, {56, 1638984LL},
+        {57, 1620928LL}, {58, 1480984LL}, {59, 1441386LL}, {60, 161779LL},
+        {61, 159666LL}, {62, 158023LL}, {63, 158739LL}, {64, 278149LL},
+        {65, 266803LL}, {66, 216497LL}, {67, 216086LL}, {68, 472007LL},
+        {69, 472499LL}, {70, 314365LL}, {71, 224306LL}, {72, 502422LL},
+        {73, 498427LL}, {74, 153329LL}, {75, 153510LL}, {76, 1344165LL},
+        {77, 1321683LL}, {78, 342063LL}, {79, 337794LL}, {80, 271831LL},
+        {81, 282136LL}, {82, 280734LL}, {83, 284035LL}, {84, 678354LL},
+        {85, 669797LL}, {86, 668560LL}, {87, 676938LL}, {88, 725544LL},
+        {89, 735058LL}, {90, 734046LL}, {91, 722990LL}, {92, 1248595LL},
+        {93, 1243241LL}, {94, 633964LL}, {95, 480024LL}, {96, 543291LL},
+        {97, 865088LL}, {98, 884582LL}, {99, 1020243LL}, {100, 1018045LL},
+        {101, 995579LL}, {102, 1000859LL}, {103, 1262242LL}, {104, 1253023LL},
+        {105, 390511LL}, {106, 387967LL}, {107, 348224LL}, {108, 348300LL},
+        {109, 141206LL}, {110, 144334LL}, {111, 2104936LL}, {112, 2121079LL},
+        {113, 2032796LL}, {114, 1995022LL}, {115, 4849136LL}, {116, 700161LL},
+        {117, 714037LL}, {118, 5359830LL}, {119, 115891LL}, {120, 114379LL},
+        {121, 2888211LL}, {122, 2705054LL}, {123, 2204953LL}, {124, 453969LL},
+        {125, 348818LL}, {126, 1680872LL}, {127, 1570939LL}, {128, 1144141LL},
+        {129, 1189242LL}, {130, 1122846LL}, {131, 1036117LL}, {132, 1572753LL},
+        {133, 1552930LL}, {134, 1290475LL}, {135, 1145599LL}, {136, 1021553LL},
+        {137, 1043484LL}, {138, 1575218LL}, {139, 1521669LL}, {140, 1266517LL},
+        {141, 1230545LL}, {142, 1061454LL}, {143, 1007715LL}, {144, 1463778LL},
+        {145, 1443453LL}, {146, 1181561LL}, {147, 1204191LL}, {148, 1098470LL},
+        {149, 1034076LL}, {150, 1575649LL}, {151, 1407781LL}, {152, 1149036LL},
+        {153, 1135852LL}, {154, 1086310LL}, {155, 1055439LL}, {156, 2004364LL},
+        {157, 2035916LL}, {158, 1373740LL}, {159, 1173194LL}, {160, 1785668LL},
+        {161, 1798461LL}, {162, 1143230LL}, {163, 1139679LL}, {164, 1187843LL},
+        {165, 1144817LL}, {166, 934187LL}, {167, 978196LL}, {168, 903182LL},
+        {169, 951406LL}, {170, 2270439LL}, {171, 2187621LL}, {172, 407521LL},
+        {173, 402909LL}, {174, 256879LL}, {175, 248086LL}, {176, 250809LL},
+        {177, 174433LL}, {178, 1941669LL}, {179, 1002403LL}, {180, 720873LL},
+        {181, 1583031LL}, {182, 3540338LL}, {183, 2216489LL}, {184, 1762014LL},
+        {185, 1065338LL}, {186, 339560LL}, {187, 1481517LL}, {188, 1262532LL},
+        {189, 954451LL}, {190, 628547LL}, {191, 1204763LL}, {192, 862150LL},
+        {193, 1511046LL}, {194, 868518LL}, {195, 760677LL}, {196, 1338327LL},
+        {197, 706013LL}, {198, 392366LL}, {199, 581675LL}, {200, 1183270LL},
+        {201, 2325662LL}, {202, 4759557LL}, {203, 1726197LL}, {204, 617138LL},
+        {205, 1266409LL}, {206, 1109467LL}, {207, 1290177LL}, {208, 65061LL},
+        {209, 1847387LL}, {210, 1098545LL}, {211, 375930LL}, {212, 346736LL},
+        {213, 296868LL}, {214, 521653LL}, {215, 458196LL}, {216, 277799LL},
+        {217, 279436LL}, {218, 232870LL}, {219, 645531LL}, {220, 650918LL},
+        {221, 656037LL}, {222, 646872LL}, {223, 646331LL}, {224, 352298LL},
+        {225, 350012LL}, {226, 349088LL}, {227, 93879LL}, {228, 103869LL},
+        {229, 48158LL}, {230, 37162LL}, {231, 1438018LL}, {232, 4305878LL},
+        {233, 1983505LL}, {234, 1682003LL}, {235, 1239711LL}, {236, 3027922LL},
+        {237, 2259521LL}, {238, 1776328LL}, {239, 1617760LL}, {240, 1555928LL},
+        {241, 1182477LL}, {242, 1035487LL}, {243, 1559935LL}, {244, 968254LL},
+        {245, 1103034LL}, {246, 1738009LL}, {247, 1196575LL}, {248, 1080137LL},
+        {249, 1605313LL}, {250, 1631304LL}, {251, 1023921LL}, {252, 1938187LL},
+        {253, 2367075LL}, {254, 1569858LL}, {255, 1352812LL}, {256, 1096756LL},
+        {257, 1112722LL}, {258, 1874173LL}, {259, 1710297LL}, {260, 1569272LL},
+        {261, 1499738LL}, {262, 2214166LL}, {263, 3717862LL}, {264, 2538729LL},
+        {265, 1520808LL}, {266, 1020545LL}, {267, 1654351LL}, {268, 1215764LL},
+        {269, 1647584LL}, {270, 1024840LL}, {271, 1176116LL}, {272, 902279LL},
+        {273, 2290300LL}, {274, 1036289LL}, {275, 2529589LL}, {276, 730831LL},
+        {277, 1207456LL}, {278, 2001886LL}, {279, 1419689LL}, {280, 951473LL},
+        {281, 1262690LL}, {282, 962884LL}, {283, 2267797LL}, {284, 2248432LL},
+        {285, 1519262LL}, {286, 1810673LL}, {287, 1272100LL}, {288, 1026549LL},
+        {289, 919050LL}, {290, 785182LL}, {291, 930534LL}, {292, 652291LL},
+        {293, 838575LL}, {294, 607339LL}, {295, 974745LL}, {296, 751718LL},
+        {297, 1213524LL}, {298, 1991184LL}, {299, 929299LL}, {300, 1069268LL},
+        {301, 1012458LL}, {302, 1161911LL}, {303, 1849521LL}, {304, 1058528LL},
+        {305, 1000421LL}, {306, 1002992LL}, {307, 816657LL}, {308, 1488960LL},
+        {309, 860751LL}, {310, 1251092LL}, {311, 1496572LL}, {312, 1573816LL},
+        {313, 1062143LL}, {314, 1078814LL}, {315, 981285LL}, {316, 634041LL},
+        {317, 1233894LL}, {318, 857001LL}, {319, 889082LL}, {320, 754451LL},
+        {321, 651888LL}, {322, 1190992LL}, {323, 1187921LL}, {324, 1003911LL},
+        {325, 897343LL}, {326, 945331LL}, {327, 854821LL}, {328, 678088LL},
+        {329, 744768LL}, {330, 861124LL}, {331, 777322LL}, {332, 611460LL},
+        {333, 879561LL}, {334, 3439237LL}, {335, 3727023LL}, {336, 1881163LL},
+        {337, 895192LL}, {338, 914151LL}, {339, 669553LL}, {340, 2208566LL},
+        {341, 622469LL}, {342, 1309197LL}, {343, 1044563LL}, {344, 840256LL},
+        {345, 665116LL}, {346, 3667100LL}, {347, 2419336LL}, {348, 1181506LL},
+        {349, 1226563LL}, {350, 2439917LL}, {351, 1819617LL}, {352, 1075609LL},
+        {353, 5017429LL}, {354, 2421256LL}, {355, 1582130LL}, {356, 1649422LL},
+        {357, 1883350LL}, {358, 1917132LL}, {359, 959137LL}, {360, 1200244LL},
+        {361, 687450LL}, {362, 1324277LL}, {363, 2375904LL}, {364, 1525656LL},
+        {365, 1326101LL}, {366, 1925506LL}, {367, 1088767LL}, {368, 1350126LL},
+        {369, 2536391LL}, {370, 2247408LL}, {371, 1543676LL}, {372, 4951420LL},
+        {373, 3471463LL}, {374, 869779LL}, {375, 1751876LL}, {376, 1990261LL},
+        {377, 897968LL}, {378, 1217155LL}, {379, 530674LL}, {380, 448404LL},
+        {381, 456769LL}, {382, 518249LL}, {383, 3595635LL}, {384, 1851041LL},
+        {385, 2348355LL}, {386, 1039545LL}, {387, 379954LL}, {388, 1051388LL},
+        {389, 374746LL}, {390, 867415LL}, {391, 232685LL}, {392, 891543LL},
+        {393, 227958LL}, {394, 4807066LL}, {395, 2199370LL}, {396, 853517LL},
+        {397, 815189LL}, {398, 3695447LL}, {399, 1847363LL}, {400, 1310557LL},
+        {401, 843196LL}, {402, 1528301LL}, {403, 1431986LL}, {404, 3693397LL},
+        {405, 2354678LL}, {406, 1013471LL}, {407, 2009335LL}, {408, 1527957LL},
+        {409, 3658325LL}, {410, 5028298LL}, {411, 4213971LL}, {412, 1337365LL},
+        {413, 1359962LL}, {414, 2155430LL}, {415, 571586LL}, {416, 1709312LL},
+        {417, 2657948LL}, {418, 1731159LL}, {419, 965249LL}, {420, 1975527LL},
+        {421, 367318LL}, {422, 1019499LL}, {423, 970087LL}, {424, 331054LL},
+        {425, 80508921LL}, {427, 325282LL}, {428, 322233LL}, {430, 317830LL},
+        {431, 325225LL}, {434, 2288916LL}, {435, 2655872LL}, {436, 211317LL},
+        {437, 316304LL}, {438, 849343LL}, {439, 1231027LL}, {440, 1189932LL},
+        {441, 2362492LL}, {442, 1163537LL}, {443, 1017808LL}, {444, 377985LL},
+        {445, 190411LL}, {446, 1554375LL}, {447, 1330417LL}, {448, 591029LL},
+        {449, 4146390LL}, {450, 3LL}, {451, 3LL}, {452, 3LL},
+        {453, 2489176LL}, {454, 1636939LL}, {455, 2442LL}, {456, 17859693LL},
+        {457, 2970391LL}, {458, 1379266LL}, {459, 2454217LL}, {460, 1397538LL},
+        {461, 4236LL}, {462, 773419LL}, {463, 2259931LL}, {464, 541784LL},
+        {465, 2033087LL}, {466, 1368896LL}, {467, 1376833LL}, {468, 1541318LL},
+        {469, 1687663LL}, {470, 1070701LL}, {471, 1483427LL}, {472, 1433005LL},
+        {473, 1489862LL}, {474, 1702686LL}, {475, 902854LL}, {476, 764354LL},
+        {477, 651267LL}, {478, 3057192LL}, {479, 513852LL}, {480, 305955LL},
+        {481, 445554LL}, {482, 250008LL}, {483, 410458LL}, {484, 381898LL},
+        {485, 381630LL}, {486, 690630LL}, {487, 1230333LL}, {488, 1699629LL},
+        {489, 1311943LL}, {490, 2309772LL}, {491, 1223020LL}, {492, 985018LL},
+        {493, 213230LL}, {494, 217188LL}, {495, 1150274LL}, {496, 3093836LL},
+        {497, 1471354LL}, {498, 2149882LL}, {499, 2026895LL}, {500, 210051LL},
+        {501, 192803LL}, {502, 196615LL}, {503, 1319202LL}, {504, 1554579LL},
+        {505, 945875LL}, {506, 1010503LL}, {507, 1924246LL}, {508, 1582618LL},
+        {509, 475214LL}, {510, 590625LL}, {511, 4184LL}, {512, 187LL},
+        {513, 220LL}, {514, 876441LL}, {515, 2300931LL}, {516, 1861744LL},
+        {517, 2374376LL}, {518, 2385988LL}, {519, 2287552LL}, {520, 1236520LL},
+        {521, 1982617LL}, {522, 325635LL}, {523, 482397LL}, {524, 5322911LL},
+        {525, 5166739LL}, {526, 3013452LL}, {527, 3099075LL}, {528, 1283738LL},
+        {529, 13LL}, {530, 2651LL}, {531, 2453LL}, {532, 4229LL},
+        {533, 2161LL}, {534, 21LL}, {536, 2310681LL}, {537, 2232LL},
+        {538, 114LL}, {539, 1189316LL}, {540, 1478586LL}, {541, 2195835LL},
+        {542, 2148162LL}, {543, 216983LL}, {544, 1647794LL}, {545, 1650637LL},
+        {546, 2252202LL}, {547, 1484193LL}, {548, 644491LL}, {549, 666368LL},
+        {550, 715627LL}, {551, 1193139LL}, {552, 823936LL}, {553, 710906LL},
+        {554, 728421LL}, {555, 1949191LL}, {556, 1638263LL}, {557, 657295LL},
+        {558, 1956111LL}, {559, 1091116LL}, {560, 931926LL}, {561, 1426192LL},
+        {562, 1032150LL}, {563, 1052164LL}, {564, 460599LL}, {565, 306412LL},
+        {566, 226278LL}, {567, 1134483LL}, {568, 1107643LL}, {569, 517238LL},
+        {570, 2887614LL}, {571, 901820LL}, {572, 1340751LL}, {573, 191102LL},
+        {574, 186024LL}, {575, 2025686LL}, {576, 1682001LL}, {577, 3LL},
+        {578, 1515033LL}, {579, 1330586LL}, {582, 439287LL}, {583, 442221LL},
+        {584, 296706LL}, {585, 337274LL}, {586, 1161884LL}, {587, 1457445LL},
+        {588, 1009534LL}, {589, 1391865LL}, {590, 1217505LL}, {591, 939526LL},
+        {592, 829651LL}, {593, 645394LL}, {594, 988286LL}, {595, 1371577LL},
+        {596, 747172LL}, {597, 980811LL}, {598, 1349170LL}, {599, 693747LL},
+        {600, 728561LL}, {601, 3682415LL}, {602, 1023583LL}, {603, 1124048LL},
+        {604, 1753492LL}, {605, 1753170LL}, {606, 1737992LL}, {607, 1223122LL},
+        {608, 883504LL}, {609, 879326LL}, {610, 897391LL}, {611, 794871LL},
+        {612, 901862LL}, {613, 437889LL}, {614, 289688LL}, {615, 920094LL},
+        {616, 910587LL}, {617, 1505815LL}, {618, 727587LL}, {619, 689162LL},
+        {620, 1756189LL}, {621, 903798LL}, {622, 928224LL}, {623, 735498LL},
+        {624, 1815323LL}, {625, 1790678LL}, {626, 1815577LL}, {627, 681870LL},
+        {628, 2003539LL}, {629, 1436166LL}, {630, 897129LL}, {632, 911828LL},
+        {633, 1070184LL}, {634, 946671LL}, {635, 552230LL}, {636, 692532LL},
+        {637, 369791LL}, {638, 541804LL}, {639, 887639LL}, {640, 1496029LL},
+        {641, 2186275LL}, {642, 220126LL}, {643, 1842827LL}, {644, 237698LL},
+        {645, 1521615LL}, {646, 635845LL}, {647, 295366LL}, {648, 344327LL},
+        {649, 1259881LL}, {650, 927432LL}, {651, 1004426LL}, {652, 1561373LL},
+        {653, 525977LL}, {654, 920857LL}, {655, 1380819LL}, {656, 1174076LL},
+        {657, 217431LL}, {658, 1372042LL}, {659, 1531371LL}, {660, 1232532LL},
+        {661, 1675818LL}, {662, 666257LL}, {663, 1386558LL}, {664, 1370516LL},
+        {665, 1515377LL}, {666, 1355557LL}, {667, 1023715LL}, {668, 765604LL},
+        {669, 1303976LL}, {670, 1083546LL}, {671, 651730LL}, {672, 453207LL},
+        {673, 671000LL}, {674, 544922LL}, {675, 419043LL}, {677, 971009LL},
+        {678, 688077LL}, {679, 590777LL}, {680, 438249LL}, {681, 932168LL},
+        {682, 1086013LL}, {683, 896448LL}, {684, 853466LL}, {685, 1376096LL},
+        {686, 874515LL}, {687, 749327LL}, {688, 1426974LL}, {689, 639841LL},
+        {690, 542062LL}, {691, 688124LL}, {692, 939561LL}, {693, 1425107LL},
+        {694, 4450610LL}, {695, 3360553LL}, {696, 1246545LL}, {697, 564780LL},
+        {698, 622810LL}, {699, 830559LL}, {700, 1239308LL}, {701, 856511LL},
+        {702, 1752897LL}, {703, 2194252LL}, {704, 1026716LL}, {705, 1227517LL},
+        {706, 405831LL}, {707, 1048264LL}, {708, 182089LL}, {709, 1138655LL},
+        {710, 498018LL}, {711, 507766LL}, {712, 902205LL}, {713, 759890LL},
+        {714, 1864335LL}, {715, 925895LL}, {716, 1263260LL}, {717, 1080789LL},
+        {718, 1110396LL}, {719, 827890LL}, {720, 1286938LL}, {721, 1082631LL},
+        {722, 670607LL}, {723, 590233LL}, {725, 667878LL}, {726, 585867LL},
+        {727, 2178873LL}, {728, 2145061LL}, {729, 2170350LL}, {730, 2173947LL},
+        {731, 1996037LL}, {732, 3655866LL}, {733, 204558LL}, {734, 1895550LL},
+        {735, 1288945LL}, {736, 1185660LL}, {737, 1229803LL}, {738, 1017603LL},
+        {739, 915720LL}, {740, 1375156LL}, {741, 971518LL}, {742, 784958LL},
+        {743, 1073434LL}, {744, 971317LL}, {745, 768870LL}, {746, 1294507LL},
+        {747, 1699965LL}, {748, 940199LL}, {749, 1193425LL}, {750, 695409LL},
+        {751, 954548LL}, {752, 2229872LL}, {753, 1691973LL}, {754, 2209761LL},
+        {755, 1265060LL}, {756, 874055LL}, {757, 912327LL}, {758, 1059083LL},
+        {759, 927646LL}, {760, 872923LL}, {761, 720713LL}, {762, 1662779LL},
+        {763, 578329LL}, {764, 596778LL}, {765, 1734563LL}, {766, 1036545LL},
+        {767, 1262401LL}, {768, 2978698LL}, {769, 2907542LL}, {770, 1660724LL},
+        {771, 1991400LL}, {772, 1400033LL}, {773, 912274LL}, {774, 1785997LL},
+        {775, 775692LL}, {776, 889248LL}, {779, 831144LL}, {780, 772039LL},
+        {781, 1330951LL}, {782, 770693LL}, {783, 987349LL}, {784, 775930LL},
+        {785, 810963LL}, {786, 1637133LL}, {787, 2151745LL}, {788, 2341936LL},
+        {789, 2227087LL}, {790, 1074861LL}, {791, 425675LL}, {792, 573967LL},
+        {793, 488399LL}, {794, 297400LL}, {795, 293995LL}, {796, 251147LL},
+        {797, 250842LL}, {798, 402082LL}, {799, 316676LL}, {800, 2793568LL},
+        {801, 2629185LL}, {802, 2615778LL}, {803, 1597841LL}, {804, 1578269LL},
+        {805, 1294835LL}, {806, 1101898LL}, {807, 1102610LL}, {808, 1057334LL},
+        {809, 921265LL}, {810, 916279LL}, {811, 1077487LL}, {812, 1057980LL},
+        {813, 1066422LL}, {814, 913179LL}, {815, 884485LL}, {816, 750128LL},
+        {817, 1560183LL}, {818, 2363732LL}, {819, 988221LL}, {820, 789799LL},
+        {821, 1205142LL}, {822, 1312945LL}, {823, 1170086LL}, {824, 1259997LL},
+        {825, 1427854LL}, {826, 786715LL}, {827, 924674LL}, {828, 1194594LL},
+        {829, 52620173LL}, {830, 66179302LL}, {831, 1458140LL}, {832, 1448008LL},
+        {833, 2520817LL}, {834, 2177405LL}, {835, 1373163LL}, {836, 1004068LL},
+        {837, 116839LL}, {838, 117536LL}, {839, 101794LL}, {840, 103981LL},
+        {841, 2339611LL}, {842, 2157880LL}, {843, 2174986LL}, {844, 4353507LL},
+        {845, 2336656LL}, {846, 2195825LL}, {847, 2200784LL}, {848, 897694LL},
+        {849, 326395LL}, {850, 1327508LL}, {851, 1347256LL}, {852, 582392LL},
+        {853, 1917262LL}, {854, 654869LL}, {855, 3674381LL}, {856, 2918719LL},
+        {857, 4046630LL}, {858, 1933890LL}, {859, 1560347LL}, {860, 1007161LL},
+        {861, 4653460LL}, {862, 3449523LL}, {863, 1285603LL}, {864, 1136350LL},
+        {865, 1525167LL}, {866, 12919LL}, {867, 2031LL}, {868, 4092LL},
+        {869, 7591LL}, {870, 4530LL}, {871, 3883LL}, {872, 481399LL},
+        {873, 564728LL}, {874, 216704LL}, {875, 221LL}, {876, 104LL},
+        {877, 226046LL}, {878, 2063179LL}, {879, 1333135LL}, {880, 747462LL},
+        {881, 923274LL}, {882, 212583LL}, {883, 72618LL}, {884, 5100LL},
+        {885, 6124LL}, {886, 2492975LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
@@ -16108,6 +16391,7 @@ int main(int argc, char **argv)
 {
     int opt, i;
     char *outfile = NULL, *errfile = NULL;
+    int out_append = 0, err_append = 0;
     char *modespec = NULL;
     int show_help = 0;
     (void)Version;
@@ -16132,7 +16416,7 @@ int main(int argc, char **argv)
             if (argv[i][0] == '-' && argv[i][1] != '\0') {
                 sorted[dst++] = argv[i];
                 used[i] = 1;
-                if (argv[i][2] == '\0' && strchr("tiqoebm", argv[i][1]) && i + 1 < argc) {
+                if (argv[i][2] == '\0' && strchr("tiqoOeEbm", argv[i][1]) && i + 1 < argc) {
                     i++;
                     sorted[dst++] = argv[i];
                     used[i] = 1;
@@ -16148,7 +16432,7 @@ int main(int argc, char **argv)
         free(used);
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:e:b:m:BVh")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:b:m:BVh")) != -1) {
         switch (opt) {
         case 't':
             Numthreads = atoi(optarg);
@@ -16164,9 +16448,19 @@ int main(int argc, char **argv)
             break;
         case 'o':
             outfile = optarg;
+            out_append = 1;
+            break;
+        case 'O':
+            outfile = optarg;
+            out_append = 0;
             break;
         case 'e':
             errfile = optarg;
+            err_append = 1;
+            break;
+        case 'E':
+            errfile = optarg;
+            err_append = 0;
             break;
         case 'm':
             modespec = optarg;
@@ -16238,14 +16532,14 @@ int main(int argc, char **argv)
     }
 
     if (outfile) {
-        Outfp = fopen(outfile, "wb");
+        Outfp = fopen(outfile, out_append ? "ab" : "wb");
         if (!Outfp) {
             perror(outfile);
             exit(1);
         }
     }
     if (errfile) {
-        Errfp = fopen(errfile, "wb");
+        Errfp = fopen(errfile, err_append ? "ab" : "wb");
         if (!Errfp) {
             perror(errfile);
             exit(1);
@@ -16256,7 +16550,6 @@ int main(int argc, char **argv)
     WorkLock = new_lock(0);
     OutLock = new_lock(0);
     ErrLock = new_lock(0);
-    FreeLock = new_lock(0);
     WorkHead = WorkTail = NULL;
     FreeHead = NULL;
 
@@ -16274,10 +16567,13 @@ int main(int argc, char **argv)
                 fprintf(stderr, "hashpipe: out of memory (workspace)\n");
                 exit(1);
             }
+            memset(b->ws, 0, sizeof(struct workspace));
             b->ws->testvec = malloc(TESTVECSIZE + 16);
+            ws_init_rhash(b->ws);
             b->next = FreeHead;
             FreeHead = b;
         }
+        FreeLock = new_lock(poolsize);
     }
 
     /* Pre-set BatchLimit from slowest -m type, or use small default */
