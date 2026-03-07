@@ -8,13 +8,14 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.46 2026/03/07 09:01:42 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.48 2026/03/07 10:28:16 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <stdatomic.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -896,6 +897,7 @@ struct MapHashcat {
     {20711, 891},   /* AuthMe sha256 ($SHA$salt$hash) */
     {20712, 892},   /* RSA NetWitness (sha256(SHA256UC(pass).b64dec(salt))) */
     {22200, 893},   /* Citrix NetScaler SHA512 */
+    {33900, 895},   /* Citrix NetScaler (PBKDF2-HMAC-SHA256) */
     {30000, 889},   /* Python Werkzeug MD5 (HMAC-MD5 key=$salt) */
     {30120, 890},   /* Python Werkzeug SHA256 (HMAC-SHA256 key=$salt) */
     {65535, 65535}  /* EOF */
@@ -1273,6 +1275,7 @@ char *Types[] = {
     "NETWITNESS",
     "NETSCALER-SHA512",
     "SHA1SHA1SALTPASSSALT",
+    "NETSCALER-PBKDF2",
 
 NULL
 
@@ -9390,6 +9393,26 @@ static int verify_netscaler512(const char *hashstr, int hashlen,
     return strncasecmp(computed, hashstr, 137) == 0;
 }
 
+/* NETSCALER-PBKDF2 (e895): Citrix NetScaler PBKDF2-HMAC-SHA256
+ * Format: "5" + 64-hex-salt + 64-hex-hash (129 chars total), 2500 iterations */
+static int verify_netscaler_pbkdf2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt_bin = (unsigned char *)WS->gp1;
+    unsigned char *derived = (unsigned char *)WS->ctx1;
+    unsigned char *expected = (unsigned char *)WS->ctx2;
+    int salt_len, hash_len;
+
+    if (hashlen != 129 || hashstr[0] != '5') return 0;
+    salt_len = hex2bin(hashstr + 1, 64, salt_bin);
+    if (salt_len != 32) return 0;
+    hash_len = hex2bin(hashstr + 65, 64, expected);
+    if (hash_len != 32) return 0;
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, 32, 2500, EVP_sha256(), 32, derived);
+    return memcmp(derived, expected, 32) == 0;
+}
+
 /* SHA1SHA1SALTPASSSALT (e894): sha1(sha1(salt+pass+salt)) — 40hex:salt */
 static int verify_sha1sha1saltpasssalt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -15444,6 +15467,7 @@ static void init_hashtypes(void)
     HTV("NETWITNESS",    0, verify_netwitness, "6F48F44C46F5ADC534597687B086278F0AAF7D262ADDB3978562A7D55BBDF467:MDAwMzY1NzYwODI4MQ==:hashcat");
     HTV("NETSCALER-SHA512", 0, verify_netscaler512, "2f9282ade42ce148175dc3b4d8b5916dae5211eee49886c3f7cc768f6b9f2eb982a5ac2f2672a0223999bfd15349093278adf12f6276e8b61dacf5572b3f93d0b4fa886ce:hashcat");
     HTV("SHA1SHA1SALTPASSSALT", 0, verify_sha1sha1saltpasssalt, "05ac0c544060af48f993f9c3cdf2fc03937ea35b:232725102020:hashcat");
+    HTV("NETSCALER-PBKDF2", 0, verify_netscaler_pbkdf2, "5567243c55099b6b10a714a350db53beea8be6ac9c247fd40fea7e96d206a9f11fd1c45735556ac2004138640de206d0e1522607ab3c3f92816156d2d7845068e:hashcat");
     HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
     HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk= AQIDBA==:password123");
     HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
@@ -15695,17 +15719,33 @@ static void run_chain(const struct hashtype *ht,
     memcpy(dest, buf, ht->chain[ht->nchain - 1].outbytes);
 }
 
+/* Per-type stats (indexed by type_idx = ht - Hashtypes).
+ * Declared here so hash_compute/hash_verify can reference them. */
+static _Atomic uint64_t *StatTry;       /* per-type try count (compute + verify calls) */
+static _Atomic uint64_t *StatSolved;    /* per-type solve count */
+static _Atomic uint64_t *StatHotHit;    /* per-type hot list hit count */
+
 /* Unified hash computation: dispatches to chain or compute */
 static inline void hash_compute(const struct hashtype *ht,
     const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
     static const unsigned char empty_salt[1] = {0};
+    atomic_fetch_add(&StatTry[ht - Hashtypes], 1);
     if (ht->nchain > 0)
         run_chain(ht, pass, passlen, dest);
     else
         ht->compute(pass, passlen, salt ? salt : empty_salt, saltlen,
                     dest);
+}
+
+/* Verify wrapper: calls ht->verify and increments StatTry */
+static inline int hash_verify(const struct hashtype *ht,
+    const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    atomic_fetch_add(&StatTry[ht - Hashtypes], 1);
+    return ht->verify(hashstr, hashlen, pass, passlen);
 }
 
 /* Hex char to nibble, -1 on invalid */
@@ -15975,6 +16015,7 @@ struct workitem {
 struct hot_entry {
     int type_idx;
     int salt_len;   /* salt length for this match, -1 = unsalted/verify */
+    uint64_t hits;  /* number of times this hot entry matched */
 };
 
 struct batch {
@@ -16013,6 +16054,7 @@ static lock *WorkLock;   /* work queue depth */
 static lock *OutLock;    /* output serialization */
 static lock *ErrLock;    /* error output serialization */
 static lock *FreeLock;   /* free batch pool */
+static lock *HotLock;    /* hot list propagation */
 
 /* Queues (singly-linked, protected by respective locks) */
 static struct batch *WorkHead, *WorkTail;
@@ -16023,6 +16065,42 @@ static long long Totallines;
 static long long Verified;
 static long long Unresolved;
 static long long Nocolon;
+
+static FILE *Statfp;            /* -s stats output file, NULL if not requested */
+
+/* Global hot-hit accumulator: atomically tracks hits per (type_idx, salt_len) pair */
+struct hot_hit_entry {
+    int type_idx;
+    int salt_len;
+    _Atomic uint64_t hits;
+};
+static struct hot_hit_entry HotHitTable[HOT_LIST_MAX];
+static _Atomic int HotHitCount;   /* entries used in HotHitTable */
+
+/* Record a hot list hit for (type_idx, salt_len) globally */
+static void hot_hit_record(int type_idx, int salt_len)
+{
+    int i, n = atomic_load(&HotHitCount);
+    /* Search existing entries */
+    for (i = 0; i < n; i++) {
+        if (HotHitTable[i].type_idx == type_idx &&
+            HotHitTable[i].salt_len == salt_len) {
+            atomic_fetch_add(&HotHitTable[i].hits, 1);
+            return;
+        }
+    }
+    /* Not found — try to add (benign race: duplicates possible but harmless) */
+    int slot = atomic_fetch_add(&HotHitCount, 1);
+    if (slot < HOT_LIST_MAX) {
+        HotHitTable[slot].type_idx = type_idx;
+        HotHitTable[slot].salt_len = salt_len;
+        atomic_store(&HotHitTable[slot].hits, 1);
+    }
+}
+
+/* Final hot list snapshot for stats output */
+static struct hot_entry FinalHotList[HOT_LIST_MAX];
+static int FinalNhot;
 
 /* ---- Batch pool management ---- */
 
@@ -16040,10 +16118,12 @@ static struct batch *alloc_batch(void)
     twist(FreeLock, BY, -1);
     b->count = 0;
     b->bufused = 0;
+    possess(HotLock);
     b->hot_type = GlobalHotType;
     b->hot_iter = GlobalHotIter;
     memcpy(b->hot_list, GlobalHotList, GlobalNhot * sizeof(struct hot_entry));
     b->nhot = GlobalNhot;
+    release(HotLock);
     b->next = NULL;
     return b;
 }
@@ -16136,6 +16216,7 @@ static void hot_list_add(struct hot_entry *hot_list, int *nhot,
     struct hot_entry e;
     e.type_idx = type_idx;
     e.salt_len = salt_len;
+    e.hits = 0;
     if (*nhot < HOT_LIST_MAX) {
         memmove(&hot_list[1], &hot_list[0], *nhot * sizeof(struct hot_entry));
         (*nhot)++;
@@ -16292,6 +16373,8 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             continue;
 
         hot_fast_match:
+            hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
+            atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
             item->match_type = ht;
             item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
@@ -16329,7 +16412,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             }
         }
         WS->verify_iter = 0;
-        if (item->hint->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+        if (hash_verify(item->hint, item->hashstr, item->hashlen, vpass, vpasslen)) {
             item->verified = 1;
             item->match_type = item->hint;
             item->match_iter = WS->verify_iter;
@@ -16342,7 +16425,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 struct hashtype *ht = &Hashtypes[ModeList[m]];
                 if (!ht->verify || ht == item->hint) continue;
                 WS->verify_iter = 0;
-                if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+                if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
@@ -16356,7 +16439,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 struct hashtype *ht = &Hashtypes[v];
                 if (!ht->verify || ht == item->hint) continue;
                 WS->verify_iter = 0;
-                if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+                if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
@@ -16425,7 +16508,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 struct hashtype *ht = &Hashtypes[hot_list[h].type_idx];
                 if (!ht->verify) continue;
                 WS->verify_iter = 0;
-                if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+                if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
@@ -16445,7 +16528,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             struct hashtype *ht = &Hashtypes[v];
             if (!ht->verify) continue;
             WS->verify_iter = 0;
-            if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+            if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                 item->verified = 1;
                 item->match_type = ht;
                 item->match_iter = WS->verify_iter;
@@ -16537,7 +16620,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
 
             /* Hot verify types (hex-format composite hashes like MACOSX) */
             if (ht->verify) {
-                if (ht->verify(item->hashstr, item->hashlen, pass, passlen))
+                if (hash_verify(ht, item->hashstr, item->hashlen, pass, passlen))
                     goto hot_match;
                 continue;
             }
@@ -16659,6 +16742,8 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             continue;
 
         hot_match:
+            hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
+            atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
             item->match_type = ht;
             item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
@@ -16850,7 +16935,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             /* non-hex verify types (check before hashlen filter) */
             if (ht->verify) {
                 WS->verify_iter = 0;
-                if (ht->verify(item->hashstr, item->hashlen, pass, passlen)) {
+                if (hash_verify(ht, item->hashstr, item->hashlen, pass, passlen)) {
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
@@ -16864,7 +16949,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                         item->hashlen, item->hashstr, item->saltlen, item->salt);
                     WS->verify_iter = 0;
                     if (vlen > 0 && vlen < (int)WS_GP_SIZE &&
-                        ht->verify(hexiter, vlen, pass, passlen)) {
+                        hash_verify(ht, hexiter, vlen, pass, passlen)) {
                         item->verified = 1;
                         item->match_type = ht;
                         item->match_iter = WS->verify_iter;
@@ -16879,7 +16964,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                         item->hashlen, item->hashstr, item->alt_saltlen, item->alt_salt);
                     WS->verify_iter = 0;
                     if (vlen > 0 && vlen < (int)WS_GP_SIZE &&
-                        ht->verify(hexiter, vlen,
+                        hash_verify(ht, hexiter, vlen,
                             (const unsigned char *)item->alt_password, item->alt_passlen)) {
                         item->verified = 1;
                         item->match_type = ht;
@@ -17290,7 +17375,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             if (!ht->verify) continue;
             if (!(item->hash_class & ht->vclass)) continue;
             WS->verify_iter = 0;
-            if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
+            if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                 item->verified = 1;
                 item->match_type = ht;
                 item->match_iter = WS->verify_iter;
@@ -17311,7 +17396,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                     if (!ht->verify) continue;
                     if (!(item->hash_class & ht->vclass)) continue;
                     WS->verify_iter = 0;
-                    if (ht->verify(vhash, vhashlen, vpass, vpasslen)) {
+                    if (hash_verify(ht, vhash, vhashlen, vpass, vpasslen)) {
                         item->verified = 1;
                         item->match_type = ht;
                         item->match_iter = WS->verify_iter;
@@ -17342,7 +17427,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                     if (!ht->verify) continue;
                     if (!(item->hash_class & ht->vclass)) continue;
                     WS->verify_iter = 0;
-                    if (ht->verify(vhash, vhashlen, ap, aplen2)) {
+                    if (hash_verify(ht, vhash, vhashlen, ap, aplen2)) {
                         item->verified = 1;
                         item->match_type = ht;
                         item->match_iter = WS->verify_iter;
@@ -17387,7 +17472,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                         struct hashtype *ht = &Hashtypes[v];
                         if (!ht->verify) continue;
                         WS->verify_iter = 0;
-                        if (ht->verify(vhash, lhlen, fp, fplen)) {
+                        if (hash_verify(ht, vhash, lhlen, fp, fplen)) {
                             item->verified = 1;
                             item->match_type = ht;
                             item->match_iter = WS->verify_iter;
@@ -17586,6 +17671,7 @@ static void worker(void *dummy)
             verify_item(&b->items[i], &hot_type, &hot_iter, hot_list, &nhot);
 
             if (b->items[i].verified) {
+                atomic_fetch_add(&StatSolved[b->items[i].match_type - Hashtypes], 1);
                 hot_list_add(hot_list, &nhot,
                              b->items[i].match_type - Hashtypes,
                              (b->items[i].match_type->flags & HTF_SALTED)
@@ -17661,6 +17747,7 @@ static void worker(void *dummy)
             continue;
 
         hard_ok:
+            atomic_fetch_add(&StatSolved[item->match_type - Hashtypes], 1);
             hot_list_add(hot_list, &nhot,
                          item->match_type - Hashtypes,
                          (item->match_type->flags & HTF_SALTED)
@@ -17689,6 +17776,7 @@ static void worker(void *dummy)
         }
 
         /* Propagate hot type and hot list to global */
+        possess(HotLock);
         if (hot_type >= 0) {
             if (hot_type != b->hot_type)
                 update_batch_limit(hot_type);
@@ -17697,6 +17785,7 @@ static void worker(void *dummy)
         }
         memcpy(GlobalHotList, hot_list, nhot * sizeof(struct hot_entry));
         GlobalNhot = nhot;
+        release(HotLock);
 
         free_batch(b);
     }
@@ -17840,6 +17929,8 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
             item->hint = find_type_by_name("DOMINO6");
         else if (item->hashlen == 137 && hashstart[0] == '2' && is_hex(hashstart + 1, 136))
             item->hint = find_type_by_name("NETSCALER-SHA512");
+        else if (item->hashlen == 129 && hashstart[0] == '5' && is_hex(hashstart + 1, 128))
+            item->hint = find_type_by_name("NETSCALER-PBKDF2");
         else if (item->hashlen == 49 && hashstart[0] == '1' && is_hex(hashstart + 1, 48))
             item->hint = find_type_by_name("NETSCALER");
         else if (_remaining >= 10 && memcmp(hashstart, "$SHA$", 5) == 0)
@@ -18575,262 +18666,284 @@ static void usage(int brief)
 static void init_rates(void)
 {
     static const struct { int idx; long long rate; } bench_rates[] = {
-        {1, 4139002LL}, {2, 6177913LL}, {3, 5196029LL}, {4, 257561LL},
-        {5, 1025457LL}, {6, 2933656LL}, {7, 4054507LL}, {8, 4040840LL},
-        {9, 1901649LL}, {10, 1899797LL}, {11, 1494831LL}, {12, 1483858LL},
-        {13, 555098LL}, {14, 559460LL}, {15, 2989071LL}, {16, 4842823LL},
-        {17, 2493673LL}, {18, 5486842LL}, {19, 3189336LL}, {20, 4169168LL},
-        {21, 2051484LL}, {22, 3312830LL}, {23, 2188656LL}, {24, 2235612LL},
-        {25, 320545LL}, {26, 316258LL}, {27, 273625LL}, {28, 277071LL},
-        {29, 206820LL}, {30, 136799LL}, {31, 2772373LL}, {32, 717946LL},
-        {33, 3160141LL}, {34, 1968424LL}, {35, 939542LL}, {36, 946702LL},
-        {37, 739850LL}, {38, 726387LL}, {39, 2113023LL}, {40, 1701571LL},
-        {41, 2916839LL}, {42, 2111650LL}, {43, 1743163LL}, {44, 2870719LL},
-        {45, 2095004LL}, {46, 1720106LL}, {47, 2877721LL}, {48, 2102593LL},
-        {49, 1701117LL}, {50, 2083866LL}, {51, 1708743LL}, {52, 1954783LL},
-        {53, 1956748LL}, {54, 1635393LL}, {55, 1623406LL}, {56, 1708677LL},
-        {57, 1697934LL}, {58, 1505311LL}, {59, 1515453LL}, {60, 164818LL},
-        {61, 164820LL}, {62, 162994LL}, {63, 165966LL}, {64, 291099LL},
-        {65, 284417LL}, {66, 225842LL}, {67, 224019LL}, {68, 495744LL},
-        {69, 497627LL}, {70, 320791LL}, {71, 229693LL}, {72, 522770LL},
-        {73, 523088LL}, {74, 158981LL}, {75, 159725LL}, {76, 1396390LL},
-        {77, 1379448LL}, {78, 345068LL}, {79, 347793LL}, {80, 280913LL},
-        {81, 286868LL}, {82, 287996LL}, {83, 287816LL}, {84, 687994LL},
-        {85, 693675LL}, {86, 699907LL}, {87, 715056LL}, {88, 760975LL},
-        {89, 766044LL}, {90, 744708LL}, {91, 766001LL}, {92, 1289635LL},
-        {93, 1288286LL}, {94, 657469LL}, {95, 498719LL}, {96, 562672LL},
-        {97, 882702LL}, {98, 903598LL}, {99, 1030973LL}, {100, 1027022LL},
-        {101, 1026747LL}, {102, 1030703LL}, {103, 1303699LL},
-        {104, 1300186LL}, {105, 401476LL}, {106, 400168LL}, {107, 351728LL},
-        {108, 352808LL}, {109, 145140LL}, {110, 145238LL}, {111, 2130121LL},
-        {112, 2162896LL}, {113, 2127422LL}, {114, 2121848LL},
-        {115, 5013704LL}, {116, 734746LL}, {117, 742166LL}, {118, 5583460LL},
-        {119, 124108LL}, {120, 122268LL}, {121, 2133891LL}, {122, 2814473LL},
-        {123, 2091576LL}, {124, 474456LL}, {125, 368850LL}, {126, 1750270LL},
-        {127, 1687406LL}, {128, 1404739LL}, {129, 1297773LL},
-        {130, 1161814LL}, {131, 1122294LL}, {132, 1665794LL},
-        {133, 1547621LL}, {134, 1300912LL}, {135, 1201186LL},
-        {136, 1162225LL}, {137, 1142127LL}, {138, 1592187LL},
-        {139, 1621556LL}, {140, 1339848LL}, {141, 1290083LL},
-        {142, 1163682LL}, {143, 1045015LL}, {144, 1533899LL},
-        {145, 1643050LL}, {146, 1342821LL}, {147, 1307974LL},
-        {148, 1162910LL}, {149, 1099285LL}, {150, 1635323LL},
-        {151, 1508464LL}, {152, 1347945LL}, {153, 1275207LL},
-        {154, 1199585LL}, {155, 1141787LL}, {156, 2359754LL},
-        {157, 2235819LL}, {158, 1503396LL}, {159, 1317204LL},
-        {160, 1897147LL}, {161, 1999249LL}, {162, 1302393LL},
-        {163, 1281980LL}, {164, 1288854LL}, {165, 1249253LL},
-        {166, 1064243LL}, {167, 967161LL}, {168, 1077887LL},
-        {169, 1047937LL}, {170, 2381137LL}, {171, 2411385LL},
-        {172, 466806LL}, {173, 451445LL}, {174, 282702LL}, {175, 275417LL},
-        {176, 277865LL}, {177, 196786LL}, {178, 2073251LL}, {179, 1096575LL},
-        {180, 777567LL}, {181, 1659497LL}, {182, 3741074LL},
-        {183, 2353517LL}, {184, 1873714LL}, {185, 1226312LL},
-        {186, 359703LL}, {187, 1620715LL}, {188, 1441877LL}, {189, 992805LL},
-        {190, 723897LL}, {191, 1202429LL}, {192, 1006210LL},
-        {193, 1654964LL}, {194, 927801LL}, {195, 796830LL}, {196, 1520589LL},
-        {197, 709766LL}, {198, 427920LL}, {199, 636525LL}, {200, 1340908LL},
-        {201, 2633497LL}, {202, 1531211LL}, {203, 2064992LL},
-        {204, 640563LL}, {205, 1362340LL}, {206, 1231357LL},
-        {207, 1646141LL}, {208, 74416LL}, {209, 2097526LL}, {210, 1212252LL},
-        {211, 431882LL}, {212, 386608LL}, {213, 332595LL}, {214, 605182LL},
-        {215, 507685LL}, {216, 311390LL}, {217, 314716LL}, {218, 263204LL},
-        {219, 726148LL}, {220, 715457LL}, {221, 725553LL}, {222, 724842LL},
-        {223, 713757LL}, {224, 408785LL}, {225, 410428LL}, {226, 415317LL},
-        {227, 108136LL}, {228, 122664LL}, {229, 55113LL}, {230, 42303LL},
-        {231, 1240895LL}, {232, 4940581LL}, {233, 2085201LL},
-        {234, 1979156LL}, {235, 1412535LL}, {236, 3410562LL},
-        {237, 2246282LL}, {238, 2071368LL}, {239, 1720207LL},
-        {240, 1784700LL}, {241, 1382071LL}, {242, 1352949LL},
-        {243, 1624657LL}, {244, 1239712LL}, {245, 1130915LL},
-        {246, 1983424LL}, {247, 1353964LL}, {248, 1383915LL},
-        {249, 1731851LL}, {250, 2071180LL}, {251, 1120139LL},
-        {252, 2261645LL}, {253, 2345343LL}, {254, 1755700LL},
-        {255, 1580001LL}, {256, 1295206LL}, {257, 1224752LL},
-        {258, 2055561LL}, {259, 1893288LL}, {260, 2643317LL},
-        {261, 1419077LL}, {262, 2673867LL}, {263, 4770450LL},
-        {264, 3367552LL}, {265, 1682130LL}, {266, 1160062LL},
-        {267, 1963649LL}, {268, 1048689LL}, {269, 1436687LL},
-        {270, 1166948LL}, {271, 1574109LL}, {272, 1168905LL},
-        {273, 2865919LL}, {274, 1106016LL}, {275, 2194186LL},
-        {276, 1001206LL}, {277, 1107376LL}, {278, 1668054LL},
-        {279, 1497638LL}, {280, 1010525LL}, {281, 1471557LL},
-        {282, 1463995LL}, {283, 1945144LL}, {284, 1369626LL},
-        {285, 906988LL}, {286, 2462329LL}, {287, 1329305LL},
-        {288, 1204809LL}, {289, 1004383LL}, {290, 746231LL}, {291, 850325LL},
-        {292, 746987LL}, {293, 754217LL}, {294, 705616LL}, {295, 902582LL},
-        {296, 783917LL}, {297, 1015327LL}, {298, 1953480LL}, {299, 845824LL},
-        {300, 1056878LL}, {301, 863387LL}, {302, 1272459LL},
-        {303, 1882242LL}, {304, 1359614LL}, {305, 1182422LL},
-        {306, 1097521LL}, {307, 637382LL}, {308, 1576341LL},
-        {309, 1146280LL}, {310, 1340477LL}, {311, 1317582LL},
-        {312, 1551677LL}, {313, 1353578LL}, {314, 1148885LL},
-        {315, 843029LL}, {316, 629933LL}, {317, 1279448LL}, {318, 983352LL},
-        {319, 920854LL}, {320, 808845LL}, {321, 708131LL}, {322, 1264718LL},
-        {323, 1182358LL}, {324, 1022501LL}, {325, 1041088LL},
-        {326, 1016431LL}, {327, 996639LL}, {328, 834139LL}, {329, 792942LL},
-        {330, 904917LL}, {331, 783292LL}, {332, 609941LL}, {333, 1363367LL},
-        {334, 3474183LL}, {335, 5474692LL}, {336, 2478544LL},
-        {337, 1073874LL}, {338, 952313LL}, {339, 541432LL}, {340, 2047566LL},
-        {341, 867389LL}, {342, 499634LL}, {343, 1038254LL}, {344, 865227LL},
-        {345, 739748LL}, {346, 3279484LL}, {347, 1468298LL},
-        {348, 1187806LL}, {349, 1021807LL}, {350, 2591021LL},
-        {351, 2463542LL}, {352, 1355633LL}, {353, 5422398LL},
-        {354, 2487574LL}, {355, 1491253LL}, {356, 1693948LL},
-        {357, 1702095LL}, {358, 1992442LL}, {359, 1313473LL},
-        {360, 1381834LL}, {361, 774355LL}, {362, 1327967LL},
-        {363, 1844343LL}, {364, 1282969LL}, {365, 1291053LL},
-        {366, 1827662LL}, {367, 1432217LL}, {368, 1727200LL},
-        {369, 3163931LL}, {370, 2947741LL}, {371, 1833113LL},
-        {372, 4717966LL}, {373, 5011986LL}, {374, 948583LL},
-        {375, 2595398LL}, {376, 2053960LL}, {377, 1073040LL},
-        {378, 1129620LL}, {379, 1348771LL}, {380, 965352LL}, {381, 934276LL},
-        {382, 524638LL}, {383, 1930327LL}, {384, 2189246LL},
-        {385, 2641904LL}, {386, 1249486LL}, {387, 434783LL},
-        {388, 1269588LL}, {389, 444348LL}, {390, 1022711LL}, {391, 268860LL},
-        {392, 1014159LL}, {393, 265899LL}, {394, 4799736LL},
-        {395, 2508733LL}, {396, 944501LL}, {397, 743142LL}, {398, 4081792LL},
-        {399, 2186703LL}, {400, 1668834LL}, {401, 1644828LL},
-        {402, 1622935LL}, {403, 1475017LL}, {404, 3LL}, {405, 2580668LL},
-        {406, 1136682LL}, {407, 2850480LL}, {408, 1693274LL},
-        {409, 3890613LL}, {410, 5166248LL}, {411, 4800986LL},
-        {412, 1482146LL}, {413, 1449403LL}, {414, 2357214LL},
-        {415, 610077LL}, {416, 2414399LL}, {417, 2842812LL},
-        {418, 1981629LL}, {419, 1039221LL}, {420, 2074017LL},
-        {421, 711150LL}, {422, 1086135LL}, {423, 1100033LL}, {424, 375126LL},
-        {425, 119403076LL}, {427, 346940LL}, {428, 342628LL},
-        {430, 341286LL}, {431, 346190LL}, {434, 2848074LL}, {435, 2891381LL},
-        {436, 218046LL}, {437, 367698LL}, {438, 927622LL}, {439, 1355348LL},
-        {440, 1307392LL}, {441, 2706800LL}, {442, 1278575LL},
-        {443, 1127469LL}, {444, 419376LL}, {445, 206038LL}, {446, 1714924LL},
-        {447, 1552210LL}, {448, 652605LL}, {449, 4509213LL}, {450, 4LL},
-        {451, 4LL}, {452, 4LL}, {453, 1988586LL}, {454, 1577941LL},
-        {455, 2902LL}, {456, 28866712LL}, {457, 3460769LL}, {458, 1305143LL},
-        {459, 2818220LL}, {460, 1221328LL}, {461, 4928LL}, {462, 894425LL},
-        {463, 2610541LL}, {464, 642211LL}, {465, 1842241LL},
-        {466, 1414897LL}, {467, 1529209LL}, {468, 1741623LL},
-        {469, 2168090LL}, {470, 1085790LL}, {471, 1763786LL},
-        {472, 1762028LL}, {473, 1488320LL}, {474, 1929550LL},
-        {475, 1015639LL}, {476, 868887LL}, {477, 748327LL}, {478, 3173144LL},
-        {479, 595808LL}, {480, 336738LL}, {481, 562422LL}, {482, 280048LL},
-        {483, 474932LL}, {484, 429973LL}, {485, 421871LL}, {486, 753567LL},
-        {487, 1563976LL}, {488, 1885005LL}, {489, 1518869LL},
-        {490, 2105024LL}, {491, 1358523LL}, {492, 1014286LL},
-        {493, 247594LL}, {494, 251342LL}, {495, 1237054LL}, {496, 3514533LL},
-        {497, 1228311LL}, {498, 2789145LL}, {499, 2270039LL},
-        {500, 232998LL}, {501, 215557LL}, {502, 216195LL}, {503, 1403821LL},
-        {504, 1793052LL}, {505, 1392821LL}, {506, 2042055LL},
-        {507, 2034428LL}, {508, 1075012LL}, {509, 505934LL}, {510, 651717LL},
-        {511, 4659LL}, {512, 207LL}, {513, 247LL}, {514, 951362LL},
-        {515, 2666755LL}, {516, 2212037LL}, {517, 2803865LL},
-        {518, 2737383LL}, {519, 2759760LL}, {520, 1434223LL},
-        {521, 2271007LL}, {522, 288483LL}, {523, 537392LL}, {524, 6040455LL},
-        {525, 5923989LL}, {526, 4472181LL}, {527, 3729455LL},
-        {528, 1527237LL}, {529, 16LL}, {530, 3225LL}, {531, 3146LL},
-        {532, 5227LL}, {533, 2694LL}, {534, 26LL}, {536, 2785042LL},
-        {537, 2478LL}, {538, 140LL}, {539, 1356543LL}, {540, 1720324LL},
-        {541, 2579309LL}, {542, 2722972LL}, {543, 279149LL},
-        {544, 1976704LL}, {545, 2215477LL}, {546, 2951201LL},
-        {547, 1906733LL}, {548, 785117LL}, {549, 824918LL}, {550, 717080LL},
-        {551, 882108LL}, {552, 1302402LL}, {553, 1499522LL},
-        {554, 1745516LL}, {555, 1998583LL}, {556, 2201106LL},
-        {557, 778855LL}, {558, 2633234LL}, {559, 1042166LL}, {560, 783699LL},
-        {561, 1695882LL}, {562, 1067176LL}, {563, 1134388LL},
-        {564, 511843LL}, {565, 336218LL}, {566, 252283LL}, {567, 1254050LL},
-        {568, 1226794LL}, {569, 601666LL}, {570, 3508189LL},
-        {571, 1023634LL}, {572, 1574541LL}, {573, 219016LL}, {574, 218483LL},
-        {575, 2344897LL}, {576, 1971948LL}, {577, 4LL}, {578, 1766732LL},
-        {579, 1490349LL}, {580, 1024966LL}, {581, 1021689LL},
-        {582, 472404LL}, {583, 476026LL}, {584, 318353LL}, {585, 359430LL},
-        {586, 1257694LL}, {587, 1623855LL}, {588, 1058283LL},
-        {589, 1469118LL}, {590, 1402154LL}, {591, 1103244LL},
-        {592, 1041789LL}, {593, 661994LL}, {594, 1041333LL},
-        {595, 1428628LL}, {596, 813522LL}, {597, 1099943LL},
-        {598, 1418021LL}, {599, 765681LL}, {600, 797244LL}, {601, 3987395LL},
-        {602, 1114434LL}, {603, 1079040LL}, {604, 1935168LL},
-        {605, 1906204LL}, {606, 1916655LL}, {607, 1365580LL},
-        {608, 1006115LL}, {609, 1006338LL}, {610, 1000444LL},
-        {611, 939946LL}, {612, 1009173LL}, {613, 479271LL}, {614, 322252LL},
-        {615, 1022653LL}, {616, 1016771LL}, {617, 1700273LL},
-        {618, 787998LL}, {619, 780238LL}, {620, 1938015LL}, {621, 1009148LL},
-        {622, 1012395LL}, {623, 816580LL}, {624, 1950645LL},
-        {625, 1935659LL}, {626, 1929915LL}, {627, 714177LL},
-        {628, 2078002LL}, {629, 1565712LL}, {630, 989187LL},
-        {631, 1594731LL}, {632, 997403LL}, {633, 1045499LL}, {634, 988987LL},
-        {635, 590766LL}, {636, 729905LL}, {637, 401745LL}, {638, 578703LL},
-        {639, 924788LL}, {640, 1572810LL}, {641, 2300143LL}, {642, 245984LL},
-        {643, 2027941LL}, {644, 253458LL}, {645, 1646105LL}, {646, 658775LL},
-        {647, 324665LL}, {648, 352798LL}, {649, 1341131LL}, {650, 997775LL},
-        {651, 1129386LL}, {652, 1714319LL}, {653, 594962LL},
-        {654, 1043025LL}, {655, 1451107LL}, {656, 1288707LL},
-        {657, 244171LL}, {658, 1361627LL}, {659, 1596719LL},
-        {660, 1325197LL}, {661, 1888353LL}, {662, 707826LL},
-        {663, 1297324LL}, {664, 1553901LL}, {665, 1722529LL},
-        {666, 1516554LL}, {667, 1172765LL}, {668, 979833LL},
-        {669, 1565122LL}, {670, 1051434LL}, {671, 726991LL}, {672, 492972LL},
-        {673, 715282LL}, {674, 569884LL}, {675, 455921LL}, {677, 1073231LL},
-        {678, 733455LL}, {679, 618151LL}, {680, 496420LL}, {681, 982671LL},
-        {682, 1284525LL}, {683, 1069807LL}, {684, 924289LL},
-        {685, 1414091LL}, {686, 1007159LL}, {687, 821723LL},
-        {688, 1579197LL}, {689, 719996LL}, {690, 578928LL}, {691, 733431LL},
-        {692, 1130071LL}, {693, 1342851LL}, {694, 5315233LL},
-        {695, 3382506LL}, {696, 1313628LL}, {697, 584576LL}, {698, 710657LL},
-        {699, 1043292LL}, {700, 1208455LL}, {701, 881950LL},
-        {702, 2244371LL}, {703, 2449538LL}, {704, 1126854LL},
-        {705, 1576098LL}, {706, 451527LL}, {707, 1130280LL}, {708, 198485LL},
-        {709, 1231952LL}, {710, 571653LL}, {711, 566907LL}, {712, 992719LL},
-        {713, 810233LL}, {714, 2047009LL}, {715, 1012065LL},
-        {716, 1337508LL}, {717, 1205585LL}, {718, 1358616LL},
-        {719, 901273LL}, {720, 1432265LL}, {721, 1214588LL}, {722, 749580LL},
-        {723, 659009LL}, {724, 2203191LL}, {725, 737880LL}, {726, 643850LL},
-        {727, 2358104LL}, {728, 2357508LL}, {729, 2350152LL},
-        {730, 2334605LL}, {731, 2215530LL}, {732, 1746020LL},
-        {733, 228188LL}, {734, 2132050LL}, {735, 1431893LL},
-        {736, 1250577LL}, {737, 1349602LL}, {738, 1129228LL},
-        {739, 979363LL}, {740, 1358346LL}, {741, 1188879LL}, {742, 844983LL},
-        {743, 1316046LL}, {744, 1059462LL}, {745, 860624LL},
-        {746, 1423149LL}, {747, 1963667LL}, {748, 1112414LL},
-        {749, 1310413LL}, {750, 750345LL}, {751, 1092942LL},
-        {752, 2401659LL}, {753, 1863881LL}, {754, 2350812LL},
-        {755, 1290310LL}, {756, 1006875LL}, {757, 1151556LL},
-        {758, 1197128LL}, {759, 1141650LL}, {760, 1015881LL},
-        {761, 798753LL}, {762, 1881844LL}, {763, 689646LL}, {764, 677059LL},
-        {765, 2126101LL}, {766, 1203813LL}, {767, 1540933LL},
-        {768, 3408239LL}, {769, 3384410LL}, {770, 1977437LL},
-        {771, 2229721LL}, {772, 1560807LL}, {773, 1198288LL},
-        {774, 1886305LL}, {775, 656204LL}, {776, 924945LL}, {777, 1120849LL},
-        {778, 928761LL}, {779, 894871LL}, {780, 811690LL}, {781, 693771LL},
-        {782, 824648LL}, {783, 1079921LL}, {784, 820187LL}, {785, 800718LL},
-        {786, 2734526LL}, {787, 2354115LL}, {788, 2388648LL},
-        {789, 2319542LL}, {790, 1147463LL}, {791, 458984LL}, {792, 639078LL},
-        {793, 535738LL}, {794, 332676LL}, {795, 331709LL}, {796, 277318LL},
-        {797, 276896LL}, {798, 448877LL}, {799, 351092LL}, {800, 3020141LL},
-        {801, 2818960LL}, {802, 2861017LL}, {803, 1723015LL},
-        {804, 1778555LL}, {805, 1389886LL}, {806, 1189614LL},
-        {807, 1196269LL}, {808, 1140369LL}, {809, 989727LL},
-        {810, 1007891LL}, {811, 1222768LL}, {812, 1215803LL},
-        {813, 1163304LL}, {814, 993893LL}, {815, 993487LL}, {816, 809763LL},
-        {817, 1716838LL}, {818, 2700432LL}, {819, 1320888LL},
-        {820, 1246978LL}, {821, 1308173LL}, {822, 1364263LL},
-        {823, 1283001LL}, {824, 1375758LL}, {825, 1521561LL},
-        {826, 857039LL}, {827, 1010548LL}, {828, 1322032LL},
-        {829, 55185608LL}, {830, 78557030LL}, {831, 1606449LL},
-        {832, 1599117LL}, {833, 2719877LL}, {834, 2376896LL},
-        {835, 1557841LL}, {836, 1141264LL}, {837, 137131LL}, {838, 134846LL},
-        {839, 118548LL}, {840, 119650LL}, {841, 2690293LL}, {842, 2553343LL},
-        {843, 2489949LL}, {844, 5179813LL}, {845, 2683161LL},
-        {846, 2509342LL}, {847, 2506331LL}, {848, 2517808LL},
-        {849, 928570LL}, {850, 1491919LL}, {851, 1518699LL}, {852, 668870LL},
-        {853, 2172446LL}, {854, 792336LL}, {855, 4623805LL},
-        {856, 3378817LL}, {857, 4772705LL}, {858, 2163150LL},
-        {859, 1727379LL}, {860, 1116295LL}, {861, 5409239LL},
-        {862, 4836704LL}, {863, 1418372LL}, {864, 1774984LL},
-        {865, 1705227LL}, {866, 14600LL}, {867, 2219LL}, {868, 4664LL},
-        {869, 8292LL}, {870, 5160LL}, {871, 4301LL}, {872, 515628LL},
-        {873, 627396LL}, {874, 230801LL}, {875, 229LL}, {876, 104LL},
-        {877, 238099LL}, {878, 2120505LL}, {879, 1300229LL}, {880, 775634LL},
-        {881, 2214831LL}, {882, 232207LL}, {883, 78782LL}, {884, 5786LL},
-        {885, 6665LL}, {886, 2709326LL},
+        {1, 5384128LL}, {2, 5423179LL}, {3, 6396389LL}, {4, 279245LL}, 
+        {5, 1115684LL}, {6, 2850332LL}, {7, 3852616LL}, {8, 4203898LL}, 
+        {9, 2005772LL}, {10, 2016476LL}, {11, 1604885LL}, {12, 1582264LL}, 
+        {13, 604025LL}, {14, 594974LL}, {15, 2921852LL}, {16, 5178472LL}, 
+        {17, 2431664LL}, {18, 4922259LL}, {19, 2979856LL}, {20, 3832204LL}, 
+        {21, 2014094LL}, {22, 3094380LL}, {23, 2243535LL}, {24, 2251544LL}, 
+        {25, 327857LL}, {26, 325855LL}, {27, 290747LL}, {28, 295381LL}, 
+        {29, 222656LL}, {30, 148092LL}, {31, 2708654LL}, {32, 757169LL}, 
+        {33, 3022856LL}, {34, 2150919LL}, {35, 993867LL}, {36, 979435LL}, 
+        {37, 790441LL}, {38, 771387LL}, {39, 2129268LL}, {40, 1733645LL}, 
+        {41, 2798200LL}, {42, 2097105LL}, {43, 1708976LL}, {44, 2836077LL}, 
+        {45, 2113338LL}, {46, 1731407LL}, {47, 2832695LL}, {48, 2187628LL}, 
+        {49, 1747479LL}, {50, 2090939LL}, {51, 1724746LL}, {52, 1982025LL}, 
+        {53, 1983503LL}, {54, 1708425LL}, {55, 1689396LL}, {56, 1777431LL}, 
+        {57, 1791622LL}, {58, 1601667LL}, {59, 1582463LL}, {60, 180608LL}, 
+        {61, 179731LL}, {62, 181030LL}, {63, 180557LL}, {64, 315651LL}, 
+        {65, 308455LL}, {66, 250106LL}, {67, 248137LL}, {68, 540905LL}, 
+        {69, 535649LL}, {70, 355138LL}, {71, 257737LL}, {72, 574113LL}, 
+        {73, 574302LL}, {74, 176944LL}, {75, 176597LL}, {76, 1457026LL}, 
+        {77, 1456917LL}, {78, 384567LL}, {79, 382111LL}, {80, 311798LL}, 
+        {81, 310355LL}, {82, 308198LL}, {83, 306201LL}, {84, 726613LL}, 
+        {85, 719866LL}, {86, 717164LL}, {87, 724595LL}, {88, 774663LL}, 
+        {89, 777925LL}, {90, 777132LL}, {91, 781313LL}, {92, 1290797LL}, 
+        {93, 1278769LL}, {94, 690162LL}, {95, 515017LL}, {96, 575507LL}, 
+        {97, 915596LL}, {98, 911161LL}, {99, 1023517LL}, {100, 1035694LL}, 
+        {101, 1023694LL}, {102, 1040675LL}, {103, 1316060LL}, 
+        {104, 1307941LL}, {105, 413225LL}, {106, 409004LL}, 
+        {107, 361485LL}, {108, 359588LL}, {109, 151612LL}, {110, 150476LL}, 
+        {111, 2114299LL}, {112, 2198160LL}, {113, 2065596LL}, 
+        {114, 2065732LL}, {115, 4639359LL}, {116, 750494LL}, 
+        {117, 749577LL}, {118, 5000966LL}, {119, 125006LL}, 
+        {120, 125310LL}, {121, 2848207LL}, {122, 2514943LL}, 
+        {123, 2056125LL}, {124, 482786LL}, {125, 374252LL}, 
+        {126, 1760467LL}, {127, 1559600LL}, {128, 1292627LL}, 
+        {129, 1324004LL}, {130, 1226453LL}, {131, 1103772LL}, 
+        {132, 1658923LL}, {133, 1660121LL}, {134, 1398499LL}, 
+        {135, 1371639LL}, {136, 1211110LL}, {137, 1189464LL}, 
+        {138, 1647158LL}, {139, 1584822LL}, {140, 1352569LL}, 
+        {141, 1293630LL}, {142, 1220064LL}, {143, 1157824LL}, 
+        {144, 1625059LL}, {145, 1712479LL}, {146, 1348419LL}, 
+        {147, 1326359LL}, {148, 1229364LL}, {149, 1138316LL}, 
+        {150, 1766546LL}, {151, 1710225LL}, {152, 1420060LL}, 
+        {153, 1385318LL}, {154, 1189482LL}, {155, 1121592LL}, 
+        {156, 2312742LL}, {157, 2080086LL}, {158, 1554315LL}, 
+        {159, 1471318LL}, {160, 2023442LL}, {161, 2188524LL}, 
+        {162, 1334013LL}, {163, 1314391LL}, {164, 1364079LL}, 
+        {165, 1257441LL}, {166, 1155144LL}, {167, 1126114LL}, 
+        {168, 1137949LL}, {169, 1113474LL}, {170, 2507315LL}, 
+        {171, 2370761LL}, {172, 491722LL}, {173, 465913LL}, 
+        {174, 297901LL}, {175, 292592LL}, {176, 291739LL}, {177, 204962LL}, 
+        {178, 2117508LL}, {179, 1099292LL}, {180, 828280LL}, 
+        {181, 1872167LL}, {182, 3851217LL}, {183, 2399980LL}, 
+        {184, 2009172LL}, {185, 1267680LL}, {186, 380536LL}, 
+        {187, 1495200LL}, {188, 1481952LL}, {189, 1012697LL}, 
+        {190, 761930LL}, {191, 1329620LL}, {192, 1096544LL}, 
+        {193, 1738075LL}, {194, 1009954LL}, {195, 898863LL}, 
+        {196, 1610492LL}, {197, 842860LL}, {198, 468382LL}, 
+        {199, 680330LL}, {200, 1449281LL}, {201, 1981783LL}, 
+        {202, 1326873LL}, {203, 2166199LL}, {204, 706372LL}, 
+        {205, 1360350LL}, {206, 1345301LL}, {207, 1175258LL}, 
+        {208, 77238LL}, {209, 2123971LL}, {210, 1239903LL}, 
+        {211, 431462LL}, {212, 407613LL}, {213, 352188LL}, {214, 600152LL}, 
+        {215, 523124LL}, {216, 322260LL}, {217, 318662LL}, {218, 274177LL}, 
+        {219, 753145LL}, {220, 752057LL}, {221, 741688LL}, {222, 749523LL}, 
+        {223, 756211LL}, {224, 426304LL}, {225, 423913LL}, {226, 424083LL}, 
+        {227, 111497LL}, {228, 124908LL}, {229, 57770LL}, {230, 44356LL}, 
+        {231, 1665838LL}, {232, 4433634LL}, {233, 2234459LL}, 
+        {234, 1800109LL}, {235, 1236816LL}, {236, 3296363LL}, 
+        {237, 1936456LL}, {238, 1958909LL}, {239, 2068807LL}, 
+        {240, 1919019LL}, {241, 1303277LL}, {242, 1297944LL}, 
+        {243, 1714630LL}, {244, 1327123LL}, {245, 1335631LL}, 
+        {246, 2124453LL}, {247, 1490408LL}, {248, 1090408LL}, 
+        {249, 1953474LL}, {250, 2058402LL}, {251, 1235298LL}, 
+        {252, 1731851LL}, {253, 2207679LL}, {254, 1397666LL}, 
+        {255, 1624525LL}, {256, 1466976LL}, {257, 1334849LL}, 
+        {258, 1973332LL}, {259, 2067951LL}, {260, 2505645LL}, 
+        {261, 1747659LL}, {262, 2547080LL}, {263, 4304602LL}, 
+        {264, 2906580LL}, {265, 1411114LL}, {266, 1192371LL}, 
+        {267, 1437222LL}, {268, 1183022LL}, {269, 1675210LL}, 
+        {270, 1262630LL}, {271, 1719565LL}, {272, 1258115LL}, 
+        {273, 2467647LL}, {274, 1219082LL}, {275, 2350192LL}, 
+        {276, 1066771LL}, {277, 1370119LL}, {278, 1745678LL}, 
+        {279, 1615602LL}, {280, 1095205LL}, {281, 1323040LL}, 
+        {282, 1455679LL}, {283, 1756633LL}, {284, 1564251LL}, 
+        {285, 986109LL}, {286, 1637359LL}, {287, 1443405LL}, 
+        {288, 1355155LL}, {289, 1026979LL}, {290, 815393LL}, 
+        {291, 1060679LL}, {292, 860956LL}, {293, 925095LL}, 
+        {294, 801679LL}, {295, 1083410LL}, {296, 820719LL}, 
+        {297, 1116525LL}, {298, 1874420LL}, {299, 952239LL}, 
+        {300, 1202462LL}, {301, 957055LL}, {302, 1260517LL}, 
+        {303, 2005012LL}, {304, 1520328LL}, {305, 1238464LL}, 
+        {306, 929637LL}, {307, 958616LL}, {308, 1662251LL}, 
+        {309, 1287419LL}, {310, 1401029LL}, {311, 1462400LL}, 
+        {312, 1782408LL}, {313, 972438LL}, {314, 1264782LL}, 
+        {315, 791798LL}, {316, 747789LL}, {317, 1412938LL}, 
+        {318, 1012862LL}, {319, 1026797LL}, {320, 928280LL}, 
+        {321, 793024LL}, {322, 1286688LL}, {323, 1364951LL}, 
+        {324, 1159794LL}, {325, 1165240LL}, {326, 1108638LL}, 
+        {327, 1096224LL}, {328, 920944LL}, {329, 919899LL}, 
+        {330, 830039LL}, {331, 829847LL}, {332, 698040LL}, 
+        {333, 1264981LL}, {334, 3653141LL}, {335, 5263262LL}, 
+        {336, 2597359LL}, {337, 959715LL}, {338, 862845LL}, 
+        {339, 726852LL}, {340, 2321969LL}, {341, 916420LL}, 
+        {342, 511352LL}, {343, 1056405LL}, {344, 696817LL}, 
+        {345, 510234LL}, {346, 3332784LL}, {347, 1210032LL}, 
+        {348, 1253061LL}, {349, 886996LL}, {350, 1740404LL}, 
+        {351, 2394621LL}, {352, 1530881LL}, {353, 4214232LL}, 
+        {354, 1886241LL}, {355, 1727848LL}, {356, 1736821LL}, 
+        {357, 2496628LL}, {358, 2224572LL}, {359, 1506437LL}, 
+        {360, 1512368LL}, {361, 792452LL}, {362, 1445633LL}, 
+        {363, 1675781LL}, {364, 1564926LL}, {365, 1445151LL}, 
+        {366, 1643310LL}, {367, 1503959LL}, {368, 1969884LL}, 
+        {369, 3087545LL}, {370, 2787778LL}, {371, 1863417LL}, 
+        {372, 4715206LL}, {373, 4693186LL}, {374, 1030801LL}, 
+        {375, 2498361LL}, {376, 2045856LL}, {377, 1059444LL}, 
+        {378, 1206421LL}, {379, 1402563LL}, {380, 1038606LL}, 
+        {381, 1003837LL}, {382, 558317LL}, {383, 1936317LL}, 
+        {384, 2269379LL}, {385, 2436518LL}, {386, 1192918LL}, 
+        {387, 418109LL}, {388, 1177250LL}, {389, 421451LL}, 
+        {390, 971156LL}, {391, 263605LL}, {392, 969533LL}, {393, 258818LL}, 
+        {394, 4613876LL}, {395, 2276917LL}, {396, 925597LL}, 
+        {397, 908272LL}, {398, 3721276LL}, {399, 1948326LL}, 
+        {400, 1542609LL}, {401, 1597302LL}, {402, 1617466LL}, 
+        {403, 1543476LL}, {404, 3LL}, {405, 2377288LL}, {406, 1107391LL}, 
+        {407, 2575145LL}, {408, 1554687LL}, {409, 3651924LL}, 
+        {410, 4545771LL}, {411, 4074909LL}, {412, 1419183LL}, 
+        {413, 1417246LL}, {414, 2190719LL}, {415, 631534LL}, 
+        {416, 2360546LL}, {417, 2749038LL}, {418, 1922883LL}, 
+        {419, 1099481LL}, {420, 2133120LL}, {421, 743878LL}, 
+        {422, 1086956LL}, {423, 1097042LL}, {424, 382163LL}, 
+        {425, 56382546LL}, {427, 351720LL}, {428, 351723LL}, 
+        {430, 352834LL}, {431, 348913LL}, {434, 2798694LL}, 
+        {435, 2790054LL}, {436, 228924LL}, {437, 359194LL}, 
+        {438, 890381LL}, {439, 1303607LL}, {440, 1257827LL}, 
+        {441, 2511426LL}, {442, 1255614LL}, {443, 1113137LL}, 
+        {444, 419128LL}, {445, 215094LL}, {446, 1790745LL}, 
+        {447, 1434814LL}, {448, 649695LL}, {449, 4432926LL}, {450, 4LL}, 
+        {451, 4LL}, {452, 4LL}, {453, 2767214LL}, {454, 1841980LL}, 
+        {455, 2823LL}, {456, 19831134LL}, {457, 3494187LL}, 
+        {458, 1365587LL}, {459, 2728298LL}, {460, 1108101LL}, 
+        {461, 3735LL}, {462, 858568LL}, {463, 2432704LL}, {464, 628276LL}, 
+        {465, 2230214LL}, {466, 1518396LL}, {467, 1495546LL}, 
+        {468, 1609542LL}, {469, 2107100LL}, {470, 1190246LL}, 
+        {471, 1656798LL}, {472, 1542666LL}, {473, 1448893LL}, 
+        {474, 2041350LL}, {475, 1026372LL}, {476, 869428LL}, 
+        {477, 737432LL}, {478, 3173259LL}, {479, 597375LL}, 
+        {480, 348692LL}, {481, 594002LL}, {482, 275823LL}, {483, 464695LL}, 
+        {484, 415344LL}, {485, 422632LL}, {486, 782222LL}, 
+        {487, 1240856LL}, {488, 1812658LL}, {489, 1536295LL}, 
+        {490, 1921402LL}, {491, 1301954LL}, {492, 984546LL}, 
+        {493, 238164LL}, {494, 244892LL}, {495, 1305101LL}, 
+        {496, 2933423LL}, {497, 1102926LL}, {498, 2578327LL}, 
+        {499, 2171541LL}, {500, 237181LL}, {501, 216208LL}, 
+        {502, 218815LL}, {503, 1297321LL}, {504, 1510117LL}, 
+        {505, 1207643LL}, {506, 1946260LL}, {507, 2063631LL}, 
+        {508, 1083954LL}, {509, 494915LL}, {510, 676841LL}, {511, 4685LL}, 
+        {512, 253LL}, {513, 294LL}, {514, 955889LL}, {515, 1917154LL}, 
+        {516, 2397809LL}, {517, 2042483LL}, {518, 2603710LL}, 
+        {519, 2532082LL}, {520, 1366737LL}, {521, 127021LL}, 
+        {522, 334729LL}, {523, 539325LL}, {524, 4273993LL}, 
+        {525, 5097282LL}, {526, 3808130LL}, {527, 3197584LL}, 
+        {528, 1387343LL}, {529, 16LL}, {530, 3182LL}, {531, 2976LL}, 
+        {532, 5179LL}, {533, 2656LL}, {534, 26LL}, {536, 2706821LL}, 
+        {537, 2741LL}, {538, 166LL}, {539, 1380505LL}, {540, 1805513LL}, 
+        {541, 2518163LL}, {542, 2243468LL}, {543, 275501LL}, 
+        {544, 1962619LL}, {545, 2186705LL}, {546, 2735041LL}, 
+        {547, 1845008LL}, {548, 608135LL}, {549, 784694LL}, 
+        {550, 805587LL}, {551, 876461LL}, {552, 1268506LL}, 
+        {553, 1269885LL}, {554, 1693945LL}, {555, 2021970LL}, 
+        {556, 2153973LL}, {557, 754380LL}, {558, 1879622LL}, 
+        {559, 1035472LL}, {560, 783406LL}, {561, 1648436LL}, 
+        {562, 1143387LL}, {563, 1119826LL}, {564, 527541LL}, 
+        {565, 345052LL}, {566, 258815LL}, {567, 1285277LL}, 
+        {568, 1175958LL}, {569, 588888LL}, {570, 3152150LL}, 
+        {571, 994436LL}, {572, 1382048LL}, {573, 217950LL}, 
+        {574, 215387LL}, {575, 2224061LL}, {576, 1890881LL}, {577, 4LL}, 
+        {578, 1665597LL}, {579, 1430096LL}, {580, 1015342LL}, 
+        {581, 1012882LL}, {582, 488267LL}, {583, 485893LL}, 
+        {584, 321558LL}, {585, 369296LL}, {586, 1233662LL}, 
+        {587, 1608384LL}, {588, 1032047LL}, {589, 1478954LL}, 
+        {590, 1459614LL}, {591, 1128097LL}, {592, 998083LL}, 
+        {593, 654381LL}, {594, 1045525LL}, {595, 1330650LL}, 
+        {596, 817140LL}, {597, 1119336LL}, {598, 1367272LL}, 
+        {599, 773537LL}, {600, 796347LL}, {601, 3855956LL}, 
+        {602, 1139292LL}, {603, 1227132LL}, {604, 1898872LL}, 
+        {605, 1874442LL}, {606, 1887213LL}, {607, 1282560LL}, 
+        {608, 999493LL}, {609, 990994LL}, {610, 992511LL}, {611, 926025LL}, 
+        {612, 990544LL}, {613, 487495LL}, {614, 322595LL}, {615, 992243LL}, 
+        {616, 1001783LL}, {617, 1641684LL}, {618, 820249LL}, 
+        {619, 749548LL}, {620, 1881784LL}, {621, 981419LL}, 
+        {622, 1000824LL}, {623, 814733LL}, {624, 1887578LL}, 
+        {625, 1880617LL}, {626, 1889589LL}, {627, 731800LL}, 
+        {628, 2165359LL}, {629, 1540556LL}, {630, 972696LL}, 
+        {631, 1557702LL}, {632, 979332LL}, {633, 1121611LL}, 
+        {634, 988483LL}, {635, 590932LL}, {636, 731660LL}, {637, 407919LL}, 
+        {638, 583796LL}, {639, 976542LL}, {640, 1572155LL}, 
+        {641, 2304784LL}, {642, 237536LL}, {643, 2095629LL}, 
+        {644, 255988LL}, {645, 1609553LL}, {646, 685553LL}, 
+        {647, 341596LL}, {648, 369796LL}, {649, 1381251LL}, 
+        {650, 1012175LL}, {651, 1158990LL}, {652, 1621126LL}, 
+        {653, 583583LL}, {654, 1013595LL}, {655, 1278781LL}, 
+        {656, 1288605LL}, {657, 243432LL}, {658, 1502778LL}, 
+        {659, 1560682LL}, {660, 1313906LL}, {661, 1828882LL}, 
+        {662, 678578LL}, {663, 1507700LL}, {664, 1517233LL}, 
+        {665, 1493902LL}, {666, 1403402LL}, {667, 1015760LL}, 
+        {668, 802845LL}, {669, 1622710LL}, {670, 902639LL}, 
+        {671, 715310LL}, {672, 507344LL}, {673, 709664LL}, {674, 589385LL}, 
+        {675, 460420LL}, {677, 1070548LL}, {678, 751364LL}, 
+        {679, 665791LL}, {680, 482193LL}, {681, 1053457LL}, 
+        {682, 1226943LL}, {683, 1061166LL}, {684, 943851LL}, 
+        {685, 1403645LL}, {686, 1052042LL}, {687, 767101LL}, 
+        {688, 1354883LL}, {689, 688087LL}, {690, 577676LL}, 
+        {691, 738253LL}, {692, 945393LL}, {693, 1289577LL}, 
+        {694, 4457467LL}, {695, 3256085LL}, {696, 1246784LL}, 
+        {697, 586192LL}, {698, 607106LL}, {699, 933863LL}, 
+        {700, 1212474LL}, {701, 760093LL}, {702, 1977228LL}, 
+        {703, 2159174LL}, {704, 1180589LL}, {705, 1505215LL}, 
+        {706, 431710LL}, {707, 1070680LL}, {708, 194860LL}, 
+        {709, 1230648LL}, {710, 547317LL}, {711, 552071LL}, 
+        {712, 995808LL}, {713, 821885LL}, {714, 2017184LL}, 
+        {715, 1020518LL}, {716, 1483215LL}, {717, 1193855LL}, 
+        {718, 1364067LL}, {719, 937759LL}, {720, 1361593LL}, 
+        {721, 1179474LL}, {722, 746295LL}, {723, 655341LL}, 
+        {724, 2115333LL}, {725, 745578LL}, {726, 647138LL}, 
+        {727, 2228432LL}, {728, 2182943LL}, {729, 2139365LL}, 
+        {730, 2161126LL}, {731, 2095004LL}, {732, 1607040LL}, 
+        {733, 226573LL}, {734, 1980813LL}, {735, 1379856LL}, 
+        {736, 1320185LL}, {737, 1336031LL}, {738, 1059487LL}, 
+        {739, 987712LL}, {740, 1319670LL}, {741, 1078237LL}, 
+        {742, 824235LL}, {743, 994407LL}, {744, 1025368LL}, 
+        {745, 805618LL}, {746, 1332458LL}, {747, 1694063LL}, 
+        {748, 997764LL}, {749, 1218473LL}, {750, 700103LL}, 
+        {751, 999317LL}, {752, 2063555LL}, {753, 1647018LL}, 
+        {754, 2118233LL}, {755, 1188112LL}, {756, 867700LL}, 
+        {757, 1047137LL}, {758, 964596LL}, {759, 976848LL}, 
+        {760, 897257LL}, {761, 740845LL}, {762, 1710626LL}, 
+        {763, 625470LL}, {764, 636945LL}, {765, 1839455LL}, 
+        {766, 1126793LL}, {767, 1301852LL}, {768, 2961887LL}, 
+        {769, 2874432LL}, {770, 1590778LL}, {771, 1953235LL}, 
+        {772, 1382889LL}, {773, 933169LL}, {774, 1694898LL}, 
+        {775, 583164LL}, {776, 815538LL}, {777, 999976LL}, {778, 821384LL}, 
+        {779, 774825LL}, {780, 762415LL}, {781, 674944LL}, {782, 784054LL}, 
+        {783, 894542LL}, {784, 836861LL}, {785, 762535LL}, 
+        {786, 2506182LL}, {787, 2007328LL}, {788, 2147879LL}, 
+        {789, 2140179LL}, {790, 1079489LL}, {791, 438514LL}, 
+        {792, 605593LL}, {793, 518078LL}, {794, 316374LL}, {795, 312424LL}, 
+        {796, 266364LL}, {797, 264040LL}, {798, 423310LL}, {799, 339436LL}, 
+        {800, 2738464LL}, {801, 2577990LL}, {802, 2553271LL}, 
+        {803, 1636552LL}, {804, 1622835LL}, {805, 1345166LL}, 
+        {806, 1159911LL}, {807, 1135219LL}, {808, 1103668LL}, 
+        {809, 978611LL}, {810, 972685LL}, {811, 1176947LL}, 
+        {812, 1176182LL}, {813, 1139745LL}, {814, 972264LL}, 
+        {815, 972108LL}, {816, 1047943LL}, {817, 1628341LL}, 
+        {818, 2521225LL}, {819, 1270498LL}, {820, 1186134LL}, 
+        {821, 1275789LL}, {822, 1418514LL}, {823, 1220179LL}, 
+        {824, 1356413LL}, {825, 1463259LL}, {826, 835408LL}, 
+        {827, 993541LL}, {828, 1235193LL}, {829, 18651729LL}, 
+        {830, 20952347LL}, {831, 1541192LL}, {832, 1601424LL}, 
+        {833, 2941718LL}, {834, 2318584LL}, {835, 1612010LL}, 
+        {836, 1208679LL}, {837, 135732LL}, {838, 134849LL}, 
+        {839, 119085LL}, {840, 119201LL}, {841, 2530046LL}, 
+        {842, 2401427LL}, {843, 2405648LL}, {844, 4523753LL}, 
+        {845, 2536547LL}, {846, 2409625LL}, {847, 2422845LL}, 
+        {848, 2482422LL}, {849, 933194LL}, {850, 1563784LL}, 
+        {851, 1575067LL}, {852, 684927LL}, {853, 2224585LL}, 
+        {854, 773243LL}, {855, 4604185LL}, {856, 3750907LL}, 
+        {857, 4668458LL}, {858, 2114500LL}, {859, 1748604LL}, 
+        {860, 1131008LL}, {861, 5353654LL}, {862, 3573401LL}, 
+        {863, 1473209LL}, {864, 1780491LL}, {865, 1726100LL}, 
+        {866, 14442LL}, {867, 2281LL}, {868, 3518LL}, {869, 8229LL}, 
+        {870, 4904LL}, {871, 4142LL}, {872, 508339LL}, {873, 577046LL}, 
+        {874, 219006LL}, {875, 243LL}, {876, 89LL}, {877, 230687LL}, 
+        {878, 2079880LL}, {879, 1308947LL}, {880, 746214LL}, 
+        {881, 1965075LL}, {882, 216594LL}, {883, 74714LL}, {884, 5241LL}, 
+        {885, 4651LL}, {886, 1945671LL}, {887, 2573951LL}, 
+        {888, 3421857LL}, {889, 670992LL}, {890, 414901LL}, 
+        {891, 667588LL}, {892, 667120LL}, {893, 1072510LL}, 
+        {894, 2146292LL}, {895, 214LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
@@ -18849,7 +18962,7 @@ static void init_rates(void)
 int main(int argc, char **argv)
 {
     int opt, i;
-    char *outfile = NULL, *errfile = NULL;
+    char *outfile = NULL, *errfile = NULL, *statfile = NULL;
     int out_append = 0, err_append = 0;
     char *modespec = NULL;
     int show_help = 0;
@@ -18891,7 +19004,7 @@ int main(int argc, char **argv)
         free(used);
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:b:m:BGTVh")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:BGTVh")) != -1) {
         switch (opt) {
         case 't':
             Numthreads = atoi(optarg);
@@ -18920,6 +19033,9 @@ int main(int argc, char **argv)
         case 'E':
             errfile = optarg;
             err_append = 0;
+            break;
+        case 's':
+            statfile = optarg;
             break;
         case 'm':
             modespec = optarg;
@@ -18954,6 +19070,11 @@ int main(int argc, char **argv)
     rhash_library_init();
     init_hashtypes();
     init_rates();
+
+    /* Allocate stat counters (unconditional) */
+    StatTry = calloc(Numtypes, sizeof(_Atomic uint64_t));
+    StatSolved = calloc(Numtypes, sizeof(_Atomic uint64_t));
+    StatHotHit = calloc(Numtypes, sizeof(_Atomic uint64_t));
 
     if (show_help) {
         usage(0);
@@ -19179,11 +19300,19 @@ int main(int argc, char **argv)
             exit(1);
         }
     }
+    if (statfile) {
+        Statfp = fopen(statfile, "a");
+        if (!Statfp) {
+            perror(statfile);
+            exit(1);
+        }
+    }
 
     /* Initialize locks and queues */
     WorkLock = new_lock(0);
     OutLock = new_lock(0);
     ErrLock = new_lock(0);
+    HotLock = new_lock(0);
     WorkHead = WorkTail = NULL;
     FreeHead = NULL;
 
@@ -19267,6 +19396,74 @@ int main(int argc, char **argv)
     /* Wait for all workers to finish */
     join_all();
 
+    /* Snapshot final hot list for stats */
+    FinalNhot = GlobalNhot;
+    memcpy(FinalHotList, GlobalHotList, GlobalNhot * sizeof(struct hot_entry));
+
+    /* Write stats if -s was given */
+    if (Statfp) {
+        int t;
+        uint64_t total;
+
+        fprintf(Statfp, "--- Hot List ---\n");
+        fprintf(Statfp, "%-6s %-30s %6s %12s\n",
+                "Type", "Algorithm", "SaltL", "HotHits");
+        total = 0;
+        { int nh = atomic_load(&HotHitCount);
+          if (nh > HOT_LIST_MAX) nh = HOT_LIST_MAX;
+          for (t = 0; t < nh; t++) {
+            int idx = HotHitTable[t].type_idx;
+            int sl = HotHitTable[t].salt_len;
+            uint64_t hits = atomic_load(&HotHitTable[t].hits);
+            total += hits;
+            fprintf(Statfp, "e%-5d %-30s %6d %12llu\n",
+                    idx, Hashtypes[idx].name,
+                    sl, (unsigned long long)hits);
+          }
+        }
+        fprintf(Statfp, "%-6s %-30s %6s %12llu\n",
+                "", "TOTAL", "", (unsigned long long)total);
+
+        fprintf(Statfp, "\n--- Algorithm Tries ---\n");
+        fprintf(Statfp, "%-6s %-30s %12s\n", "Type", "Algorithm", "Tries");
+        total = 0;
+        for (t = 0; t < Numtypes; t++) {
+            uint64_t tries = atomic_load(&StatTry[t]);
+            if (tries > 0) {
+                total += tries;
+                fprintf(Statfp, "e%-5d %-30s %12llu\n",
+                        t, Hashtypes[t].name,
+                        (unsigned long long)tries);
+            }
+        }
+        fprintf(Statfp, "%-6s %-30s %12llu\n",
+                "", "TOTAL", (unsigned long long)total);
+
+        fprintf(Statfp, "\n--- Solutions ---\n");
+        fprintf(Statfp, "%-6s %-30s %12s %12s\n",
+                "Type", "Algorithm", "Solved", "HotHits");
+        { uint64_t tot_solved = 0, tot_hot = 0;
+        for (t = 0; t < Numtypes; t++) {
+            uint64_t solved = atomic_load(&StatSolved[t]);
+            uint64_t hothit = atomic_load(&StatHotHit[t]);
+            if (solved > 0 || hothit > 0) {
+                tot_solved += solved;
+                tot_hot += hothit;
+                fprintf(Statfp, "e%-5d %-30s %12llu %12llu\n",
+                        t, Hashtypes[t].name,
+                        (unsigned long long)solved,
+                        (unsigned long long)hothit);
+            }
+        }
+        fprintf(Statfp, "%-6s %-30s %12llu %12llu\n",
+                "", "TOTAL",
+                (unsigned long long)tot_solved,
+                (unsigned long long)tot_hot);
+        }
+        fprintf(Statfp, "\n");
+        fclose(Statfp);
+    }
+
     /* Flush output */
     if (Outfp != stdout) fclose(Outfp);
     if (Errfp != stderr) fclose(Errfp);
@@ -19275,6 +19472,7 @@ int main(int argc, char **argv)
     free_lock(WorkLock);
     free_lock(OutLock);
     free_lock(ErrLock);
+    free_lock(HotLock);
     free_lock(FreeLock);
 
     /* Free batch pool */

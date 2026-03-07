@@ -11,7 +11,7 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 ## Usage
 
 ```
-hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-b spec] [-B] [-V] [-h] [file ...]
+hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]
 ```
 
 ### Options
@@ -32,9 +32,13 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-b spec] [
 
 **`-E F`** — Write unresolved lines to file, truncating if it exists (default: stderr)
 
+**`-s F`** — Append statistics to file.  Writes three tables at exit: hot list hits (per algorithm/salt-length pair), per-algorithm try counts, and per-algorithm solution counts.  Stats are collected unconditionally; this option controls whether they are written out.
+
 **`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
 
 **`-B`** — Benchmark all registered types
+
+**`-T`** — Run self-tests on all registered types
 
 **`-V`** — Print version and exit
 
@@ -111,6 +115,50 @@ Benchmark specific types:
 hashpipe -b e1,e8-e12
 ```
 
+Write statistics to a file:
+```bash
+hashpipe -o verified.txt -E unresolved.txt -s stats.txt potfile.txt
+cat stats.txt
+```
+
+```
+--- Hot List ---
+Type   Algorithm                       SaltL      HotHits
+e31    MD5SALT                             3      8873141
+e31    MD5SALT                             4        11305
+e31    MD5SALT                             2         9577
+e31    MD5SALT                             5        17027
+e31    MD5SALT                             6       349991
+e31    MD5SALT                            30       659261
+e31    MD5SALT                             1           65
+e31    MD5SALT                            12           12
+e31    MD5SALT                             8         2240
+e31    MD5SALT                            17          594
+e31    MD5SALT                            10            8
+e31    MD5SALT                            11            2
+e31    MD5SALT                            18            1
+e31    MD5SALT                            19            2
+e31    MD5SALT                            13            2
+e31    MD5SALT                            21            2
+e31    MD5SALT                             9            2
+e31    MD5SALT                             7            6
+       TOTAL                                      9923255
+
+--- Algorithm Tries ---
+Type   Algorithm                             Tries
+e1     MD5                                      15
+e31    MD5SALT                             9923397
+       TOTAL                               9928112
+
+--- Solutions ---
+Type   Algorithm                            Solved      HotHits
+e1     MD5                                       2            0
+e31    MD5SALT                             9923327      9923255
+       TOTAL                               9923329      9923255
+```
+
+The **Hot List** section shows which `(algorithm, salt_length)` pairs were resolved via the hot list fast path.  **Algorithm Tries** shows total compute/verify calls per type.  **Solutions** shows how many hashes each type solved, and how many of those were hot list hits.
+
 ## Pot(files) considered harmful
 
 For many years, I have taken the position that potfiles, the place where solved hashes go to die, are not only bad, but also dangerous.  They can confuse what hash types are involved, or what the algorithm is, and can introduce bad solutions into an otherwise perfect hash processing stream.  Hashpipe is intended to be an automated method to resolve, or verify, questionable hashes.  By trying many different hashing methods, in a fully automated fashion, hashpipe can figure out what types of hashes are involved, properly format the output, and can pipe directly into mdsplit for long term hash management.  Much more to the point, it also separates out the unsolved hashes, corrupted entries, or other bad data.
@@ -129,7 +177,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 880 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 889 pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -138,7 +186,7 @@ This achieves near-linear scaling for slow types: 1000 bcrypt cost-12 hashes run
 
 ### Hot Type Optimization
 
-hashpipe tracks the most recently matched hash type as a "hot type" and a hot list of recent matches.  When processing a batch, workers try the hot type first before falling back to the full candidate scan.  For homogeneous input (common in potfiles), this avoids testing hundreds of types per line.
+hashpipe tracks the most recently matched hash type as a "hot type" and a hot list of recent `(type, salt_length)` matches.  When processing a batch, workers try the hot list first — using the known salt length to extract the salt directly without colon parsing — before falling back to the full candidate scan.  For homogeneous input (common in potfiles), this avoids testing hundreds of types per line and eliminates ambiguity when salts or passwords contain colons.
 
 ### Verification Strategies
 
@@ -150,11 +198,11 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 880 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 889 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## Supported Hash Types
 
-hashpipe supports 880 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 889 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -221,6 +269,7 @@ hashpipe supports 880 hash types.  Run `hashpipe -h` for the full list.
 | e532 | PBKDF2-SHA1 | PBKDF2-HMAC-SHA1 |
 | e533 | PBKDF2-SHA512 | PBKDF2-HMAC-SHA512 |
 | e534 | PKCS5S2 | `{PKCS5S2}` PBKDF2-SHA1 10000 rounds |
+| e895 | NETSCALER-PBKDF2 | Citrix NetScaler PBKDF2-HMAC-SHA256 2500 rounds |
 
 ### LDAP SSHA types
 
@@ -273,7 +322,7 @@ hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, H
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 880 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all 889 registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10
