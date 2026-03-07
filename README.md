@@ -240,9 +240,16 @@ hashpipe supports 880 hash types.  Run `hashpipe -h` for the full list.
 | e455 | PHPBB3 | `phpbb3($pass)` |
 | e457 | APACHE-SHA | `{SHA}base64(sha1($pass))` |
 | e461 | APR1 | `apr1($pass)` |
-| e876 | DRUPAL7 | `$S$` SHA512 iterated |
+| e500 | DESCRYPT | DES crypt (including BSDi Extended DES) |
+| e521 | SHA1SALTCX | `sha1($salt.sha1($pass))` iterated (hashcat 14400) |
+| e819 | MD5-MD5MD5PASSSALT-PEP | `md5(md5(md5($pass).$salt1).$salt2)` (hashcat 31700) |
+| e821 | MD5-MD5MD5PASSSALT-PEP2 | `md5(md5(md5($pass.$salt1)).$salt2)` (hashcat 21900) |
+| e822 | MD5-SALT-SHA1PEPPASS | `md5($salt1.sha1($salt2.$pass))` (hashcat 21310) |
+| e824 | SHA1-SALTSHA1U16 | `sha1($salt.sha1(utf16le($user):utf16le($pass)))` (hashcat 29000) |
 | e861 | CISCOPIX | Cisco PIX `md5($pass)` phpitoa64 |
 | e862 | CISCOASA | Cisco ASA `md5($pass.$salt)` phpitoa64 |
+| e876 | DRUPAL7 | `$S$` SHA512 iterated |
+| e888 | ISCSI-CHAP | iSCSI CHAP authentication (hashcat 4800) |
 
 ### Note on NTLMH (e786)
 
