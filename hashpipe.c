@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.45 2026/03/07 03:57:47 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.46 2026/03/07 09:01:42 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -533,6 +533,14 @@ static void ws_rhash_done(rhash ctx)
 #define HTF_ITER_X0     0x20  /* x=0 convention: no xNN suffix for first match */
 #define HTF_NONHEX      0x40  /* hash is not hex (bcrypt, APACHE-SHA, etc.) */
 
+/* Hash classification for fast dispatch — items and verify functions are
+ * tagged so the slow queue only tries compatible combinations. */
+#define HCLASS_HEX       0x01  /* hex hash[:salt] — only hex-output verifiers */
+#define HCLASS_PREFIX    0x02  /* recognized prefix ($2a, $pbkdf2, {ssha}, etc.) */
+#define HCLASS_DES       0x04  /* DES crypt format (13-char, valid charset) */
+#define HCLASS_OTHER     0x08  /* unrecognized format */
+#define HCLASS_ALL       0x0F  /* matches everything */
+
 /* ---- Hash type registry ---- */
 
 typedef void (*hashfn_t)(const unsigned char *pass, int passlen,
@@ -559,6 +567,7 @@ struct hashtype {
     hashfn_t compute_alt2;     /* second alternate (e.g. HEXSALT colon-both-sides) */
     hashfn_t iter_fn;          /* inner iteration function for x-types, or NULL for hash_by_len */
     verifyfn_t verify;         /* non-hex format verifier (bcrypt, APACHE-SHA, etc.) */
+    int vclass;                /* HCLASS_* bitmask: which item classes this verify accepts */
     int nchain;                /* 0 = use compute; >0 = use chain[] */
     struct chain_step *chain;  /* chain[0]=innermost, chain[nchain-1]=outermost */
     const char *example;       /* "hash:password" or "hash:salt:password" for benchmarking */
@@ -579,7 +588,7 @@ struct MapHashcat {
     {1400,  10},
     {10800, 11},
     {1700,  12},    /* SHA-512 */
-    {5000,  91},    /* SHA-3 */
+    {5000,  894},   /* 5000 | sha1(sha1($salt.$pass.$salt)) */
     {600,   841},   /* BLAKE2b-512 */
     {610,   842},   /* BLAKE2b-512($pass.$salt) */
     {620,   843},   /* BLAKE2b-512($salt.$pass) */
@@ -662,7 +671,7 @@ struct MapHashcat {
     {11,    373},   /* Joomla < 2.5.18 */
     {2612,  886},   /* PHPS */
     {21,    394},
-    {11000, 65535}, /* PrestaShop */
+    {11000, 394}, /* PrestaShop - md5($salt.$pass) */
     {124,   385},   /* Django (SHA-1) */
     {125,   887},   /* ArubaOS */
     {10000, 530},   /* Django (PBKDF2-SHA256) */
@@ -884,6 +893,11 @@ struct MapHashcat {
     {34800, 845},   /* BLAKE2b-256 */
     {34810, 846},   /* BLAKE2b-256($pass.$salt) */
     {34820, 847},   /* BLAKE2b-256($salt.$pass) */
+    {20711, 891},   /* AuthMe sha256 ($SHA$salt$hash) */
+    {20712, 892},   /* RSA NetWitness (sha256(SHA256UC(pass).b64dec(salt))) */
+    {22200, 893},   /* Citrix NetScaler SHA512 */
+    {30000, 889},   /* Python Werkzeug MD5 (HMAC-MD5 key=$salt) */
+    {30120, 890},   /* Python Werkzeug SHA256 (HMAC-SHA256 key=$salt) */
     {65535, 65535}  /* EOF */
 };
 
@@ -1253,6 +1267,12 @@ char *Types[] = {
     "PHPS",
     "ARUBAOS",
     "ISCSI-CHAP",
+    "WERKZEUG-MD5",
+    "WERKZEUG-SHA256",
+    "AUTHME",
+    "NETWITNESS",
+    "NETSCALER-SHA512",
+    "SHA1SHA1SALTPASSSALT",
 
 NULL
 
@@ -9349,6 +9369,58 @@ static int verify_netscaler(const char *hashstr, int hashlen,
     return strncasecmp(computed, hashstr, 49) == 0;
 }
 
+/* NETSCALER-SHA512 (e893): SHA512(8-char salt + pass + NUL) — prefix "2" + 8salt + 128hex */
+static int verify_netscaler512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha_out = (unsigned char *)WS->ctx1;
+    char *computed = (char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen != 137 || hashstr[0] != '2') return 0;
+    if (8 + passlen + 1 > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr + 1, 8);
+    memcpy(buf + 8, pass, passlen);
+    buf[8 + passlen] = 0;
+    rhash_msg(RHASH_SHA512, (unsigned char *)buf, 8 + passlen + 1, sha_out);
+    computed[0] = '2';
+    memcpy(computed + 1, hashstr + 1, 8);
+    prmd5(sha_out, computed + 9, 128);
+    computed[137] = 0;
+    return strncasecmp(computed, hashstr, 137) == 0;
+}
+
+/* SHA1SHA1SALTPASSSALT (e894): sha1(sha1(salt+pass+salt)) — 40hex:salt */
+static int verify_sha1sha1saltpasssalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha1 = (unsigned char *)WS->ctx1;
+    char *hex1 = (char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+    const char *colon;
+    int hpart, saltlen;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 40) return 0;
+    saltlen = hashlen - hpart - 1;
+    if (saltlen <= 0) return 0;
+    if (saltlen + passlen + saltlen > (int)WS_GP_SIZE) return 0;
+
+    /* inner: sha1(salt + pass + salt) */
+    memcpy(buf, colon + 1, saltlen);
+    memcpy(buf + saltlen, pass, passlen);
+    memcpy(buf + saltlen + passlen, colon + 1, saltlen);
+    SHA1((unsigned char *)buf, saltlen + passlen + saltlen, sha1);
+    /* outer: sha1(hex(inner)) */
+    prmd5(sha1, hex1, 40);
+    SHA1((unsigned char *)hex1, 40, sha1);
+    prmd5(sha1, hex1, 40);
+    hex1[40] = 0;
+    return strncasecmp(hex1, hashstr, 40) == 0;
+}
+
 /* WBB3 (e880): SHA1(salt + SHA1(salt + SHA1(pass))) — 40hex ":" 40hex_salt */
 static int verify_wbb3(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -10038,6 +10110,115 @@ static int verify_iscsi_chap(const char *hashstr, int hashlen,
     memcpy(input + 1 + passlen, chall_bin, chall_binlen);
     rhash_msg(RHASH_MD5, input, 1 + passlen + chall_binlen, md5out);
     return memcmp(md5out, expected, 16) == 0;
+}
+
+/* Werkzeug MD5: md5$salt$hexhash — HMAC-MD5(key=salt, msg=pass) */
+static int verify_werkzeug_md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;
+    char *computed = (char *)WS->gp1;
+    const char *salt_start, *hash_start;
+    int saltlen;
+    unsigned int outlen = 16;
+
+    if (hashlen < 8 || memcmp(hashstr, "md5$", 4) != 0) return 0;
+    salt_start = hashstr + 4;
+    hash_start = memchr(salt_start, '$', hashlen - 4);
+    if (!hash_start) return 0;
+    saltlen = hash_start - salt_start;
+    if (saltlen < 1 || saltlen > 256) return 0;
+    hash_start++;
+    if (hashlen - (int)(hash_start - hashstr) < 32) return 0;
+
+    HMAC(EVP_md5(), salt_start, saltlen, pass, passlen, hmac_out, &outlen);
+    prmd5(hmac_out, computed, 32);
+    return strncasecmp(computed, hash_start, 32) == 0;
+}
+
+/* Werkzeug SHA256: sha256$salt$hexhash — HMAC-SHA256(key=salt, msg=pass) */
+static int verify_werkzeug_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;
+    char *computed = (char *)WS->gp1;
+    const char *salt_start, *hash_start;
+    int saltlen;
+    unsigned int outlen = 32;
+
+    if (hashlen < 11 || memcmp(hashstr, "sha256$", 7) != 0) return 0;
+    salt_start = hashstr + 7;
+    hash_start = memchr(salt_start, '$', hashlen - 7);
+    if (!hash_start) return 0;
+    saltlen = hash_start - salt_start;
+    if (saltlen < 1 || saltlen > 256) return 0;
+    hash_start++;
+    if (hashlen - (int)(hash_start - hashstr) < 64) return 0;
+
+    HMAC(EVP_sha256(), salt_start, saltlen, pass, passlen, hmac_out, &outlen);
+    prmd5(hmac_out, computed, 64);
+    return strncasecmp(computed, hash_start, 64) == 0;
+}
+
+/* AuthMe (e891): $SHA$salt$sha256hex — sha256(sha256hex(pass).salt) */
+static int verify_authme(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha_out = (unsigned char *)WS->ctx1;
+    char *hexbuf = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    const char *salt_start, *hash_start;
+    int saltlen;
+
+    if (hashlen < 10 || memcmp(hashstr, "$SHA$", 5) != 0) return 0;
+    salt_start = hashstr + 5;
+    hash_start = memchr(salt_start, '$', hashlen - 5);
+    if (!hash_start) return 0;
+    saltlen = hash_start - salt_start;
+    if (saltlen < 1 || saltlen > 256) return 0;
+    hash_start++;
+    if (hashlen - (int)(hash_start - hashstr) < 64) return 0;
+
+    /* sha256(pass) → hex */
+    rhash_msg(RHASH_SHA256, pass, passlen, sha_out);
+    prmd5(sha_out, hexbuf, 64);
+    /* sha256(hex . salt) */
+    memcpy(hexbuf + 64, salt_start, saltlen);
+    rhash_msg(RHASH_SHA256, (unsigned char *)hexbuf, 64 + saltlen, sha_out);
+    prmd5(sha_out, computed, 64);
+    return strncasecmp(computed, hash_start, 64) == 0;
+}
+
+/* NETWITNESS (e892): sha256(SHA256_HEX_UPPER(pass) . base64_decode(salt))
+ * Format: UCHEXHASH:BASE64SALT (64 uppercase hex : base64-encoded salt) */
+static int verify_netwitness(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha_out = (unsigned char *)WS->ctx1;
+    char *hexbuf = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    unsigned char *decoded_salt = (unsigned char *)WS->gp3;
+    const char *b64salt;
+    int saltlen, dlen;
+
+    if (hashlen < 66) return 0;
+    if (hashstr[64] != ':') return 0;
+    b64salt = hashstr + 65;
+    saltlen = hashlen - 65;
+    if (saltlen < 1 || saltlen > 256) return 0;
+
+    /* Decode base64 salt */
+    dlen = base64_decode(b64salt, saltlen, decoded_salt, WS_GP_SIZE);
+    if (dlen < 1) return 0;
+
+    /* sha256(pass) → uppercase hex */
+    rhash_msg(RHASH_SHA256, pass, passlen, sha_out);
+    prmd5UC(sha_out, hexbuf, 64);
+    /* sha256(uppercase_hex . decoded_salt) */
+    memcpy(hexbuf + 64, decoded_salt, dlen);
+    rhash_msg(RHASH_SHA256, (unsigned char *)hexbuf, 64 + dlen, sha_out);
+    prmd5UC(sha_out, computed, 64);
+    return strncasecmp(computed, hashstr, 64) == 0;
 }
 
 /* KRB5PA23 (e874): NTLM → HMAC-MD5(usage=1) → RC4 decrypt → verify timestamp
@@ -10788,6 +10969,11 @@ static int verify_descrypt(const char *hashstr, int hashlen,
 
 /* MD5DESCRYPT: MD5(descrypt(pass, salt)) — "32hex:SS:password"
  * hashstr = 32hex ":" 2-char-salt */
+/* Helper: check if a character is valid in a DES crypt salt [./0-9A-Za-z] */
+static inline int is_des_salt_char(int c) {
+    return (c >= '.' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
 /* Helper: decode salt from "hash:salt" portion in DESCRYPT verify types.
  * Salt may be literal chars or $HEX[...] encoded.
  * Returns pointer to decoded salt (NUL-terminated). */
@@ -10833,6 +11019,10 @@ static int verify_md5descrypt(const char *hashstr, int hashlen,
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 32) return 0;
+    { int saltlen = hashlen - 33;
+      if (saltlen == 2) { if (!is_des_salt_char(colon[1]) || !is_des_salt_char(colon[2])) return 0; }
+      else if (!(saltlen >= 6 && memcmp(colon + 1, "$HEX[", 5) == 0)) return 0;
+    }
     salt = descrypt_decode_salt(colon + 1, hashlen - 33, saltdec, WS_GP_SIZE);
     plen = passlen > 8 ? 8 : passlen;
     if (plen >= (int)WS_GP_SIZE) return 0;
@@ -10862,6 +11052,10 @@ static int verify_md4descrypt(const char *hashstr, int hashlen,
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 32) return 0;
+    { int saltlen = hashlen - 33;
+      if (saltlen == 2) { if (!is_des_salt_char(colon[1]) || !is_des_salt_char(colon[2])) return 0; }
+      else if (!(saltlen >= 6 && memcmp(colon + 1, "$HEX[", 5) == 0)) return 0;
+    }
     salt = descrypt_decode_salt(colon + 1, hashlen - 33, saltdec, WS_GP_SIZE);
     plen = passlen > 8 ? 8 : passlen;
     if (plen >= (int)WS_GP_SIZE) return 0;
@@ -10891,6 +11085,10 @@ static int verify_sha1descrypt(const char *hashstr, int hashlen,
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 40) return 0;
+    { int saltlen = hashlen - 41;
+      if (saltlen == 2) { if (!is_des_salt_char(colon[1]) || !is_des_salt_char(colon[2])) return 0; }
+      else if (!(saltlen >= 6 && memcmp(colon + 1, "$HEX[", 5) == 0)) return 0;
+    }
     salt = descrypt_decode_salt(colon + 1, hashlen - 41, saltdec, WS_GP_SIZE);
     plen = passlen > 8 ? 8 : passlen;
     if (plen >= (int)WS_GP_SIZE) return 0;
@@ -10921,6 +11119,10 @@ static int verify_md4utf16descrypt(const char *hashstr, int hashlen,
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 32) return 0;
+    { int saltlen = hashlen - 33;
+      if (saltlen == 2) { if (!is_des_salt_char(colon[1]) || !is_des_salt_char(colon[2])) return 0; }
+      else if (!(saltlen >= 6 && memcmp(colon + 1, "$HEX[", 5) == 0)) return 0;
+    }
     salt = descrypt_decode_salt(colon + 1, hashlen - 33, saltdec, WS_GP_SIZE);
     plen = passlen > 8 ? 8 : passlen;
     if (plen >= (int)WS_GP_SIZE) return 0;
@@ -14074,6 +14276,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].compute_alt2 = NULL; \
             Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
+            Hashtypes[_i].vclass = HCLASS_HEX; \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
             Hashtypes[_i].example = (ex); \
@@ -14091,6 +14294,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].compute_alt2 = NULL; \
             Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
+            Hashtypes[_i].vclass = HCLASS_HEX; \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
             Hashtypes[_i].example = (ex); \
@@ -14108,6 +14312,7 @@ static void init_hashtypes(void)
             Hashtypes[_i].compute_alt2 = (alt2fn); \
             Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
+            Hashtypes[_i].vclass = HCLASS_HEX; \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
             Hashtypes[_i].example = (ex); \
@@ -14125,13 +14330,14 @@ static void init_hashtypes(void)
             Hashtypes[_i].compute_alt2 = NULL; \
             Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = NULL; \
+            Hashtypes[_i].vclass = HCLASS_HEX; \
             Hashtypes[_i].nchain = sizeof(chain_arr) / sizeof(chain_arr[0]); \
             Hashtypes[_i].chain = (chain_arr); \
             Hashtypes[_i].example = (ex); \
         } \
     } while(0)
 
-    /* HTV: register a non-hex verify type */
+    /* HTV: register a non-hex verify type (vclass defaults to HCLASS_ALL) */
     #define HTV(tname, fl, vfn, ex) do { \
         int _i = find_type_index(tname); \
         if (_i >= 0) { \
@@ -14142,6 +14348,25 @@ static void init_hashtypes(void)
             Hashtypes[_i].compute_alt2 = NULL; \
             Hashtypes[_i].iter_fn = NULL; \
             Hashtypes[_i].verify = (vfn); \
+            Hashtypes[_i].vclass = HCLASS_ALL; \
+            Hashtypes[_i].nchain = 0; \
+            Hashtypes[_i].chain = NULL; \
+            Hashtypes[_i].example = (ex); \
+        } \
+    } while(0)
+
+    /* HTVC: register a non-hex verify type with explicit vclass */
+    #define HTVC(tname, fl, vfn, vc, ex) do { \
+        int _i = find_type_index(tname); \
+        if (_i >= 0) { \
+            Hashtypes[_i].hashlen = 0; \
+            Hashtypes[_i].flags = (fl) | HTF_NONHEX; \
+            Hashtypes[_i].compute = NULL; \
+            Hashtypes[_i].compute_alt = NULL; \
+            Hashtypes[_i].compute_alt2 = NULL; \
+            Hashtypes[_i].iter_fn = NULL; \
+            Hashtypes[_i].verify = (vfn); \
+            Hashtypes[_i].vclass = (vc); \
             Hashtypes[_i].nchain = 0; \
             Hashtypes[_i].chain = NULL; \
             Hashtypes[_i].example = (ex); \
@@ -15213,6 +15438,12 @@ static void init_hashtypes(void)
     HTV("PHPS",          0, verify_phps, "$PHPS$3031$216cb30ddee43eced3bb76fd38e0b7df:password123");
     HTV("ARUBAOS",       0, verify_arubaos, "5387280701b9809a521b6175cb9519910413a11227468b252f:password123");
     HTV("ISCSI-CHAP",    0, verify_iscsi_chap, "afd09efdd6f8ca9f18ec77c5869788c3:01020304050607080910111213141516:01:hashcat");
+    HTV("WERKZEUG-MD5",  0, verify_werkzeug_md5, "md5$84143$7f51edecfa6fb401a0b5e63d33fc8c0e:hashcat");
+    HTV("WERKZEUG-SHA256", 0, verify_werkzeug_sha256, "sha256$70108387805$8b9472281c36c3a693703de0e0f1ffab8fc0ecdd3bc5ead04c76dd74ef431e49:hashcat");
+    HTV("AUTHME",         0, verify_authme, "$SHA$7218532375810603$bfede293ecf6539211a7305ea218b9f3f608953130405cda9eaba6fb6250f824:hashcat");
+    HTV("NETWITNESS",    0, verify_netwitness, "6F48F44C46F5ADC534597687B086278F0AAF7D262ADDB3978562A7D55BBDF467:MDAwMzY1NzYwODI4MQ==:hashcat");
+    HTV("NETSCALER-SHA512", 0, verify_netscaler512, "2f9282ade42ce148175dc3b4d8b5916dae5211eee49886c3f7cc768f6b9f2eb982a5ac2f2672a0223999bfd15349093278adf12f6276e8b61dacf5572b3f93d0b4fa886ce:hashcat");
+    HTV("SHA1SHA1SALTPASSSALT", 0, verify_sha1sha1saltpasssalt, "05ac0c544060af48f993f9c3cdf2fc03937ea35b:232725102020:hashcat");
     HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
     HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk= AQIDBA==:password123");
     HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
@@ -15304,6 +15535,57 @@ static void init_hashtypes(void)
     #undef HT
     #undef HTC
     #undef HTV
+    #undef HTVC
+
+    /* --- Classify verify types by input format --- */
+    /* Verify types with HCLASS_ALL (default) get auto-classified based on
+     * their example hash format so the slow queue skips incompatible types. */
+    for (i = 0; i < Numtypes; i++) {
+        struct hashtype *ht = &Hashtypes[i];
+        const char *ex;
+        const char *colon;
+        int elen, hpart;
+
+        if (!ht->verify) continue;
+        if (ht->vclass != HCLASS_ALL) continue;  /* explicitly set — keep it */
+        ex = ht->example;
+        if (!ex) continue;
+
+        /* Find the colon separating hash from password in the example */
+        colon = strrchr(ex, ':');
+        if (!colon) { ht->vclass = HCLASS_OTHER; continue; }
+        elen = colon - ex;  /* hash portion length */
+
+        /* Prefix-based formats */
+        if (ex[0] == '$' || ex[0] == '{' || ex[0] == '(') {
+            ht->vclass = HCLASS_PREFIX;
+        } else if (strncasecmp(ex, "0x0", 3) == 0 || strncasecmp(ex, "0xc", 3) == 0) {
+            ht->vclass = HCLASS_PREFIX;
+        } else if (strncmp(ex, "SCRYPT:", 7) == 0) {
+            ht->vclass = HCLASS_PREFIX;
+        } else if (strncmp(ex, "md5", 3) == 0 && ex[3] != '\0' && !isxdigit((unsigned char)ex[3])) {
+            ht->vclass = HCLASS_PREFIX;  /* POSTGRESQL md5..., WERKZEUG md5$... */
+        } else if (strncmp(ex, "sha256$", 7) == 0) {
+            ht->vclass = HCLASS_PREFIX;  /* WERKZEUG SHA256 */
+        } else if (elen == 13 && !memchr(ex, ':', elen)) {
+            ht->vclass = HCLASS_DES;     /* DESCRYPT: 13-char, no colon */
+        } else {
+            /* Check if hash portion (before first colon in example) is hex */
+            const char *c1 = memchr(ex, ':', elen);
+            int hexpart = c1 ? (int)(c1 - ex) : elen;
+            { int allhex = 1, j;
+              if (hexpart >= 16 && (hexpart & 1) == 0) {
+                for (j = 0; j < hexpart; j++)
+                  if (!isxdigit((unsigned char)ex[j])) { allhex = 0; break; }
+              } else allhex = 0;
+            if (allhex) {
+                ht->vclass = HCLASS_HEX;
+            } else {
+                ht->vclass = HCLASS_OTHER;
+            }
+            }
+        }
+    }
 
     /* --- Build per-hashlen candidate caches --- */
     {
@@ -15677,6 +15959,9 @@ struct workitem {
     struct hashtype *hint;  /* type hint, or NULL */
     int hint_iter;          /* iteration count from xNN suffix */
     int hash_is_uc;         /* original hex had uppercase */
+    int hash_class;         /* HCLASS_* bitmask for slow queue filtering */
+    char *rest;             /* data after hash: (salt:password or just password) */
+    int restlen;
 
     /* Output fields (set by worker) */
     int verified;           /* 1 if verified */
@@ -15687,6 +15972,11 @@ struct workitem {
 
 #define HOT_LIST_MAX 256
 
+struct hot_entry {
+    int type_idx;
+    int salt_len;   /* salt length for this match, -1 = unsalted/verify */
+};
+
 struct batch {
     struct workitem items[BATCH_SIZE];
     char buf[BATCH_BUFSIZE];
@@ -15694,7 +15984,7 @@ struct batch {
     int bufused;
     int hot_type;       /* index into Hashtypes[], -1 = none */
     int hot_iter;
-    int hot_list[HOT_LIST_MAX]; /* recently matched type indices, MRU first */
+    struct hot_entry hot_list[HOT_LIST_MAX]; /* recently matched (type,saltlen), MRU first */
     int nhot;                   /* entries used in hot_list */
     struct workspace *ws; /* per-job heap workspace, set by alloc_batch */
     struct batch *next; /* free list / work queue */
@@ -15715,7 +16005,7 @@ static const char *ModeDefaultSalt;     /* default salt for hashcat mode (e.g. "
 static int ModeDefaultSaltLen;
 static int GlobalHotType = -1;
 static int GlobalHotIter = 0;
-static int GlobalHotList[HOT_LIST_MAX];  /* recently matched types, MRU first */
+static struct hot_entry GlobalHotList[HOT_LIST_MAX];  /* recently matched (type,saltlen), MRU first */
 static int GlobalNhot = 0;
 
 /* Locks */
@@ -15752,7 +16042,7 @@ static struct batch *alloc_batch(void)
     b->bufused = 0;
     b->hot_type = GlobalHotType;
     b->hot_iter = GlobalHotIter;
-    memcpy(b->hot_list, GlobalHotList, GlobalNhot * sizeof(int));
+    memcpy(b->hot_list, GlobalHotList, GlobalNhot * sizeof(struct hot_entry));
     b->nhot = GlobalNhot;
     b->next = NULL;
     return b;
@@ -15825,30 +16115,38 @@ static inline int hash_match(const unsigned char *hashbin, int hashbytes,
     return 0;
 }
 
-/* Add a type to the hot list (MRU front). Promotes if already present. */
-static void hot_list_add(int *hot_list, int *nhot, int type_idx)
+/* Add a (type, salt_len) entry to the hot list (MRU front).
+ * Promotes if an identical (type, salt_len) pair already present.
+ * Different salt_lens for the same type get separate entries. */
+static void hot_list_add(struct hot_entry *hot_list, int *nhot,
+                         int type_idx, int salt_len)
 {
     int i;
     for (i = 0; i < *nhot; i++) {
-        if (hot_list[i] == type_idx) {
+        if (hot_list[i].type_idx == type_idx &&
+            hot_list[i].salt_len == salt_len) {
             if (i > 0) {
-                memmove(&hot_list[1], &hot_list[0], i * sizeof(int));
-                hot_list[0] = type_idx;
+                struct hot_entry tmp = hot_list[i];
+                memmove(&hot_list[1], &hot_list[0], i * sizeof(struct hot_entry));
+                hot_list[0] = tmp;
             }
             return;
         }
     }
+    struct hot_entry e;
+    e.type_idx = type_idx;
+    e.salt_len = salt_len;
     if (*nhot < HOT_LIST_MAX) {
-        memmove(&hot_list[1], &hot_list[0], *nhot * sizeof(int));
+        memmove(&hot_list[1], &hot_list[0], *nhot * sizeof(struct hot_entry));
         (*nhot)++;
     } else {
-        memmove(&hot_list[1], &hot_list[0], (HOT_LIST_MAX - 1) * sizeof(int));
+        memmove(&hot_list[1], &hot_list[0], (HOT_LIST_MAX - 1) * sizeof(struct hot_entry));
     }
-    hot_list[0] = type_idx;
+    hot_list[0] = e;
 }
 
 static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
-                        int *hot_list, int *nhot)
+                        struct hot_entry *hot_list, int *nhot)
 {
     unsigned char *hashbin = WS->hashbin;
     unsigned char *computed = WS->computed_vi;
@@ -15866,6 +16164,148 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
     int ncands, c, iter;
 
     item->verified = 0;
+
+    /* --- Hot list fast path (pre-hint): only needed when a verify-type hint
+     * would trap us in the verify path.  For un-hinted items, the normal
+     * hot list path (after hex2bin) handles them fine. */
+    if (*nhot > 0 && item->rest &&
+        item->hint && item->hint->verify &&
+        !(item->hint_iter > 1 && item->hint->compute && item->hint->hashlen > 0)) {
+        int h;
+        int cached_hexlen = -1, cached_hb = -1;  /* cache hex validation */
+        for (h = 0; h < *nhot; h++) {
+            struct hashtype *ht = &Hashtypes[hot_list[h].type_idx];
+            int hot_slen = hot_list[h].salt_len;
+            int hex_len, hb;
+
+            if (ht->verify) continue;
+
+            hex_len = ht->hashlen * 2;
+            if (item->hashlen < hex_len) continue;
+            /* Cache hex validation + decode per hex_len */
+            if (hex_len != cached_hexlen) {
+                if (!is_hex(item->hashstr, hex_len)) continue;
+                cached_hexlen = hex_len;
+                cached_hb = hex2bin(item->hashstr, hex_len, hashbin);
+            }
+            hb = cached_hb;
+            if (hb != ht->hashlen) continue;
+
+            if (hot_slen < 0) {
+                if (ht->flags & HTF_SALTED) continue;
+                /* Unsalted hot entry */
+                {
+                    const unsigned char *hp;
+                    int hplen;
+                    hplen = decode_hex_password(item->rest, item->restlen,
+                                                WS->vpassbuf, MAXLINE);
+                    if (hplen >= 0) hp = WS->vpassbuf;
+                    else { hp = (const unsigned char *)item->rest; hplen = item->restlen; }
+                    hash_compute(ht, hp, hplen, NULL, 0, computed);
+                    if (hash_match(hashbin, hb, computed, ht->hashlen)) {
+                        item->salt = NULL; item->saltlen = 0;
+                        item->password = item->rest;
+                        item->passlen = item->restlen;
+                        item->hashlen = hex_len;
+                        goto hot_fast_match;
+                    }
+                }
+                continue;
+            }
+
+            if (!(ht->flags & HTF_SALTED)) continue;
+
+            {
+                const char *rp = item->rest;
+                int rlen = item->restlen;
+                const unsigned char *hp;
+                int hplen, hsbinlen;
+
+                if (hot_slen == 0) {
+                    hsbinlen = 0;
+                    hplen = decode_hex_password(rp, rlen, WS->vpassbuf, MAXLINE);
+                    if (hplen >= 0) hp = WS->vpassbuf;
+                    else { hp = (const unsigned char *)rp; hplen = rlen; }
+                } else if (hot_slen < rlen && rp[hot_slen] == ':') {
+                    int sdec = decode_hex_password(rp, hot_slen,
+                                                   altsaltbin, MAX_SALT_BYTES);
+                    if (sdec >= 0) hsbinlen = sdec;
+                    else {
+                        hsbinlen = hot_slen;
+                        if (hsbinlen > MAX_SALT_BYTES) hsbinlen = MAX_SALT_BYTES;
+                        memcpy(altsaltbin, rp, hsbinlen);
+                    }
+                    const char *pp = rp + hot_slen + 1;
+                    int pplen = rlen - hot_slen - 1;
+                    hplen = decode_hex_password(pp, pplen, WS->vpassbuf, MAXLINE);
+                    if (hplen >= 0) hp = WS->vpassbuf;
+                    else { hp = (const unsigned char *)pp; hplen = pplen; }
+                } else {
+                    continue;
+                }
+
+                {
+                    const unsigned char *sp = hsbinlen > 0 ? altsaltbin : NULL;
+                    hash_compute(ht, hp, hplen, sp, hsbinlen, computed);
+                    if (hash_match(hashbin, hb, computed, ht->hashlen)) {
+                        if (hot_slen > 0) {
+                            item->salt = (char *)rp;
+                            item->saltlen = hot_slen;
+                            item->password = (char *)rp + hot_slen + 1;
+                            item->passlen = rlen - hot_slen - 1;
+                        } else {
+                            item->salt = NULL; item->saltlen = 0;
+                            item->password = (char *)rp;
+                            item->passlen = rlen;
+                        }
+                        item->hashlen = hex_len;
+                        goto hot_fast_match;
+                    }
+                    if (ht->compute_alt) {
+                        ht->compute_alt(hp, hplen, sp, hsbinlen, computed);
+                        if (hash_match(hashbin, hb, computed, ht->hashlen)) {
+                            if (hot_slen > 0) {
+                                item->salt = (char *)rp;
+                                item->saltlen = hot_slen;
+                                item->password = (char *)rp + hot_slen + 1;
+                                item->passlen = rlen - hot_slen - 1;
+                            }
+                            item->hashlen = hex_len;
+                            goto hot_fast_match;
+                        }
+                    }
+                    if (ht->compute_alt2) {
+                        ht->compute_alt2(hp, hplen, sp, hsbinlen, computed);
+                        if (hash_match(hashbin, hb, computed, ht->hashlen)) {
+                            if (hot_slen > 0) {
+                                item->salt = (char *)rp;
+                                item->saltlen = hot_slen;
+                                item->password = (char *)rp + hot_slen + 1;
+                                item->passlen = rlen - hot_slen - 1;
+                            }
+                            item->hashlen = hex_len;
+                            goto hot_fast_match;
+                        }
+                    }
+                }
+            }
+            continue;
+
+        hot_fast_match:
+            item->verified = 1;
+            item->match_type = ht;
+            item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+            *hot_type = hot_list[h].type_idx;
+            *hot_iter = item->match_iter;
+            if (h > 0) {
+                struct hot_entry tmp = hot_list[h];
+                memmove(&hot_list[1], &hot_list[0],
+                        h * sizeof(struct hot_entry));
+                hot_list[0] = tmp;
+            }
+            return;
+        }
+    }
 
     /* Non-hex format: try verify function if hinted type has one.
      * For iterated hashes (x02+), skip verify and use compute path. */
@@ -15924,7 +16364,42 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 }
             }
         }
-        return;  /* non-hex types can't fallback to hex matching */
+        /* All verify types failed.  If the original hashstr starts with
+         * valid hex, clear the hint and fall through to the compute path —
+         * the heuristic may have been wrong (e.g. IPMI2-MD5 triggered on
+         * a plain MD5SALT line with a long hex salt). */
+        {
+            /* Find original hex hash length by locating first colon in hashstr */
+            const char *_fc = memchr(item->hashstr, ':', item->hashlen);
+            int _orighl = _fc ? (int)(_fc - item->hashstr) : item->hashlen;
+            if (_orighl >= 16 && (_orighl & 1) == 0 &&
+                is_hex(item->hashstr, _orighl)) {
+                item->hashlen = _orighl;
+                item->hint = NULL;
+                /* Restore salt/password from rest */
+                if (item->rest && item->restlen > 0) {
+                    const char *_rp = item->rest;
+                    int _rlen = item->restlen;
+                    const char *_lc = NULL;
+                    int _ri;
+                    for (_ri = _rlen - 1; _ri >= 0; _ri--)
+                        if (_rp[_ri] == ':') { _lc = &_rp[_ri]; break; }
+                    if (_lc) {
+                        item->salt = (char *)_rp;
+                        item->saltlen = _lc - _rp;
+                        item->password = (char *)_lc + 1;
+                        item->passlen = _rlen - (int)(_lc - _rp) - 1;
+                    } else {
+                        item->salt = NULL; item->saltlen = 0;
+                        item->password = (char *)_rp;
+                        item->passlen = _rlen;
+                    }
+                }
+                /* Fall through to hex/compute path */
+            } else {
+                return;  /* truly non-hex, can't fallback */
+            }
+        }
     }
 
     /* Decode hex hash to binary */
@@ -15947,19 +16422,19 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         {
             int h;
             for (h = 0; h < *nhot; h++) {
-                struct hashtype *ht = &Hashtypes[hot_list[h]];
+                struct hashtype *ht = &Hashtypes[hot_list[h].type_idx];
                 if (!ht->verify) continue;
                 WS->verify_iter = 0;
                 if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
-                    *hot_type = hot_list[h];
+                    *hot_type = hot_list[h].type_idx;
                     *hot_iter = WS->verify_iter;
                     if (h > 0) {
-                        int matched = hot_list[h];
-                        memmove(&hot_list[1], &hot_list[0], h * sizeof(int));
-                        hot_list[0] = matched;
+                        struct hot_entry tmp = hot_list[h];
+                        memmove(&hot_list[1], &hot_list[0], h * sizeof(struct hot_entry));
+                        hot_list[0] = tmp;
                     }
                     return;
                 }
@@ -15976,7 +16451,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 item->match_iter = WS->verify_iter;
                 *hot_type = v;
                 *hot_iter = WS->verify_iter;
-                hot_list_add(hot_list, nhot, v);
+                hot_list_add(hot_list, nhot, v, -1);
                 return;
             }
         }
@@ -16051,11 +16526,14 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         }
     }
 
-    /* --- Hot list check: try all recently matched types, both salt splits --- */
+    /* --- Hot list check: try known (type, salt_len) pairs --- */
+    /* For salted types, use rest data + known salt_len to extract
+     * salt and password at exact offsets, avoiding colon ambiguity. */
     {
         int h;
         for (h = 0; h < *nhot; h++) {
-            struct hashtype *ht = &Hashtypes[hot_list[h]];
+            struct hashtype *ht = &Hashtypes[hot_list[h].type_idx];
+            int hot_slen = hot_list[h].salt_len;
 
             /* Hot verify types (hex-format composite hashes like MACOSX) */
             if (ht->verify) {
@@ -16066,100 +16544,116 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
 
             if (ht->hashlen < hashbytes) continue;
 
-            /* Try primary salt split (salted types) */
-            if (ht->flags & HTF_SALTED) {
-                const unsigned char *sp = saltbinlen > 0 ? saltbin : NULL;
-                hash_compute(ht, pass, passlen, sp, saltbinlen, computed);
-                if (hash_match(hashbin, hashbytes, computed, ht->hashlen))
-                    goto hot_match;
-                if (saltbinlen > 0 && (ht->flags & HTF_COMPOSED) &&
-                    saltbinlen < MAX_SALT_BYTES) {
-                    colonsalt[0] = ':';
-                    memcpy(colonsalt + 1, saltbin, saltbinlen);
-                    hash_compute(ht, pass, passlen, colonsalt, saltbinlen + 1, computed);
-                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen))
-                        goto hot_match;
-                }
-                if (ht->compute_alt) {
-                    ht->compute_alt(pass, passlen, sp, saltbinlen, computed);
-                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen))
-                        goto hot_match;
-                }
-                if (ht->compute_alt2) {
-                    ht->compute_alt2(pass, passlen, sp, saltbinlen, computed);
-                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen))
-                        goto hot_match;
-                }
-            }
+            if (hot_slen >= 0 && (ht->flags & HTF_SALTED) && item->rest) {
+                /* Salt-length-based extraction from rest data */
+                const char *rp = item->rest;
+                int rlen = item->restlen;
+                const unsigned char *hp;
+                int hplen, hsbinlen;
 
-            /* Try alternate salt split (covers empty-primary-salt case too) */
-            if (altsaltbinlen > 0 && altpass) {
-                if (ht->flags & HTF_SALTED) {
-                    hash_compute(ht, altpass, altpasslen, altsaltbin, altsaltbinlen, computed);
+                if (hot_slen == 0) {
+                    /* Zero-length salt: rest = password */
+                    hsbinlen = 0;
+                    hplen = decode_hex_password(rp, rlen, WS->vpassbuf, MAXLINE);
+                    if (hplen >= 0) hp = WS->vpassbuf;
+                    else { hp = (const unsigned char *)rp; hplen = rlen; }
+                } else if (hot_slen < rlen && rp[hot_slen] == ':') {
+                    /* salt = rest[0..hot_slen-1], password = rest[hot_slen+1..] */
+                    int sdec = decode_hex_password(rp, hot_slen,
+                                                   altsaltbin, MAX_SALT_BYTES);
+                    if (sdec >= 0) hsbinlen = sdec;
+                    else {
+                        hsbinlen = hot_slen;
+                        if (hsbinlen > MAX_SALT_BYTES) hsbinlen = MAX_SALT_BYTES;
+                        memcpy(altsaltbin, rp, hsbinlen);
+                    }
+                    const char *pp = rp + hot_slen + 1;
+                    int pplen = rlen - hot_slen - 1;
+                    hplen = decode_hex_password(pp, pplen, WS->vpassbuf, MAXLINE);
+                    if (hplen >= 0) hp = WS->vpassbuf;
+                    else { hp = (const unsigned char *)pp; hplen = pplen; }
+                } else {
+                    continue; /* salt_len doesn't match rest layout */
+                }
+
+                {
+                    const unsigned char *sp = hsbinlen > 0 ? altsaltbin : NULL;
+                    hash_compute(ht, hp, hplen, sp, hsbinlen, computed);
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
-                        char *ts = item->salt; int tsl = item->saltlen;
-                        char *tp = item->password; int tpl = item->passlen;
-                        item->salt = item->alt_salt; item->saltlen = item->alt_saltlen;
-                        item->password = item->alt_password; item->passlen = item->alt_passlen;
-                        item->alt_salt = ts; item->alt_saltlen = tsl;
-                        item->alt_password = tp; item->alt_passlen = tpl;
+                        /* Update item salt/password to match extracted values */
+                        if (hot_slen > 0) {
+                            item->salt = (char *)rp;
+                            item->saltlen = hot_slen;
+                            item->password = (char *)rp + hot_slen + 1;
+                            item->passlen = rlen - hot_slen - 1;
+                        } else {
+                            item->salt = NULL; item->saltlen = 0;
+                            item->password = (char *)rp;
+                            item->passlen = rlen;
+                        }
                         goto hot_match;
                     }
+                    if (hsbinlen > 0 && (ht->flags & HTF_COMPOSED) &&
+                        hsbinlen < MAX_SALT_BYTES) {
+                        colonsalt[0] = ':';
+                        memcpy(colonsalt + 1, altsaltbin, hsbinlen);
+                        hash_compute(ht, hp, hplen, colonsalt, hsbinlen + 1, computed);
+                        if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                            if (hot_slen > 0) {
+                                item->salt = (char *)rp;
+                                item->saltlen = hot_slen;
+                                item->password = (char *)rp + hot_slen + 1;
+                                item->passlen = rlen - hot_slen - 1;
+                            }
+                            goto hot_match;
+                        }
+                    }
+                    if (ht->compute_alt) {
+                        ht->compute_alt(hp, hplen, sp, hsbinlen, computed);
+                        if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                            if (hot_slen > 0) {
+                                item->salt = (char *)rp;
+                                item->saltlen = hot_slen;
+                                item->password = (char *)rp + hot_slen + 1;
+                                item->passlen = rlen - hot_slen - 1;
+                            }
+                            goto hot_match;
+                        }
+                    }
+                    if (ht->compute_alt2) {
+                        ht->compute_alt2(hp, hplen, sp, hsbinlen, computed);
+                        if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                            if (hot_slen > 0) {
+                                item->salt = (char *)rp;
+                                item->saltlen = hot_slen;
+                                item->password = (char *)rp + hot_slen + 1;
+                                item->passlen = rlen - hot_slen - 1;
+                            }
+                            goto hot_match;
+                        }
+                    }
                 }
-            }
-
-            /* Try unsalted interpretation */
-            if (!(ht->flags & HTF_SALTED)) {
+            } else if (hot_slen < 0 && !(ht->flags & HTF_SALTED)) {
+                /* Unsalted type */
                 hash_compute(ht, pass, passlen, NULL, 0, computed);
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen))
                     goto hot_match;
-            }
-
-            /* Try fullpass as password with empty salt (salted type, empty primary salt) */
-            if (item->fullpass && (ht->flags & HTF_SALTED) && saltbinlen == 0) {
-                const unsigned char *fp;
-                int fplen;
-                unsigned char *fpbuf = WS->vpassbuf;
-                int fdec = decode_hex_password(item->fullpass, item->fullpasslen,
-                                               fpbuf, MAXLINE);
-                if (fdec >= 0) { fp = fpbuf; fplen = fdec; }
-                else {
-                    fdec = decode_testvec_password(item->fullpass, item->fullpasslen,
-                                                   WS->testvec, TESTVECSIZE);
-                    if (fdec >= 0) { fp = WS->testvec; fplen = fdec; }
+                /* Try fullpass for unsalted types */
+                if (item->fullpass) {
+                    const unsigned char *fp;
+                    int fplen;
+                    int fdec = decode_hex_password(item->fullpass, item->fullpasslen,
+                                                   WS->vpassbuf, MAXLINE);
+                    if (fdec >= 0) { fp = WS->vpassbuf; fplen = fdec; }
                     else { fp = (const unsigned char *)item->fullpass; fplen = item->fullpasslen; }
-                }
-                hash_compute(ht, fp, fplen, NULL, 0, computed);
-                if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
-                    item->password = item->fullpass;
-                    item->passlen = item->fullpasslen;
-                    item->salt = NULL; item->saltlen = 0;
-                    item->fullpass = NULL;
-                    goto hot_match;
-                }
-            }
-
-            /* Try fullpass (no-salt, for unsalted hot list types) */
-            if (item->fullpass && !(ht->flags & HTF_SALTED)) {
-                const unsigned char *fp;
-                int fplen;
-                unsigned char *fpbuf = WS->vpassbuf;
-                int fdec = decode_hex_password(item->fullpass, item->fullpasslen,
-                                               fpbuf, MAXLINE);
-                if (fdec >= 0) { fp = fpbuf; fplen = fdec; }
-                else {
-                    fdec = decode_testvec_password(item->fullpass, item->fullpasslen,
-                                                   WS->testvec, TESTVECSIZE);
-                    if (fdec >= 0) { fp = WS->testvec; fplen = fdec; }
-                    else { fp = (const unsigned char *)item->fullpass; fplen = item->fullpasslen; }
-                }
-                hash_compute(ht, fp, fplen, NULL, 0, computed);
-                if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
-                    item->password = item->fullpass;
-                    item->passlen = item->fullpasslen;
-                    item->salt = NULL; item->saltlen = 0;
-                    item->fullpass = NULL;
-                    goto hot_match;
+                    hash_compute(ht, fp, fplen, NULL, 0, computed);
+                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                        item->password = item->fullpass;
+                        item->passlen = item->fullpasslen;
+                        item->salt = NULL; item->saltlen = 0;
+                        item->fullpass = NULL;
+                        goto hot_match;
+                    }
                 }
             }
             continue;
@@ -16168,13 +16662,13 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             item->verified = 1;
             item->match_type = ht;
             item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
-            *hot_type = hot_list[h];
+            *hot_type = hot_list[h].type_idx;
             *hot_iter = item->match_iter;
-            /* Promote matched type to front of hot list */
+            /* Promote matched entry to front of hot list */
             if (h > 0) {
-                int matched = hot_list[h];
-                memmove(&hot_list[1], &hot_list[0], h * sizeof(int));
-                hot_list[0] = matched;
+                struct hot_entry tmp = hot_list[h];
+                memmove(&hot_list[1], &hot_list[0], h * sizeof(struct hot_entry));
+                hot_list[0] = tmp;
             }
             return;
         }
@@ -16794,6 +17288,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         for (v = 0; v < Numtypes; v++) {
             struct hashtype *ht = &Hashtypes[v];
             if (!ht->verify) continue;
+            if (!(item->hash_class & ht->vclass)) continue;
             WS->verify_iter = 0;
             if (ht->verify(item->hashstr, item->hashlen, vpass, vpasslen)) {
                 item->verified = 1;
@@ -16801,7 +17296,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 item->match_iter = WS->verify_iter;
                 *hot_type = v;
                 *hot_iter = WS->verify_iter;
-                hot_list_add(hot_list, nhot, v);
+                hot_list_add(hot_list, nhot, v, -1);
                 return;
             }
         }
@@ -16814,6 +17309,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 for (v = 0; v < Numtypes; v++) {
                     struct hashtype *ht = &Hashtypes[v];
                     if (!ht->verify) continue;
+                    if (!(item->hash_class & ht->vclass)) continue;
                     WS->verify_iter = 0;
                     if (ht->verify(vhash, vhashlen, vpass, vpasslen)) {
                         item->verified = 1;
@@ -16821,7 +17317,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                         item->match_iter = WS->verify_iter;
                         *hot_type = v;
                         *hot_iter = WS->verify_iter;
-                        hot_list_add(hot_list, nhot, v);
+                        hot_list_add(hot_list, nhot, v, -1);
                         return;
                     }
                 }
@@ -16844,6 +17340,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 for (v = 0; v < Numtypes; v++) {
                     struct hashtype *ht = &Hashtypes[v];
                     if (!ht->verify) continue;
+                    if (!(item->hash_class & ht->vclass)) continue;
                     WS->verify_iter = 0;
                     if (ht->verify(vhash, vhashlen, ap, aplen2)) {
                         item->verified = 1;
@@ -16855,7 +17352,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                         item->saltlen = item->alt_saltlen;
                         item->password = item->alt_password;
                         item->passlen = item->alt_passlen;
-                        hot_list_add(hot_list, nhot, v);
+                        hot_list_add(hot_list, nhot, v, -1);
                         return;
                     }
                 }
@@ -16896,7 +17393,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                             item->match_iter = WS->verify_iter;
                             *hot_type = v;
                             *hot_iter = WS->verify_iter;
-                            hot_list_add(hot_list, nhot, v);
+                            hot_list_add(hot_list, nhot, v, -1);
                             return;
                         }
                     }
@@ -16916,7 +17413,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
                 *hot_type = cands[c] - Hashtypes;
                 *hot_iter = item->match_iter;
-                hot_list_add(hot_list, nhot, *hot_type);
+                hot_list_add(hot_list, nhot, *hot_type, -1);
                 return;
             }
         }
@@ -16934,7 +17431,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                     item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
                     *hot_type = cands[c] - Hashtypes;
                     *hot_iter = item->match_iter;
-                    hot_list_add(hot_list, nhot, *hot_type);
+                    hot_list_add(hot_list, nhot, *hot_type, item->saltlen);
                     return;
                 }
             }
@@ -16969,20 +17466,34 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     }
 
     /* Type name + iteration suffix (only when iter > 0, matches mdxfind) */
-    if (item->match_iter > 0)
-        pos += sprintf(outbuf + pos, "%sx%02d", item->match_type->name, item->match_iter);
-    else
-        pos += sprintf(outbuf + pos, "%s", item->match_type->name);
+    {
+        const char *tname = item->match_type->name;
+        int tlen = strlen(tname);
+        memcpy(outbuf + pos, tname, tlen);
+        pos += tlen;
+        if (item->match_iter > 0) {
+            outbuf[pos++] = 'x';
+            outbuf[pos++] = '0' + (item->match_iter / 10) % 10;
+            outbuf[pos++] = '0' + item->match_iter % 10;
+        }
+    }
 
     /* Space + hash (preserve original case) */
-    pos += sprintf(outbuf + pos, " %.*s", item->hashlen, item->hashstr);
+    outbuf[pos++] = ' ';
+    memcpy(outbuf + pos, item->hashstr, item->hashlen);
+    pos += item->hashlen;
 
     /* Salt if present (explicit or mode default) */
-    if (item->salt && item->saltlen > 0)
-        pos += sprintf(outbuf + pos, ":%.*s", item->saltlen, item->salt);
-    else if (ModeDefaultSalt && ModeDefaultSaltLen > 0 &&
-             item->match_type && (item->match_type->flags & HTF_SALTED))
-        pos += sprintf(outbuf + pos, ":%.*s", ModeDefaultSaltLen, ModeDefaultSalt);
+    if (item->salt && item->saltlen > 0) {
+        outbuf[pos++] = ':';
+        memcpy(outbuf + pos, item->salt, item->saltlen);
+        pos += item->saltlen;
+    } else if (ModeDefaultSalt && ModeDefaultSaltLen > 0 &&
+             item->match_type && (item->match_type->flags & HTF_SALTED)) {
+        outbuf[pos++] = ':';
+        memcpy(outbuf + pos, ModeDefaultSalt, ModeDefaultSaltLen);
+        pos += ModeDefaultSaltLen;
+    }
 
     /* Colon + password (with $HEX[] if needed, $TESTVEC[] verbatim) */
     outbuf[pos++] = ':';
@@ -16993,8 +17504,11 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
         int i;
         memcpy(outbuf + pos, "$HEX[", 5);
         pos += 5;
-        for (i = 0; i < passlen; i++)
-            pos += sprintf(outbuf + pos, "%02x", (unsigned char)pass[i]);
+        for (i = 0; i < passlen; i++) {
+            unsigned char c = (unsigned char)pass[i];
+            outbuf[pos++] = hextab_lc[(c >> 4) & 0xf];
+            outbuf[pos++] = hextab_lc[c & 0xf];
+        }
         outbuf[pos++] = ']';
     } else {
         memcpy(outbuf + pos, pass, passlen);
@@ -17038,7 +17552,8 @@ static void worker(void *dummy)
     struct batch *b;
     int outpos, errpos, i, olen;
     int hot_type, hot_iter;
-    int hot_list[HOT_LIST_MAX], nhot;
+    struct hot_entry hot_list[HOT_LIST_MAX];
+    int nhot;
     int hard[BATCH_SIZE];
     int nhard;
 
@@ -17062,7 +17577,7 @@ static void worker(void *dummy)
         errpos = 0;
         hot_type = b->hot_type;
         hot_iter = b->hot_iter;
-        memcpy(hot_list, b->hot_list, b->nhot * sizeof(int));
+        memcpy(hot_list, b->hot_list, b->nhot * sizeof(struct hot_entry));
         nhot = b->nhot;
         nhard = 0;
 
@@ -17072,7 +17587,9 @@ static void worker(void *dummy)
 
             if (b->items[i].verified) {
                 hot_list_add(hot_list, &nhot,
-                             b->items[i].match_type - Hashtypes);
+                             b->items[i].match_type - Hashtypes,
+                             (b->items[i].match_type->flags & HTF_SALTED)
+                                 ? b->items[i].saltlen : -1);
                 format_output(&b->items[i], WS->fmtbuf, &olen);
                 if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                     possess(OutLock);
@@ -17145,7 +17662,9 @@ static void worker(void *dummy)
 
         hard_ok:
             hot_list_add(hot_list, &nhot,
-                         item->match_type - Hashtypes);
+                         item->match_type - Hashtypes,
+                         (item->match_type->flags & HTF_SALTED)
+                             ? item->saltlen : -1);
             format_output(item, WS->fmtbuf, &olen);
             if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                 possess(OutLock);
@@ -17176,7 +17695,7 @@ static void worker(void *dummy)
             GlobalHotType = hot_type;
             GlobalHotIter = hot_iter;
         }
-        memcpy(GlobalHotList, hot_list, nhot * sizeof(int));
+        memcpy(GlobalHotList, hot_list, nhot * sizeof(struct hot_entry));
         GlobalNhot = nhot;
 
         free_batch(b);
@@ -17319,6 +17838,19 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
             item->hint = find_type_by_name("SYBASE-ASE");
         else if (_remaining >= 3 && hashstart[0] == '(' && hashstart[1] == 'G')
             item->hint = find_type_by_name("DOMINO6");
+        else if (item->hashlen == 137 && hashstart[0] == '2' && is_hex(hashstart + 1, 136))
+            item->hint = find_type_by_name("NETSCALER-SHA512");
+        else if (item->hashlen == 49 && hashstart[0] == '1' && is_hex(hashstart + 1, 48))
+            item->hint = find_type_by_name("NETSCALER");
+        else if (_remaining >= 10 && memcmp(hashstart, "$SHA$", 5) == 0)
+            item->hint = find_type_by_name("AUTHME");
+        else if (_remaining >= 8 && memcmp(hashstart, "md5$", 4) == 0)
+            item->hint = find_type_by_name("WERKZEUG-MD5");
+        else if (_remaining >= 11 && memcmp(hashstart, "sha256$", 7) == 0)
+            item->hint = find_type_by_name("WERKZEUG-SHA256");
+        else if (_remaining >= 68 && ncolons >= 2 && hashstart[64] == ':' &&
+                 is_hex(hashstart, 64) && *(colon_last - 1) == '=')
+            item->hint = find_type_by_name("NETWITNESS");
         else if (_remaining >= 35 && memcmp(hashstart, "md5", 3) == 0)
             item->hint = find_type_by_name("POSTGRESQL");
         else if (_remaining >= 10 && memcmp(hashstart, "$krb5pa$23$", 11) == 0)
@@ -17363,8 +17895,10 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
         /* Verify types with internal colons: use last colon as hash:password boundary */
         item->hashlen = colon_last - hashstart;
         if (item->hashlen < 2) return 0;
-        item->hashstr = batch_strdup(b, hashstart, item->hashlen);
-        if (!item->hashstr) return 0;
+        {
+            int hash_off = hashstart - line;
+            item->hashstr = item->line + hash_off;
+        }
         item->hash_is_uc = 0;
     } else {
         /* Validate hash is hex and even length */
@@ -17385,17 +17919,53 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
             if (!_found) return 0;
             /* Use last colon as hash:password boundary for multi-colon hash formats */
             item->hashlen = colon_last - hashstart;
-            item->hashstr = batch_strdup(b, hashstart, item->hashlen);
-            if (!item->hashstr) return 0;
+            {
+                int hash_off = hashstart - line;
+                item->hashstr = item->line + hash_off;
+            }
             item->hash_is_uc = 0;
             goto hash_parsed;
         }
-        item->hashstr = batch_strdup(b, hashstart, item->hashlen);
-        if (!item->hashstr) return 0;
+        /* Point into item->line instead of copying */
+        {
+            int hash_off = hashstart - line;
+            item->hashstr = item->line + hash_off;
+        }
         /* Check for uppercase hex */
-        item->hash_is_uc = has_uppercase_hex(hashstart, item->hashlen);
+        item->hash_is_uc = has_uppercase_hex(item->hashstr, item->hashlen);
     }
 hash_parsed:
+
+    /* Classify item for slow queue filtering */
+    if (item->hint) {
+        item->hash_class = item->hint->vclass;  /* trust the hint */
+    } else if (item->hashstr) {
+        const char *hs = item->hashstr;
+        int hl = item->hashlen;
+        if (hs[0] == '$' || hs[0] == '{' || hs[0] == '(') {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl >= 3 && (strncasecmp(hs, "0x0", 3) == 0 || strncasecmp(hs, "0xc", 3) == 0)) {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl >= 7 && strncmp(hs, "SCRYPT:", 7) == 0) {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl >= 4 && strncmp(hs, "md5", 3) == 0 && !is_hex(hs, 3)) {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl >= 7 && strncmp(hs, "sha256$", 7) == 0) {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl == 13 && is_des_salt_char(hs[0]) && is_des_salt_char(hs[1])) {
+            item->hash_class = HCLASS_DES | HCLASS_OTHER;
+        } else {
+            /* Check if the leading portion (before any colon) is hex */
+            const char *ic = memchr(hs, ':', hl);
+            int hexpart = ic ? (int)(ic - hs) : hl;
+            if (hexpart >= 16 && (hexpart & 1) == 0 && is_hex(hs, hexpart))
+                item->hash_class = HCLASS_HEX;
+            else
+                item->hash_class = HCLASS_OTHER;
+        }
+    } else {
+        item->hash_class = HCLASS_ALL;
+    }
 
     item->alt_salt = NULL;
     item->alt_saltlen = 0;
@@ -17404,52 +17974,71 @@ hash_parsed:
     item->fullpass = NULL;
     item->fullpasslen = 0;
 
+    /* Always store rest = everything after hash_hex: for hot list salt extraction.
+     * Points into item->line (already batch_strdup'd) to avoid an extra copy. */
+    {
+        int rest_off = (colon1 + 1) - line;
+        item->rest = item->line + rest_off;
+        item->restlen = end - (colon1 + 1);
+    }
+
     /* Verify types with internal colons: hash = p..colon_last, password = after colon_last */
     if (item->hint && item->hint->verify && ncolons > 1 &&
         !(item->hint_iter > 1 && item->hint->compute && item->hint->hashlen > 0)) {
         item->salt = NULL;
         item->saltlen = 0;
-        item->password = batch_strdup(b, colon_last + 1, end - (colon_last + 1));
-        item->passlen = end - (colon_last + 1);
-        if (!item->password) return 0;
+        {
+            int pw_off = (colon_last + 1) - line;
+            item->password = item->line + pw_off;
+            item->passlen = end - (colon_last + 1);
+        }
         return 1;
     }
 
     if (ncolons == 1) {
-        /* hash:password */
+        /* hash:password — rest IS the password */
         item->salt = NULL;
         item->saltlen = 0;
-        item->password = batch_strdup(b, colon1 + 1, end - (colon1 + 1));
-        item->passlen = end - (colon1 + 1);
+        item->password = item->rest;
+        item->passlen = item->restlen;
     } else if (ncolons == 2) {
         /* hash:salt:password — but might be hash:password_with_colon */
-        item->salt = batch_strdup(b, colon1 + 1, colon_last - (colon1 + 1));
+        item->salt = item->rest;
         item->saltlen = colon_last - (colon1 + 1);
-        item->password = batch_strdup(b, colon_last + 1, end - (colon_last + 1));
-        item->passlen = end - (colon_last + 1);
+        {
+            int pw_off = (colon_last + 1) - line;
+            item->password = item->line + pw_off;
+            item->passlen = end - (colon_last + 1);
+        }
         /* No-salt interpretation: entire rest is the password */
-        item->fullpass = batch_strdup(b, colon1 + 1, end - (colon1 + 1));
-        item->fullpasslen = end - (colon1 + 1);
+        item->fullpass = item->rest;
+        item->fullpasslen = item->restlen;
     } else {
         /* 3+ colons: ambiguous — create primary + alternate splits */
         const char *colon2 = memchr(colon1 + 1, ':', end - (colon1 + 1));
 
         /* Primary: short salt (colon1..colon2), password may have colons */
-        item->salt = batch_strdup(b, colon1 + 1, colon2 - (colon1 + 1));
+        item->salt = item->rest;
         item->saltlen = colon2 - (colon1 + 1);
-        item->password = batch_strdup(b, colon2 + 1, end - (colon2 + 1));
-        item->passlen = end - (colon2 + 1);
+        {
+            int pw_off = (colon2 + 1) - line;
+            item->password = item->line + pw_off;
+            item->passlen = end - (colon2 + 1);
+        }
 
         /* Alternate: long salt (colon1..colon_last), password after last colon */
         if (colon2 != colon_last) {
-            item->alt_salt = batch_strdup(b, colon1 + 1, colon_last - (colon1 + 1));
+            item->alt_salt = item->rest;
             item->alt_saltlen = colon_last - (colon1 + 1);
-            item->alt_password = batch_strdup(b, colon_last + 1, end - (colon_last + 1));
-            item->alt_passlen = end - (colon_last + 1);
+            {
+                int apw_off = (colon_last + 1) - line;
+                item->alt_password = item->line + apw_off;
+                item->alt_passlen = end - (colon_last + 1);
+            }
         }
         /* No-salt interpretation: entire rest is the password */
-        item->fullpass = batch_strdup(b, colon1 + 1, end - (colon1 + 1));
-        item->fullpasslen = end - (colon1 + 1);
+        item->fullpass = item->rest;
+        item->fullpasslen = item->restlen;
     }
     if (!item->password) return 0;
 
@@ -17474,6 +18063,53 @@ static void process_input(FILE *fp)
         if (len == 0) continue;
 
         Totallines++;
+
+        /* Fast path: when a hot type is known, skip full parse_line overhead.
+         * Just validate hex prefix + colon and set pointers into line copy. */
+        if (GlobalHotType >= 0) {
+            struct hashtype *ght = &Hashtypes[GlobalHotType];
+            int hexlen = ght->hashlen * 2;
+            if (len > hexlen + 1 && linebuf[hexlen] == ':' &&
+                is_hex(linebuf, hexlen)) {
+                struct workitem *item = &b->items[b->count];
+                memset(item, 0, sizeof(*item));
+                item->line = batch_strdup(b, linebuf, len);
+                if (!item->line) goto slow_parse;
+                item->linelen = len;
+                item->hashstr = item->line;
+                item->hashlen = hexlen;
+                item->hash_is_uc = 0;
+                item->hash_class = HCLASS_HEX;
+                item->rest = item->line + hexlen + 1;
+                item->restlen = len - hexlen - 1;
+                /* Primary split: find last colon for salt:password */
+                {
+                    const char *lc = NULL;
+                    int i;
+                    for (i = len - 1; i > hexlen; i--)
+                        if (linebuf[i] == ':') { lc = item->line + i; break; }
+                    if (lc && lc >= item->rest) {
+                        item->salt = item->rest;
+                        item->saltlen = lc - item->rest;
+                        item->password = (char *)lc + 1;
+                        item->passlen = item->restlen - (int)(lc - item->rest) - 1;
+                    } else {
+                        item->salt = NULL;
+                        item->saltlen = 0;
+                        item->password = item->rest;
+                        item->passlen = item->restlen;
+                    }
+                }
+                b->count++;
+                if (b->count >= BatchLimit ||
+                    b->bufused > BATCH_BUFSIZE - MAXLINE * 4) {
+                    enqueue_batch(b);
+                    b = alloc_batch();
+                }
+                continue;
+            }
+        }
+    slow_parse:
 
         /* Try to parse */
         if (!parse_line(linebuf, len, b, b->count)) {
