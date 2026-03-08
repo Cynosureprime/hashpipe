@@ -11,7 +11,7 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 ## Usage
 
 ```
-hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]
+hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]
 ```
 
 ### Options
@@ -33,6 +33,8 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfil
 **`-E F`** — Write unresolved lines to file, truncating if it exists (default: stderr)
 
 **`-s F`** — Append statistics to file.  Writes three tables at exit: hot list hits (per algorithm/salt-length pair), per-algorithm try counts, and per-algorithm solution counts.  Stats are collected unconditionally; this option controls whether they are written out.
+
+**`-L secs`** — Maximum estimated time (in seconds) for a single iterated verify operation (default: 1000.0, effectively unlimited).  When an input hash specifies an iteration count that would exceed this limit (estimated from benchmark rates), the verify is skipped.  Useful for preventing misidentified hashes with extreme iteration counts from causing long stalls.
 
 **`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
 
@@ -115,6 +117,11 @@ Benchmark specific types:
 hashpipe -b e1,e8-e12
 ```
 
+Limit expensive verify operations to 10 seconds estimated time:
+```bash
+hashpipe -L 10 potfile.txt
+```
+
 Write statistics to a file:
 ```bash
 hashpipe -o verified.txt -E unresolved.txt -s stats.txt potfile.txt
@@ -177,7 +184,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 889 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 923 pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -198,11 +205,11 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 889 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 923 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## Supported Hash Types
 
-hashpipe supports 889 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -322,7 +329,7 @@ hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, H
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 889 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all 923 registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10

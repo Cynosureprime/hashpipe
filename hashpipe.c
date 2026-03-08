@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.48 2026/03/07 10:28:16 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.64 2026/03/08 19:10:31 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -361,6 +361,21 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 
 int Maxiter = 128;
 int Iterstep = 128;
+double MaxVerifyLimit = 1000.0;  /* -L: max estimated seconds per verify (default large = effectively unlimited) */
+
+/* Cost check for iterated verify functions.
+ * Returns 1 if the estimated time exceeds MaxVerifyLimit (skip this hash).
+ * bench_rate = Hashtypes[type_idx].rate (h/s at bench_cost iterations)
+ * bench_cost = iteration count used in the HTV benchmark
+ * parsed_cost = iteration count parsed from the actual hash
+ * For scrypt: bench_cost and parsed_cost should be scrypt N values. */
+static inline int verify_cost_exceeds(long long bench_rate, double bench_cost,
+                                       double parsed_cost)
+{
+    if (bench_rate <= 0 || bench_cost <= 0.0) return 0;  /* no data */
+    double est = (parsed_cost / bench_cost) / (double)bench_rate;
+    return est > MaxVerifyLimit;
+}
 
 /* ---- Per-job workspace (heap-allocated, avoids stack overflow) ---- */
 /* ALL compute/verify functions MUST use workspace buffers, never stack locals.
@@ -390,6 +405,8 @@ struct workspace {
     void *saltbin, *altsaltbin, *colonsalt;
     /* Iteration count reported by verify functions (0 = not set) */
     int verify_iter;
+    /* Benchmark rate for current type (set before calling verify) */
+    long long cur_rate;
     /* iconv handle for UTF-7 conversion */
     iconv_t cd_utf7;
     /* Pre-allocated rhash contexts (avoid malloc/free per hash) */
@@ -581,197 +598,239 @@ struct hashtype {
 struct MapHashcat {
   short unsigned int hc, mdx;
 } Maphashcat[] = {
-    {0,     1},
-    {900,   3},
-    {5100,  1},
-    {100,   8},
-    {1300,  9},
-    {1400,  10},
+    {0,    1},
+    {10,   373},
+    {11,   373},  /* 11 | Joomla < 2.5.18  */
+    {12,   855},  /* 12 | PostgreSQL */
+    {20,   394},
+    {21,   394},
+    {22,   856},  /* 22 | Juniper NetScreen/SSG (ScreenOS) */
+    {23,   857},  /* 23 | Skype */
+    {24,   394},  /* 24 | SolarWinds Serv-U */
+    {30,   801},  /* md5(utf16le($pass).$salt) */
+    {40,   802},  /* md5($salt.utf16le($pass)) */
+    {50,   792},  /* HMAC-MD5 (key = $pass) */
+    {60,   214},
+    {70,   800},  /* md5(utf16le($pass)) */
+    {100,  8},
+    {101,  457},  /* 101 | nsldap, SHA-1(Base64), Netscape LDAP SHA */
+    {110,  405},
+    {111,  833},  /* 111 | nsldaps, SSHA-1(Base64), Netscape LDAP SSHA */
+    {112,  834},  /* 112 | Oracle S: Type (Oracle 11+) = sha1($pass.hex_decode($salt)) */
+    {120,  385},
+    {121,  414},
+    {122,  853},  /* 122 | macOS v10.4-10.6 SHA1($salt.$pass) */
+    {124,  385},  /* 124 | Django (SHA-1) */
+    {125,  887},  /* 125 | ArubaOS */
+    {130,  803},  /* sha1(utf16le($pass).$salt) */
+    {131,  850},  /* 131 | MSSQL (2000) */
+    {132,  851},  /* 132 | MSSQL (2005) */
+    {133,  858},  /* 133 | JudyJ[JOB_PEOPLESOFT] */
+    {140,  804},  /* sha1($salt.utf16le($pass)) */
+    {141,  859},  /* 141 | JudyJ[JOB_EPISERVER] 6.x < .NET 4 */
+    {150,  793},  /* HMAC-SHA1 (key = $pass) */
+    {160,  215},
+    {170,  727},
+    {200,  456},
+    {300,  259},
+    {400,  455},
+    {500,  511},  /* md5crypt */
+    {501,  885},  /* 501 | Juniper IVE */
+    {600,  841},  /* BLAKE2b-512 */
+    {610,  842},  /* BLAKE2b-512($pass.$salt) */
+    {620,  843},  /* BLAKE2b-512($salt.$pass) */
+    {900,  3},
+    {1000, 369},  /* NTLM */
+    {1100, 439},  /* 1100 | Domain Cached Credentials (DCC), MS Cache */
+    {1300, 9},
+    {1310, 831},  /* 1310 | sha224($pass.$salt) */
+    {1320, 832},  /* 1320 | sha224($salt.$pass) */
+    {1400, 10},
+    {1410, 413},
+    {1411, 835},  /* 1411 | SSHA-256(Base64), LDAP {SSHA256} */
+    {1420, 412},
+    {1421, 860},  /* 1421 | hMailServer */
+    {1430, 806},  /* sha256(utf16le($pass).$salt) */
+    {1440, 807},  /* sha256($salt.utf16le($pass)) */
+    {1441, 859},  /* 1441 | JudyJ[JOB_EPISERVER] 6.x >= .NET 4 */
+    {1450, 795},  /* HMAC-SHA256 (key = $pass) */
+    {1460, 217},
+    {1470, 805},  /* sha256(utf16le($pass)) */
+    {1500, 500},  /* DES */
+    {1600, 461},  /* APR1 */
+    {1700, 12},   /* SHA-512 */
+    {1710, 386},
+    {1711, 836},  /* 1711 | SSHA-512(Base64), LDAP {SSHA512} */
+    {1720, 388},
+    {1722, 854},  /* 1722 | macOS v10.7 SHA512($salt.$pass) */
+    {1730, 809},  /* sha512(utf16le($pass).$salt) */
+    {1731, 852},  /* 1731 | MSSQL (2012, 2014) */
+    {1740, 810},  /* sha512($salt.utf16le($pass)) */
+    {1750, 797},  /* HMAC-SHA512 (key = $pass) */
+    {1760, 218},
+    {1770, 808},  /* sha512(utf16le($pass)) */
+    {1800, 513},  /* sha512crypt */
+    {2100, 918},   /* 2100 | Domain Cached Credentials 2 (DCC2), MS Cache 2*/
+    {2400, 861},  /* 2400 | Cisco-PIX MD5 */
+    {2410, 862},  /* 2410 | Cisco-ASA MD5 */
+    {2500, 65535}, /* 2500 | WPA/WPA2 */
+    {2600, 1},    /* 2600 | md5(md5($pass)) -> MD5 iter 2 */
+    {2611, 31},
+    {2612, 886},  /* 2612 | PHPS */
+    {2630, 373},  /* 2630 | md5(md5($pass.$salt)) */
+    {2711, 31},
+    {2811, 367},  /* 2811 | MyBB 1.2+ */
+    {3000, 379},  /* LM */
+    {3100, 896},  /* 3100 | Oracle H: Type (Oracle 7+) */
+    {3200, 450},  /* bcrypt */
+    {3500, 303},  /* 3500 | md5(md5(md5($pass))) */
+    {3610, 356},  /* 3610 | md5(md5(md5($pass)).$salt) */
+    {3710, 441},
+    {3711, 863},  /* 3711 | MediaWiki B type */
+    {3730, 864},  /* 3730 | md5($salt1.strtoupper(md5($salt2.$pass))) */
+    {3800, 411},
+    {3910, 458},
+    {4010, 516},
+    {4110, 515},
+    {4300, 2},
+    {4400, 178},
+    {4410, 555},  /* 4410 | md5(sha1($pass).$salt) */
+    {4420, 443},  /* 4420 | md5(sha1($pass.$salt)) */
+    {4430, 817},  /* 4430  | md5(sha1($salt.$pass)) */
+    {4500, 8},
+    {4510, 310},  /* 4510 | sha1(sha1($pass).$salt) */
+    {4520, 520},
+    {4521, 579},  /* 4521 | Redmine -> SHA1SHA1PASSSALT */
+    {4522, 579},  /* 4522 | PunBB -> SHA1SHA1PASSSALT */
+    {4700, 160},
+    {4710, 587},  /* 4710 | sha1(md5($pass).$salt) */
+    {4711, 308},  /* 4711 | Huawei sha1(md5($pass).$salt) */
+    {4800, 888},  /* 4800 | iSCSI CHAP authentication, MD5(CHAP) */
+    {4900, 395},
+    {5000, 894},  /* 5000 | sha1(sha1($salt.$pass.$salt)) */
+    {5100, 1},
+    {5200, 919},   /* 5200 | Password Safe v3 */
+    {5300, 920},   /* 5300 | IKE-PSK MD5 */
+    {5400, 921},   /* 5400 | IKE-PSK SHA1 */
+    {5500, 897},  /* 5500 | NetNTLMv1 */
+    {5600, 898},  /* 5600 | NetNTLMv2 */
+    {5700, 865},  /* 5700 | Cisco-IOS type 4 (SHA256) */
+    {5720, 866},  /* 5720 | Cisco-ISE (SHA256, binary salt, 129 iter) */
+    {5800, 867},  /* 5800 | Samsung Android Password/PIN  */
+    {6000, 118},
+    {6050, 798},  /* 6050 | HMAC-RIPEMD160 (key = $pass) */
+    {6060, 211},  /* 6060 | HMAC-RIPEMD160 (key = $salt) */
+    {6100, 5},
+    {6211, 65535}, /* truecrypt */
+    {6212, 65535},
+    {6213, 65535},
+    {6221, 65535},
+    {6222, 65535},
+    {6223, 65535},
+    {6231, 65535},
+    {6232, 65535},
+    {6233, 65535},
+    {6241, 65535},
+    {6242, 65535},
+    {6243, 65535},
+    {6300, 868},  /* 6300 | AIX {smd5}  */
+    {6400, 870},  /* 6400 | AIX {ssha256} */
+    {6500, 871},  /* 6500 | AIX {ssha512}  */
+    {6600, 65535}, /* 6600 | 1Password, agilekeychain */
+    {6700, 869},  /* 6700 | AIX {ssha1} */
+    {6800, 899},  /* 6800 | LastPass + LastPass sniffed */
+    {6900, 13},
+    {7000, 900},  /* 7000 | FortiGate (FortiOS) */
+    {7100, 533},  /* 7100 | OSX v10.8+ (JudyJ[JOB_PKCS5S2]-SHA512) */
+    {7200, 533},  /* 7200 | GRUB 2 (PBKDF2-SHA512 via $ml$ conversion) */
+    {7300, 872},  /* 7300 | IPMI2 RAKP HMAC-SHA1 */
+    {7350, 873},  /* 7350 | IPMI2 RAKP HMAC-MD5 */
+    {7400, 512},  /* sha256crypt */
+    {7401, 875},  /* 7401 | MySQL $A$ (sha256crypt) */
+    {7500, 874},  /* 7500 | Kerberos 5 AS-REQ Pre-Auth etype 23 */
+    {7700, 922},  /* 7700 | SAP CODVN B (BCODE) */
+    {7701, 923},  /* 7701 | SAP CODVN B (BCODE) 4-byte */
+    {7800, 924},  /* 7800 | SAP CODVN F/G (PASSCODE) */
+    {7801, 925},  /* 7801 | SAP CODVN F/G (PASSCODE) 5-byte */
+    {7900, 876},  /* 7900 | JudyJ[JOB_DRUPAL7] */
+    {8000, 877},  /* 8000 | Sybase ASE */
+    {8100, 878},  /* 8100 | Citrix NetScaler  */
+    {8200, 65535}, /* 8200 | 1Password, cloudkeychain */
+    {8300, 879},  /* 8300 | DNSSEC (NSEC3) */
+    {8400, 880},  /* 8400 | JudyJ[JOB_WBB3] */
+    {8500, 881},  /* RACF */
+    {8501, 926},  /* 8501 | AS/400 DES */
+    {8600, 882},  /* 8600 | Lotus Notes/Domino 5  */
+    {8700, 883},  /* 8700 | Lotus Notes/Domino 6 */
+    {8800, 65535}, /* 8800 | Android FDE <= 4.3 */
+    {8900, 884},  /* scrypt */
+    {9000, 65535}, /* 9000 | Password Safe v2 */
+    {9100, 901},  /* 9100 | Lotus Notes/Domino 8 */
+    {9200, 529},  /* 9200 | Cisco-IOS $8$ (JudyJ[JOB_PKCS5S2]-SHA256) */
+    {9300, 917},   /* 9300 | Cisco-IOS $9$ (scrypt) */
+    {9400, 65535}, /* 9400 | MS Office 2007  */
+    {9500, 65535}, /* 9500 | MS Office 2010 */
+    {9600, 65535}, /* 9600 | MS Office 2013  */
+    {9700, 65535}, /* MS office */
+    {9710, 65535}, /* MS office */
+    {9720, 65535}, /* MS office */
+    {9800, 65535}, /* MS office */
+    {9810, 65535}, /* MS office */
+    {9820, 65535}, /* MS office */
+    {9900, 264},
+    {10000, 530},  /* 10000 | Django (JudyJ[JOB_PKCS5S2]-SHA256) */
+    {10100, 902},  /* SipHash */
+    {10200, 903},  /* CRAM-MD5 */
+    {10300, 904},   /* 10300 | SAP CODVN H (PWDSALTEDHASH) iSSHA-1 */
+    {10400, 65535}, /* 10400 | PDF 1.1 - 1.3 (Acrobat 2 - 4) */
+    {10410, 65535}, /* 10410 | PDF 1.1 - 1.3 (Acrobat 2 - 4), collider #1 */
+    {10420, 65535}, /* 10420 | PDF 1.1 - 1.3 (Acrobat 2 - 4), collider #2 */
+    {10500, 65535}, /* 10500 | PDF 1.4 - 1.6 (Acrobat 5 - 8) */
+    {10600, 65535}, /* 10600 | PDF 1.7 Level 3 (Acrobat 9) */
+    {10700, 65535}, /* 10700 | PDF 1.7 Level 8 (Acrobat 10 - 11) */
     {10800, 11},
-    {1700,  12},    /* SHA-512 */
-    {5000,  894},   /* 5000 | sha1(sha1($salt.$pass.$salt)) */
-    {600,   841},   /* BLAKE2b-512 */
-    {610,   842},   /* BLAKE2b-512($pass.$salt) */
-    {620,   843},   /* BLAKE2b-512($salt.$pass) */
-    {10100, 65535}, /* SIPhash */
-    {6000,  118},
-    {6100,  5},
-    {6900,  13},
-    {11700, 427},
-    {11780, 428},
-    {10,    373},
-    {20,    394},
-    {30,    801},   /* md5(utf16le($pass).$salt) */
-    {40,    802},   /* md5($salt.utf16le($pass)) */
-    {3800,  411},
-    {3710,  441},
-    {4010,  516},
-    {4110,  515},
-    {2600,  1},     /* md5(md5($pass)) -> MD5 iter 2 */
-    {3910,  458},
-    {4300,  2},
-    {4400,  178},
-    {110,   405},
-    {120,   385},
-    {130,   803},   /* sha1(utf16le($pass).$salt) */
-    {140,   804},   /* sha1($salt.utf16le($pass)) */
-    {170,   727},
-    {4500,  8},
-    {4520,  520},
-    {4700,  160},
-    {4900,  395},
-    {14400, 521},   /* sha1(CX) */
-    {1410,  413},
-    {1420,  412},
-    {1430,  806},   /* sha256(utf16le($pass).$salt) */
-    {1440,  807},   /* sha256($salt.utf16le($pass)) */
-    {1710,  386},
-    {1720,  388},
-    {1730,  809},   /* sha512(utf16le($pass).$salt) */
-    {1740,  810},   /* sha512($salt.utf16le($pass)) */
-    {50,    792},   /* HMAC-MD5 (key = $pass) */
-    {60,    214},
-    {150,   793},   /* HMAC-SHA1 (key = $pass) */
-    {160,   215},
-    {1450,  795},   /* HMAC-SHA256 (key = $pass) */
-    {1460,  217},
-    {1750,  797},   /* HMAC-SHA512 (key = $pass) */
-    {1760,  218},
-    {14000, 848},   /* DES (PT = $salt, key = $pass) */
-    {14100, 849},   /* 3DES (PT = $salt, key = $pass) */
-    {14900, 65535},
-    {15400, 65535}, /* ChaCha20 */
-    {400,   455},
-    {8900,  884},   /* scrypt */
-    {11900, 531},   /* PBKDF2-HMAC-MD5 */
-    {12000, 532},   /* PBKDF2-HMAC-SHA1 */
-    {10900, 530},   /* PBKDF2-HMAC-SHA256 */
-    {12100, 533},   /* PBKDF2-HMAC-SHA512 */
-    {23,    857},   /* Skype */
-    {24,    394},   /* SolarWinds Serv-U */
-    {2500,  65535}, /* WPA/WPA2 */
-    {4800,  888},   /* iSCSI CHAP authentication */
-    {5300,  65535}, /* IKE-PSK MD5 */
-    {5400,  65535}, /* IKE-PSK SHA1 */
-    {5500,  65535}, /* NetNTLMv1 */
-    {5600,  65535}, /* NetNTLMv2 */
-    {7300,  872},   /* IPMI2 RAKP HMAC-SHA1 */
-    {7350,  873},   /* IPMI2 RAKP HMAC-MD5 */
-    {7500,  874},   /* Kerberos 5 AS-REQ Pre-Auth etype 23 */
-    {8300,  879},   /* DNSSEC (NSEC3) */
-    {10200, 65535}, /* CRAM-MD5 */
-    {11100, 65535}, /* PostgreSQL CRAM (MD5) */
-    {11200, 65535}, /* MySQL CRAM (SHA1) */
-    {11400, 65535}, /* SIP digest authentication (MD5) */
-    {13100, 65535}, /* Kerberos 5 TGS-REP etype 23 */
-    {121,   414},
-    {2611,  31},
-    {2711,  31},
-    {2811,  367},   /* MyBB 1.2+ */
-    {8400,  880},   /* WBB3 */
-    {11,    373},   /* Joomla < 2.5.18 */
-    {2612,  886},   /* PHPS */
-    {21,    394},
-    {11000, 394}, /* PrestaShop - md5($salt.$pass) */
-    {124,   385},   /* Django (SHA-1) */
-    {125,   887},   /* ArubaOS */
-    {10000, 530},   /* Django (PBKDF2-SHA256) */
-    {3711,  863},   /* MediaWiki B type */
-    {13900, 65535}, /* OpenCart */
-    {4521,  579},   /* Redmine -> SHA1SHA1PASSSALT */
-    {4522,  579},   /* PunBB -> SHA1SHA1PASSSALT */
-    {12001, 534},   /* Atlassian (PBKDF2-HMAC-SHA1) */
-    {12,    855},   /* PostgreSQL */
-    {22,    856},   /* Juniper NetScreen/SSG */
-    {131,   850},   /* MSSQL (2000) */
-    {132,   851},   /* MSSQL (2005) */
-    {1731,  852},   /* MSSQL (2012, 2014) */
-    {200,   456},
-    {300,   259},
-    {3100,  65535}, /* Oracle H: Type (Oracle 7+) */
-    {112,   834},   /* Oracle S: Type (Oracle 11+) */
-    {12300, 65535}, /* Oracle T: Type (Oracle 12+) */
-    {8000,  877},   /* Sybase ASE */
-    {1441,  859},   /* Episerver 6.x >= .NET 4 */
-    {1600,  461},   /* APR1 */
-    {12600, 65535}, /* ColdFusion 10+ */
-    {1421,  860},   /* hMailServer */
-    {101,   457},   /* nsldap, SHA-1(Base64) */
-    {111,   833},   /* nsldaps, SSHA-1(Base64) */
-    {1411,  835},   /* SSHA-256(Base64) */
-    {1711,  836},   /* SSHA-512(Base64) */
-    {15000, 65535}, /* FileZilla Server */
+    {10810, 811},  /* 10810 | sha384($pass.$salt) */
+    {10820, 812},  /* 10820 | sha384($salt.$pass) */
+    {10830, 814},  /* 10830 | sha384(utf16le($pass).$salt) */
+    {10840, 815},  /* 10840 | sha384($salt.utf16le($pass)) */
+    {10870, 813},  /* 10870 | sha384(utf16le($pass)) */
+    {10900, 530},  /* 10900 | JudyJ[JOB_PKCS5S2]-HMAC-SHA256 */
+    {10901, 905},  /* 10901 | RedHat 389-DS LDAP (PBKDF2-HMAC-SHA256) */
+    {11000, 394},  /* 11000 | PrestaShop - md5($salt.$pass) */
+    {11100, 906},   /* 11100 | PostgreSQL CRAM (MD5) */
+    {11200, 907},   /* 11200 | MySQL CRAM (SHA1) */
+    {11300, 65535}, /* 11300 | Bitcoin/Litecoin wallet.dat */
+    {11400, 65535}, /* 11400 | SIP digest authentication (MD5) */
     {11500, 65535}, /* CRC32 */
-    {3000,  379},   /* LM */
-    {1000,  369},   /* NTLM */
-    {1100,  439},   /* DCC, MS Cache */
-    {2100,  65535}, /* DCC2, MS Cache 2 */
-    {15300, 65535}, /* DPAPI masterkey */
-    {12800, 65535}, /* MS-AzureSync */
-    {1500,  500},   /* DES */
-    {12400, 500},   /* Extended DES */
-    {500,   511},   /* md5crypt */
-    {3200,  450},   /* bcrypt */
-    {7400,  512},   /* sha256crypt */
-    {7401,  875},   /* MySQL $A$ (sha256crypt) */
-    {7900,  876},   /* Drupal7 */
-    {1800,  513},   /* sha512crypt */
-    {122,   853},   /* macOS v10.4-10.6 */
-    {1722,  854},   /* macOS v10.7 */
-    {7100,  533},   /* OSX v10.8+ (PBKDF2-SHA512) */
-    {6300,  868},   /* AIX {smd5} */
-    {6700,  869},   /* AIX {ssha1} */
-    {6400,  870},   /* AIX {ssha256} */
-    {6500,  871},   /* AIX {ssha512} */
-    {2400,  861},   /* Cisco-PIX MD5 */
-    {2410,  862},   /* Cisco-ASA MD5 */
-    {5700,  865},   /* Cisco-IOS type 4 (SHA256) */
-    {5720,  866},   /* Cisco-ISE (SHA256, binary salt) */
-    {9200,  529},   /* Cisco-IOS $8$ (PBKDF2-SHA256) */
-    {9300,  65535}, /* Cisco-IOS $9$ (scrypt) */
-    {501,   885},   /* Juniper IVE */
-    {15100, 65535}, /* Juniper/NetBSD sha1crypt */
-    {7000,  65535}, /* FortiGate (FortiOS) */
-    {5800,  867},   /* Samsung Android Password/PIN */
-    {13800, 65535}, /* Windows Phone 8+ */
-    {8100,  878},   /* Citrix NetScaler */
-    {8500,  881},   /* RACF */
-    {7200,  65535}, /* GRUB 2 */
-    {9900,  264},
-    /* 125 mapped to ARUBAOS(887) above */
-    {7700,  65535}, /* SAP CODVN B */
-    {7800,  65535}, /* SAP CODVN F/G */
-    {1030,  65535}, /* SAP CODVN H */
-    {8600,  882},   /* Lotus Notes/Domino 5 */
-    {8700,  883},   /* Lotus Notes/Domino 6 */
-    {9100,  65535}, /* Lotus Notes/Domino 8 */
-    {133,   858},   /* PeopleSoft */
-    {141,   859},   /* Episerver 6.x < .NET 4 */
-    {13500, 65535}, /* PeopleSoft PS_TOKEN */
-    {11600, 65535}, /* 7-Zip */
-    {12500, 65535}, /* RAR3-hp */
-    {13000, 65535}, /* RAR5 */
-    {13200, 65535}, /* AxCrypt */
-    {13300, 65535}, /* AxCrypt in-memory SHA1 */
-    {13600, 65535}, /* WinZip */
-    {14700, 65535}, /* iTunes backup < 10.0 */
-    {14800, 65535}, /* iTunes backup >= 10.0 */
-    {6211,  65535}, /* TrueCrypt */
-    {6212,  65535},
-    {6213,  65535},
-    {6221,  65535},
-    {6222,  65535},
-    {6223,  65535},
-    {6231,  65535},
-    {6232,  65535},
-    {6233,  65535},
-    {6241,  65535},
-    {6242,  65535},
-    {6243,  65535},
-    {8800,  65535}, /* Android FDE <= 4.3 */
-    {12900, 65535}, /* Android FDE (Samsung DEK) */
-    {12200, 65535}, /* eCryptfs */
-    {13711, 65535}, /* VeraCrypt */
+    {11600, 65535}, /* 11600 | 7-Zip  */
+    {11700, 427},
+    {11750, 837},  /* 11750 | HMAC-Streebog-256 (key = $pass) */
+    {11760, 838},  /* 11760 | HMAC-Streebog-256 (key = $salt) */
+    {11780, 428},
+    {11800, 428},  /* 11800 | GOST R 34.11-2012 (Streebog) 512-bit */
+    {11850, 839},  /* 11850 | HMAC-Streebog-512 (key = $pass) */
+    {11860, 840},  /* 11860 | HMAC-Streebog-512 (key = $salt) */
+    {11900, 531},  /* 11900 | JudyJ[JOB_PKCS5S2]-HMAC-MD5 */
+    {12000, 532},  /* 12000 | JudyJ[JOB_PKCS5S2]-HMAC-SHA1 */
+    {12001, 534},  /* 12001 | Atlassian (JudyJ[JOB_PKCS5S2]-HMAC-SHA1)  */
+    {12100, 533},  /* 12100 | JudyJ[JOB_PKCS5S2]-HMAC-SHA512 */
+    {12150, 908},   /* 12150 | Apache Shiro 1 SHA-512 */
+    {12200, 909},   /* 12200 | eCryptfs */
+    {12300, 910},   /* 12300 | Oracle T: Type (Oracle 12+) */
+    {12400, 500},  /* Extended DES */
+    {12500, 65535}, /* 12500 | RAR3-hp */
+    {12600, 911},   /* 12600 | ColdFusion 10+ */
+    {12700, 65535}, /* 12700 | Blockchain, My Wallet */
+    {12800, 912},   /* 12800 | MS-AzureSync  PBKDF2-HMAC-SHA256 */
+    {12900, 913},   /* 12900 | Android FDE (Samsung DEK) */
+    {13000, 65535}, /* 13000 | RAR5  */
+    {13100, 914},   /* 13100 | Kerberos 5 TGS-REP etype 23 */
+    {13200, 915},   /* 13200 | AxCrypt */
+    {13300, 916},   /* 13300 | AxCrypt in-memory SHA1  */
+    {13400, 65535}, /* 13400 | KeePass 1 (AES/Twofish) and KeePass 2 (AES) */
+    {13500, 927},  /* 13500 | PeopleSoft PS_TOKEN */
+    {13600, 65535}, /* 13600 | WinZip */
+    {13711, 65535}, /* Veracrypt */
     {13712, 65535},
     {13713, 65535},
     {13721, 65535},
@@ -789,117 +848,80 @@ struct MapHashcat {
     {13761, 65535},
     {13762, 65535},
     {13763, 65535},
-    {14600, 65535}, /* LUKS */
-    {9700,  65535}, /* MS Office */
-    {9710,  65535},
-    {9720,  65535},
-    {9800,  65535},
-    {9810,  65535},
-    {9820,  65535},
-    {9400,  65535}, /* MS Office 2007 */
-    {9500,  65535}, /* MS Office 2010 */
-    {9600,  65535}, /* MS Office 2013 */
-    {10400, 65535}, /* PDF 1.1-1.3 */
-    {10410, 65535},
-    {10420, 65535},
-    {10500, 65535}, /* PDF 1.4-1.6 */
-    {10600, 65535}, /* PDF 1.7 Level 3 */
-    {10700, 65535}, /* PDF 1.7 Level 8 */
-    {9000,  65535}, /* Password Safe v2 */
-    {5200,  65535}, /* Password Safe v3 */
-    {6800,  65535}, /* LastPass */
-    {6600,  65535}, /* 1Password, agilekeychain */
-    {8200,  65535}, /* 1Password, cloudkeychain */
-    {11300, 65535}, /* Bitcoin/Litecoin wallet.dat */
-    {12700, 65535}, /* Blockchain, My Wallet */
-    {15200, 65535}, /* Blockchain, My Wallet, V2 */
-    {13400, 65535}, /* KeePass */
-    {15500, 65535}, /* JKS Java Key Store */
-    {15600, 65535}, /* Ethereum Wallet, PBKDF2-SHA256 */
-    {15700, 65535}, /* Ethereum Wallet, SCRYPT */
-    {11800, 428},   /* GOST R 34.11-2012 (Streebog) 512-bit */
-    {17300, 88},    /* SHA3-224 */
-    {17400, 89},    /* SHA3-256 */
-    {17500, 90},    /* SHA3-384 */
-    {17600, 91},    /* SHA3-512 */
-    {17700, 84},    /* Keccak-224 */
-    {17800, 85},    /* Keccak-256 */
-    {17900, 86},    /* Keccak-384 */
-    {18000, 87},    /* Keccak-512 */
-    {3500,  303},   /* md5(md5(md5($pass))) */
-    {4410,  555},   /* md5(sha1($pass).$salt) */
-    {4710,  587},   /* sha1(md5($pass).$salt) */
-    {18500, 287},   /* sha1(md5(md5($pass))) */
-    {20710, 382},   /* sha256(sha256($pass).$salt) */
-    {20720, 523},   /* sha256($salt.sha256($pass)) */
-    {25600, 451},   /* bcrypt(md5($pass)) */
-    {25800, 452},   /* bcrypt(sha1($pass)) */
-    {30600, 577},   /* bcrypt(sha256($pass)) */
-    {32410, 387},   /* sha512(sha512($pass).$salt) */
-    {32800, 188},   /* md5(sha1(md5($pass))) */
-    {34500, 766},   /* sha224(sha1($pass)) */
-    {34600, 29},    /* MD6-256 */
-    {6060,  211},   /* HMAC-RIPEMD160 (key = $salt) */
-    {30420, 36},    /* DANE RFC7929/RFC8162 SHA2-256 */
-    {34400, 9},     /* sha224(sha224($pass)) */
-    {2630,  373},   /* md5(md5($pass.$salt)) */
-    {3730,  864},   /* md5($salt1.strtoupper(md5($salt2.$pass))) */
-    {3610,  356},   /* md5(md5(md5($pass)).$salt) */
-    {4420,  443},   /* md5(sha1($pass.$salt)) */
-    {4510,  310},   /* sha1(sha1($pass).$salt) */
-    {4711,  308},   /* Huawei sha1(md5($pass).$salt) */
-    {20730, 413},   /* sha256(sha256($pass.$salt)) */
-    {20800, 164},   /* sha256(md5($pass)) */
-    {20900, 442},   /* md5(sha1($pass).md5($pass).sha1($pass)) */
-    {21000, 38},    /* BitShares sha512(sha512_bin($pass)) */
-    {21100, 469},   /* sha1(md5($pass.$salt)) */
-    {21200, 440},   /* md5(sha1($salt).md5($pass)) */
-    {21300, 528},   /* md5($salt.sha1($salt.$pass)) */
-    {21400, 36},    /* sha256(sha256_bin($pass)) */
+    {13800, 928},  /* 13800 | Windows Phone 8+ PIN/password */
+    {13900, 65535}, /* 13900 | OpenCart */
+    {14000, 848},  /* 14000 | DES (PT = $salt, key = $pass) */
+    {14100, 849},  /* 14100 | 3DES (PT = $salt, key = $pass) */
+    {14200, 929},  /* 14200 | RACF KDFAES */
+    {14400, 521},  /* 14400 | sha1(CX) */
+    {14600, 65535}, /* 14600 | LUKS */
+    {14700, 65535}, /* 14700 | iTunes backup < 10.0 */
+    {14800, 65535}, /* 14800 | iTunes backup >= 10.0 */
+    {14900, 65535},
+    {15000, 65535}, /* 15000 | FileZilla Server >= 0.9.55 */
+    {15100, 65535}, /* 15100 | Juniper/NetBSD sha1crypt */
+    {15200, 65535}, /* 15200 | Blockchain, My Wallet, V2 */
+    {15300, 65535}, /* 15300 | DPAPI masterkey file v1 and v2  */
+    {15400, 65535}, /* ChaCha20 */
+    {15500, 65535}, /* 15500 | JKS Java Key Store Private Keys (SHA1) */
+    {15600, 65535}, /* 15600 | Ethereum Wallet, JudyJ[JOB_PKCS5S2]-HMAC-SHA256 */
+    {15700, 65535}, /* 15700 | Ethereum Wallet, SCRYPT */
+    {17300, 88},   /* 17300 | SHA3-224 */
+    {17400, 89},   /* 17400 | SHA3-256 */
+    {17500, 90},   /* 17500 | SHA3-384 */
+    {17600, 91},   /* 17600 | SHA3-512 */
+    {17700, 84},   /* 17700 | Keccak-224 */
+    {17800, 85},   /* 17800 | Keccak-256 */
+    {17900, 86},   /* 17900 | Keccak-384 */
+    {18000, 87},   /* 18000 | Keccak-512 */
+    {18500, 287},  /* 18500 | sha1(md5(md5($pass))) */
+    {20710, 382},  /* 20710 | sha256(sha256($pass).$salt) */
+    {20711, 891},  /* 20711 | AuthMe sha256 ($SHA$salt$hash) */
+    {20712, 892},  /* 20712 | RSA NetWitness (UCHASH:BASE64SALT) */
+    {20720, 523},  /* 20720 | sha256($salt.sha256($pass)) */
+    {20730, 413},  /* 20730 | sha256(sha256($pass.$salt)) */
+    {20800, 164},  /* 20800 | sha256(md5($pass)) */
+    {20900, 442},  /* 20900 | md5(sha1($pass).md5($pass).sha1($pass)) */
+    {21000, 38},   /* 21000 | BitShares sha512(sha512_bin($pass)) */
+    {21100, 469},  /* 21100 | sha1(md5($pass.$salt)) */
+    {21200, 440},  /* 21200 | md5(sha1($salt).md5($pass)) */
+    {21300, 528},  /* 21300 | md5($salt.sha1($salt.$pass)) */
+    {21310, 822},  /* 21310 | md5($salt.sha1($pepper.$pass)) */
+    {21400, 36},   /* 21400 | sha256(sha256_bin($pass)) */
+    {21420, 826},  /* 21420 | sha256($salt.sha256_raw($pass)) */
+    {21900, 821},  /* 21900 | md5(md5($pass.$salt).$pepper) */
+    {22200, 893},  /* 22200 | Citrix NetScaler SHA512 */
+    {22300, 825},  /* 22300 | sha256($salt.$pass.$salt) */
+    {24300, 823},  /* 24300 | sha1($salt.sha1($pass.$salt)) */
+    {25600, 451},  /* 25600 | bcrypt(md5($pass)) */
+    {25800, 452},  /* 25800 | bcrypt(sha1($pass)) */
+    {29000, 824},  /* 29000 | sha1($salt.sha1(utf16le($user):utf16le($pass))) */
+    {30000, 889},  /* 30000 | Python Werkzeug MD5 (HMAC-MD5 key=$salt) */
+    {30120, 890},  /* 30120 | Python Werkzeug SHA256 (HMAC-SHA256 key=$salt) */
+    {30420, 36},   /* 30420 | DANE RFC7929/RFC8162 SHA2-256 (truncated SHA256RAW) */
+    {30500, 820},  /* 30500 | md5(md5($salt).md5(md5($pass))) */
+    {30600, 577},  /* 30600 | bcrypt(sha256($pass)) */
     {30700, 65535}, /* Anope IRC Services — not PBKDF2 */
-    {32420, 510},   /* sha512(sha512_bin($pass).$salt) */
-    {33660, 213},   /* HMAC-RIPEMD320 (key = $salt) */
-    {70,    800},   /* md5(utf16le($pass)) */
-    {1470,  805},   /* sha256(utf16le($pass)) */
-    {1770,  808},   /* sha512(utf16le($pass)) */
-    {6050,  798},   /* HMAC-RIPEMD160 (key = $pass) */
-    {33650, 799},   /* HMAC-RIPEMD320 (key = $pass) */
-    {10810, 811},   /* sha384($pass.$salt) */
-    {10820, 812},   /* sha384($salt.$pass) */
-    {10870, 813},   /* sha384(utf16le($pass)) */
-    {10830, 814},   /* sha384(utf16le($pass).$salt) */
-    {10840, 815},   /* sha384($salt.utf16le($pass)) */
-    {33600, 816},   /* ripemd320($pass) */
-    {4430,  817},   /* md5(sha1($salt.$pass)) */
-    {33100, 818},   /* md5($salt.md5($pass).$salt) */
-    {31700, 819},   /* md5(md5(md5($pass).$salt).$pepper) */
-    {30500, 820},   /* md5(md5($salt).md5(md5($pass))) */
-    {21900, 821},   /* md5(md5($pass.$salt).$pepper) */
-    {21310, 822},   /* md5($salt.sha1($pepper.$pass)) */
-    {24300, 823},   /* sha1($salt.sha1($pass.$salt)) */
-    {29000, 824},   /* sha1($salt.sha1(utf16le($user):utf16le($pass))) */
-    {22300, 825},   /* sha256($salt.$pass.$salt) */
-    {21420, 826},   /* sha256($salt.sha256_raw($pass)) */
-    {32600, 827},   /* whirlpool($salt.$pass.$salt) */
-    {33300, 828},   /* HMAC-BLAKE2S */
-    {34200, 829},   /* MurmurHash64A */
-    {34201, 830},   /* MurmurHash64A (seed=0) */
-    {1310,  831},   /* sha224($pass.$salt) */
-    {1320,  832},   /* sha224($salt.$pass) */
-    {11750, 837},   /* HMAC-Streebog-256 (key = $pass) */
-    {11760, 838},   /* HMAC-Streebog-256 (key = $salt) */
-    {11850, 839},   /* HMAC-Streebog-512 (key = $pass) */
-    {11860, 840},   /* HMAC-Streebog-512 (key = $salt) */
-    {31000, 844},   /* BLAKE2s-256 */
-    {34800, 845},   /* BLAKE2b-256 */
-    {34810, 846},   /* BLAKE2b-256($pass.$salt) */
-    {34820, 847},   /* BLAKE2b-256($salt.$pass) */
-    {20711, 891},   /* AuthMe sha256 ($SHA$salt$hash) */
-    {20712, 892},   /* RSA NetWitness (sha256(SHA256UC(pass).b64dec(salt))) */
-    {22200, 893},   /* Citrix NetScaler SHA512 */
-    {33900, 895},   /* Citrix NetScaler (PBKDF2-HMAC-SHA256) */
-    {30000, 889},   /* Python Werkzeug MD5 (HMAC-MD5 key=$salt) */
-    {30120, 890},   /* Python Werkzeug SHA256 (HMAC-SHA256 key=$salt) */
+    {31000, 844},  /* 31000 | BLAKE2s-256 */
+    {31700, 819},  /* 31700 | md5(md5(md5($pass).$salt).$pepper) */
+    {32410, 387},  /* 32410 | sha512(sha512($pass).$salt) */
+    {32420, 510},  /* 32420 | sha512(sha512_bin($pass).$salt) */
+    {32600, 827},  /* 32600 | whirlpool($salt.$pass.$salt) */
+    {32800, 188},  /* 32800 | md5(sha1(md5($pass))) */
+    {33100, 818},  /* 33100 | md5($salt.md5($pass).$salt) — note: different from 515 which is md5($salt.md5($pass.$salt)) */
+    {33300, 828},  /* 33300 | HMAC-BLAKE2S */
+    {33600, 816},  /* 33600 | ripemd320($pass) */
+    {33650, 799},  /* 33650 | HMAC-RIPEMD320 (key = $pass) */
+    {33660, 213},  /* 33660 | HMAC-RIPEMD320 (key = $salt) */
+    {33900, 895},  /* 33900 | Citrix NetScaler (PBKDF2-HMAC-SHA256) */
+    {34200, 829},  /* 34200 | MurmurHash64A */
+    {34201, 830},  /* 34201 | MurmurHash64A (seed=0) */
+    {34400, 9},    /* 34400 | sha224(sha224($pass)) */
+    {34500, 766},  /* 34500 | sha224(sha1($pass)) */
+    {34600, 29},   /* 34600 | MD6-256 */
+    {34800, 845},  /* 34800 | BLAKE2b-256 */
+    {34810, 846},  /* 34810 | BLAKE2b-256($pass.$salt) */
+    {34820, 847},  /* 34820 | BLAKE2b-256($salt.$pass) */
     {65535, 65535}  /* EOF */
 };
 
@@ -1276,6 +1298,40 @@ char *Types[] = {
     "NETSCALER-SHA512",
     "SHA1SHA1SALTPASSSALT",
     "NETSCALER-PBKDF2",
+    "ORACLE7",
+    "NETNTLMV1",
+    "NETNTLMV2",
+    "LASTPASS",
+    "FORTIGATE",
+    "DOMINO8",
+    "SIPHASH",
+    "CRAMMD5",
+    "SAPCODVNH",
+    "REDHAT389DS",
+    "POSTGRESCRAM",
+    "MYSQLCRAM",
+    "SHIRO1",
+    "ECRYPTFS",
+    "ORACLE12",
+    "COLDFUSION10",
+    "AZURESYNC",
+    "ANDROIDFDE",
+    "KRB5TGS23",
+    "AXCRYPT",
+    "AXCRYPTSHA1",
+    "CISCO9",
+    "DCC2",
+    "PWSAFE3",
+    "IKEPSK_MD5",
+    "IKEPSK_SHA1",
+    "SAP-BCODE",
+    "SAP-BCODE4",
+    "SAP-PASSCODE",
+    "SAP-PASSCODE5",
+    "AS400-DES",
+    "PS_TOKEN",
+    "WINPHONE",
+    "RACF-KDFAES",
 
 NULL
 
@@ -6020,6 +6076,15 @@ static void compute_skype(const unsigned char *pass, int passlen, const unsigned
     rhash_final(ctx, dest); rhash_free(ctx);
 }
 
+/* Hex char to nibble, -1 on invalid */
+static inline int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static int hex2bin(const char *hex, int hexlen, unsigned char *bin);
 
 /* NTLMH — MD4(utf16le(pass)) with two conversion strategies:
@@ -8979,6 +9044,13 @@ static int verify_bcrypt(const char *hashstr, int hashlen,
     if (hashlen < 29 || hashstr[0] != '$') return 0;
     if (passlen >= (int)WS_GP_SIZE) return 0;
 
+    /* Cost check: bench_cost = 2^12, parsed_cost = 2^NN */
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
+
     /* crypt_rn needs null-terminated password */
     memcpy(passbuf, pass, passlen);
     passbuf[passlen] = 0;
@@ -8997,6 +9069,12 @@ static int verify_bcryptmd5(const char *hashstr, int hashlen, const unsigned cha
     extern char *crypt_rn(const char *key, const char *setting,
                           void *output, int size);
     if (hashlen < 29 || hashstr[0] != '$') return 0;
+
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
 
     rhash_msg(RHASH_MD5, pass, passlen, md5);
     prmd5(md5, hex, 32);
@@ -9017,6 +9095,12 @@ static int verify_bcryptsha1(const char *hashstr, int hashlen,
     extern char *crypt_rn(const char *key, const char *setting,
                           void *output, int size);
     if (hashlen < 29 || hashstr[0] != '$') return 0;
+
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
 
     SHA1(pass, passlen, sha1);
     prmd5(sha1, hex, 40);
@@ -9047,6 +9131,7 @@ static int verify_phpbb3(const char *hashstr, int hashlen,
     p = strchr(itoa64, hashstr[3]);
     if (!p) return 0;
     count = 1 << (int)(p - itoa64);
+    if (verify_cost_exceeds(WS->cur_rate, 2048.0, (double)count)) return 0;
     salt = hashstr + 4;  /* 8-char salt */
 
     /* Initial: rhash_msg(RHASH_MD5, salt + pass) */
@@ -9413,6 +9498,366 @@ static int verify_netscaler_pbkdf2(const char *hashstr, int hashlen,
     return memcmp(derived, expected, 32) == 0;
 }
 
+/* ORACLE7 (e896): Oracle H: Type (Oracle 7+) — DES-CBC based
+ * Format: 16-hex-UC-hash:username (1-30 char salt)
+ * Algorithm: uppercase salt+pass, pad to mult-of-8 with nulls,
+ * zero-extend each byte to 16-bit BE, DES-CBC(key=0123456789ABCDEF, IV=0),
+ * last 8-byte block → new key, DES-CBC again with new key, IV=0,
+ * last 8-byte block = hash */
+static int verify_oracle7(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *buf = (unsigned char *)WS->gp1;  /* wide data: up to (30+30)*2 = 120 bytes */
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    DES_key_schedule *ks = (DES_key_schedule *)WS->ctx2;
+    unsigned char *iv = (unsigned char *)WS->gp3;       /* 8 bytes */
+    unsigned char *data_blk = (unsigned char *)WS->gp4; /* 8 bytes */
+    unsigned char *key = (unsigned char *)WS->gp5;      /* 8 bytes */
+    const char *colon;
+    int hpart, saltlen, catlen, padlen, widelen, i;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 16) return 0;
+    saltlen = hashlen - hpart - 1;
+    if (saltlen < 1 || saltlen > 30) return 0;
+    if (passlen > 30) return 0;
+
+    /* decode expected hash */
+    if (hex2bin(hashstr, 16, expected) != 8) return 0;
+
+    /* build uppercase salt + password, pad to mult of 4 (= 8 wide bytes per DES block) */
+    catlen = saltlen + passlen;
+    padlen = (catlen + 3) & ~3;
+    if (padlen * 2 > (int)WS_GP_SIZE) return 0;
+
+    /* zero-extend each byte to 16-bit big-endian into buf */
+    widelen = 0;
+    for (i = 0; i < saltlen; i++) {
+        unsigned char c = colon[1 + i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        buf[widelen++] = 0;
+        buf[widelen++] = c;
+    }
+    for (i = 0; i < passlen; i++) {
+        unsigned char c = pass[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        buf[widelen++] = 0;
+        buf[widelen++] = c;
+    }
+    /* pad to mult of 4 chars (= 8 bytes = one DES block in wide form) */
+    while (widelen < padlen * 2) {
+        buf[widelen++] = 0;
+        buf[widelen++] = 0;
+    }
+
+    /* init fixed DES key */
+    key[0] = 0x01; key[1] = 0x23; key[2] = 0x45; key[3] = 0x67;
+    key[4] = 0x89; key[5] = 0xAB; key[6] = 0xCD; key[7] = 0xEF;
+
+    /* Pass 1: DES-CBC with fixed key */
+    DES_set_key_unchecked((DES_cblock *)key, ks);
+    memset(iv, 0, 8);
+    for (i = 0; i < widelen; i += 8) {
+        /* CBC: XOR plaintext block with IV, then encrypt */
+        data_blk[0] = buf[i+0] ^ iv[0];
+        data_blk[1] = buf[i+1] ^ iv[1];
+        data_blk[2] = buf[i+2] ^ iv[2];
+        data_blk[3] = buf[i+3] ^ iv[3];
+        data_blk[4] = buf[i+4] ^ iv[4];
+        data_blk[5] = buf[i+5] ^ iv[5];
+        data_blk[6] = buf[i+6] ^ iv[6];
+        data_blk[7] = buf[i+7] ^ iv[7];
+        DES_ecb_encrypt((const_DES_cblock *)data_blk, (DES_cblock *)iv, ks, DES_ENCRYPT);
+    }
+
+    /* Pass 2: DES-CBC with key = last block from pass 1 */
+    DES_set_key_unchecked((DES_cblock *)iv, ks);
+    memset(iv, 0, 8);
+    for (i = 0; i < widelen; i += 8) {
+        data_blk[0] = buf[i+0] ^ iv[0];
+        data_blk[1] = buf[i+1] ^ iv[1];
+        data_blk[2] = buf[i+2] ^ iv[2];
+        data_blk[3] = buf[i+3] ^ iv[3];
+        data_blk[4] = buf[i+4] ^ iv[4];
+        data_blk[5] = buf[i+5] ^ iv[5];
+        data_blk[6] = buf[i+6] ^ iv[6];
+        data_blk[7] = buf[i+7] ^ iv[7];
+        DES_ecb_encrypt((const_DES_cblock *)data_blk, (DES_cblock *)iv, ks, DES_ENCRYPT);
+    }
+
+    return memcmp(iv, expected, 8) == 0;
+}
+
+/* NetNTLMv1 (e897): user::domain:lm_response:ntlm_response(48hex):challenge(16hex)
+ * Algorithm: NTLM=MD4(UTF16LE(pass)), pad to 21, split 3x7→DES keys,
+ * DES-ECB encrypt 8-byte challenge. ESS: if lm[8:24]=0, challenge=MD5(srv+lm[0:8])[0:8] */
+static int verify_netntlmv1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *ntlm = (unsigned char *)WS->ctx1;      /* 16-byte NTLM hash */
+    unsigned char *u16buf = (unsigned char *)WS->u16a;
+    unsigned char *expected = (unsigned char *)WS->ctx2;   /* 24-byte expected response */
+    unsigned char *computed = (unsigned char *)WS->ctx3;   /* 24-byte computed response */
+    unsigned char *challenge = (unsigned char *)WS->gp1;   /* 8-byte effective challenge */
+    unsigned char *lm_bin = (unsigned char *)WS->gp2;      /* LM response binary */
+    unsigned char *padded = (unsigned char *)WS->gp3;      /* 21 bytes */
+    DES_key_schedule *ks = (DES_key_schedule *)WS->ctx4;
+    unsigned char *combo = (unsigned char *)WS->gp4;       /* 16 bytes for ESS */
+    const char *f[6];   /* field pointers — small, OK on stack */
+    int flen[6];
+    int i, nf = 0;
+    const char *end = hashstr + hashlen;
+
+    /* parse 6 colon-separated fields */
+    f[0] = hashstr;
+    for (i = 0; i < hashlen && nf < 5; i++) {
+        if (hashstr[i] == ':') {
+            flen[nf] = &hashstr[i] - f[nf];
+            nf++;
+            f[nf] = &hashstr[i + 1];
+        }
+    }
+    if (nf != 5) return 0;
+    flen[5] = end - f[5];
+
+    /* field 1 (index 1) must be empty */
+    if (flen[1] != 0) return 0;
+    /* field 4 (ntlm_response) must be 48 hex */
+    if (flen[4] != 48) return 0;
+    /* field 5 (challenge) must be 16 hex */
+    if (flen[5] != 16) return 0;
+
+    /* decode ntlm_response (24 bytes) and challenge (8 bytes) */
+    if (hex2bin(f[4], 48, expected) != 24) return 0;
+    if (hex2bin(f[5], 16, challenge) != 8) return 0;
+
+    /* compute NTLM hash: MD4(UTF16LE(pass)) — blind zero-extension */
+    for (i = 0; i < passlen; i++) { u16buf[i*2] = pass[i]; u16buf[i*2+1] = 0; }
+    rhash_msg(RHASH_MD4, u16buf, passlen * 2, ntlm);
+
+    /* check for ESS: LM response is 48 hex with bytes 8-23 all zero */
+    if (flen[3] == 48) {
+        if (hex2bin(f[3], 48, lm_bin) == 24) {
+            int ess = 1;
+            for (i = 8; i < 24; i++) { if (lm_bin[i] != 0) { ess = 0; break; } }
+            if (ess) {
+                /* ESS: effective challenge = MD5(srvchall + clichall)[0:8] */
+                unsigned char *md5out = (unsigned char *)WS->gp5;
+                memcpy(combo, challenge, 8);
+                memcpy(combo + 8, lm_bin, 8);
+                rhash_msg(RHASH_MD5, combo, 16, md5out);
+                memcpy(challenge, md5out, 8);
+            }
+        }
+    }
+
+    /* pad NTLM hash to 21 bytes, split into 3 DES keys, encrypt challenge */
+    memcpy(padded, ntlm, 16);
+    memset(padded + 16, 0, 5);
+    lm_des_key(padded, ks);
+    DES_ecb_encrypt((const_DES_cblock *)challenge, (DES_cblock *)(computed), ks, DES_ENCRYPT);
+    lm_des_key(padded + 7, ks);
+    DES_ecb_encrypt((const_DES_cblock *)challenge, (DES_cblock *)(computed + 8), ks, DES_ENCRYPT);
+    lm_des_key(padded + 14, ks);
+    DES_ecb_encrypt((const_DES_cblock *)challenge, (DES_cblock *)(computed + 16), ks, DES_ENCRYPT);
+
+    return memcmp(computed, expected, 24) == 0;
+}
+
+/* NetNTLMv2 (e898): user::domain:srvchall(16hex):response(32hex):client_blob(hex)
+ * Algorithm: NTLMv2_hash = HMAC-MD5(NTLM_hash, UC(user_UTF16LE) + domain_UTF16LE)
+ *            response = HMAC-MD5(NTLMv2_hash, srvchall_bin + client_blob_bin)[0:16] */
+static int verify_netntlmv2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *ntlm = (unsigned char *)WS->ctx1;
+    unsigned char *ntlmv2 = (unsigned char *)WS->ctx2;
+    unsigned char *expected = (unsigned char *)WS->ctx3;
+    unsigned char *computed = (unsigned char *)WS->ctx4;
+    unsigned char *u16buf = (unsigned char *)WS->u16a;
+    unsigned char *blob = (unsigned char *)WS->gp1;
+    unsigned char *srvchall = (unsigned char *)WS->gp2;
+    const char *f[6];
+    int flen[6];
+    int i, nf = 0, u16len, bloblen;
+
+    /* parse 6 colon-separated fields */
+    f[0] = hashstr;
+    for (i = 0; i < hashlen && nf < 5; i++) {
+        if (hashstr[i] == ':') {
+            flen[nf] = &hashstr[i] - f[nf];
+            nf++;
+            f[nf] = &hashstr[i + 1];
+        }
+    }
+    if (nf != 5) return 0;
+    flen[5] = (hashstr + hashlen) - f[5];
+
+    /* field 1 must be empty */
+    if (flen[1] != 0) return 0;
+    /* field 3 (srvchall) must be 16 hex */
+    if (flen[3] != 16) return 0;
+    /* field 4 (response hash) must be 32 hex */
+    if (flen[4] != 32) return 0;
+    /* field 5 (client_blob) must be even-length hex, >= 2 */
+    if (flen[5] < 2 || (flen[5] & 1)) return 0;
+
+    /* decode fields */
+    if (hex2bin(f[3], 16, srvchall) != 8) return 0;
+    if (hex2bin(f[4], 32, expected) != 16) return 0;
+    bloblen = hex2bin(f[5], flen[5], blob);
+    if (bloblen <= 0) return 0;
+
+    /* NTLM hash: MD4(UTF16LE(pass)) */
+    for (i = 0; i < passlen; i++) { u16buf[i*2] = pass[i]; u16buf[i*2+1] = 0; }
+    rhash_msg(RHASH_MD4, u16buf, passlen * 2, ntlm);
+
+    /* NTLMv2 hash: HMAC-MD5(ntlm, UC(user_UTF16LE) + domain_UTF16LE) */
+    u16len = 0;
+    for (i = 0; i < flen[0]; i++) {
+        unsigned char c = f[0][i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        u16buf[u16len++] = c;
+        u16buf[u16len++] = 0;
+    }
+    for (i = 0; i < flen[2]; i++) {
+        u16buf[u16len++] = f[2][i];
+        u16buf[u16len++] = 0;
+    }
+    { unsigned int hmlen = 16;
+      HMAC(EVP_md5(), ntlm, 16, u16buf, u16len, ntlmv2, &hmlen);
+    }
+
+    /* response: HMAC-MD5(ntlmv2, srvchall + client_blob) */
+    /* build srvchall + blob in u16buf (reuse, has enough space) */
+    memcpy(u16buf, srvchall, 8);
+    memcpy(u16buf + 8, blob, bloblen);
+    { unsigned int hmlen = 16;
+      HMAC(EVP_md5(), ntlmv2, 16, u16buf, 8 + bloblen, computed, &hmlen);
+    }
+
+    return memcmp(computed, expected, 16) == 0;
+}
+
+/* LASTPASS (e899): LastPass + LastPass sniffed (hashcat mode 6800)
+ * Format: hash(32hex):iterations:email:iv(32hex)
+ * Algorithm: key = PBKDF2-HMAC-SHA256(pass, email, iterations, 32)
+ *   Offline:  AES-256-ECB-encrypt("lastpass rocks\x02\x02", key) == hash
+ *   Sniffed:  AES-256-ECB-decrypt(hash, key) XOR IV, truncated to len(email) == email */
+static int verify_lastpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *derived = (unsigned char *)WS->ctx1;   /* 32-byte PBKDF2 output */
+    unsigned char *expected = (unsigned char *)WS->ctx2;  /* 16-byte hash */
+    unsigned char *computed = (unsigned char *)WS->ctx3;  /* 16-byte AES output */
+    unsigned char *iv_bin = (unsigned char *)WS->gp1;     /* 16-byte IV */
+    AES_KEY *aeskey = (AES_KEY *)WS->ctx4;
+    const char *f[4];
+    int flen[4];
+    int i, nf = 0, iterations, emaillen;
+
+    /* parse 3 or 4 colon-separated fields:
+     * Old format (offline only): hash:iterations:email
+     * New format (offline + sniffed): hash:iterations:email:iv */
+    f[0] = hashstr;
+    for (i = 0; i < hashlen && nf < 3; i++) {
+        if (hashstr[i] == ':') {
+            flen[nf] = &hashstr[i] - f[nf];
+            nf++;
+            f[nf] = &hashstr[i + 1];
+        }
+    }
+    if (nf < 2 || nf > 3) return 0;
+    flen[nf] = (hashstr + hashlen) - f[nf];
+
+    /* field 0: hash must be 32 hex (16 bytes) */
+    if (flen[0] != 32) return 0;
+    /* field 1: iterations (1-6 digits) */
+    if (flen[1] < 1 || flen[1] > 6) return 0;
+    iterations = 0;
+    for (i = 0; i < flen[1]; i++) {
+        if (f[1][i] < '0' || f[1][i] > '9') return 0;
+        iterations = iterations * 10 + (f[1][i] - '0');
+    }
+    if (iterations < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100100.0, (double)iterations)) return 0;
+    /* field 2: email (0-32 chars) */
+    emaillen = flen[2];
+    if (emaillen > 32) return 0;
+    /* field 3 (optional): IV must be 32 hex (16 bytes) */
+    if (nf == 3 && flen[3] != 32) return 0;
+
+    /* decode hash */
+    if (hex2bin(f[0], 32, expected) != 16) return 0;
+    /* decode IV if present */
+    if (nf == 3) {
+        if (hex2bin(f[3], 32, iv_bin) != 16) return 0;
+    }
+
+    /* derive key: PBKDF2-HMAC-SHA256(pass, email, iterations, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        (const unsigned char *)f[2], emaillen, iterations,
+        EVP_sha256(), 32, derived);
+
+    /* Try offline mode: AES-256-ECB-encrypt("lastpass rocks\x02\x02") */
+    {
+        static const unsigned char lastpass_magic[16] = {
+            'l','a','s','t','p','a','s','s',
+            ' ','r','o','c','k','s',0x02,0x02
+        };
+        AES_set_encrypt_key(derived, 256, aeskey);
+        AES_ecb_encrypt(lastpass_magic, computed, aeskey, AES_ENCRYPT);
+        if (memcmp(computed, expected, 16) == 0) return 1;
+    }
+
+    /* Try sniffed mode: AES-256-ECB-decrypt(hash), XOR IV, compare email */
+    if (nf == 3 && emaillen > 0) {
+        int cmplen = emaillen < 16 ? emaillen : 16;
+        unsigned char *plain = (unsigned char *)WS->gp2;
+        AES_set_decrypt_key(derived, 256, aeskey);
+        AES_ecb_encrypt(expected, computed, aeskey, AES_DECRYPT);
+        for (i = 0; i < 16; i++)
+            plain[i] = computed[i] ^ iv_bin[i];
+        if (memcmp(plain, f[2], cmplen) == 0) return 1;
+    }
+
+    return 0;
+}
+
+/* FORTIGATE (e900): FortiGate (FortiOS) — hashcat mode 7000
+ * Format: "AK1" + 44 chars base64 (47 chars total)
+ * Base64 decodes to 32 bytes: 12-byte salt + 20-byte SHA1(salt + pass + magic)
+ * Magic = 24-byte constant from FortiGate firmware */
+static int verify_fortigate(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    static const unsigned char fortigate_magic[24] = {
+        0xa3,0x88,0xba,0x2e,0x42,0x4c,0xb0,0x4a,
+        0x53,0x79,0x30,0xc1,0x31,0x07,0xcc,0x3f,
+        0xa1,0x32,0x90,0x29,0xa9,0x81,0x5b,0x70
+    };
+    unsigned char *decoded = (unsigned char *)WS->gp1;
+    unsigned char *computed = (unsigned char *)WS->ctx1;
+    SHA_CTX *sha_ctx = (SHA_CTX *)WS->ctx2;
+
+    if (hashlen != 47) return 0;
+    if (memcmp(hashstr, "AK1", 3) != 0) return 0;
+
+    int dlen = base64_decode(hashstr + 3, 44, decoded, 64);
+    if (dlen != 32) return 0;
+
+    /* SHA1(salt[12] + pass + magic[24]) */
+    SHA1_Init(sha_ctx);
+    SHA1_Update(sha_ctx, decoded, 12);
+    SHA1_Update(sha_ctx, pass, passlen);
+    SHA1_Update(sha_ctx, fortigate_magic, 24);
+    SHA1_Final(computed, sha_ctx);
+
+    return memcmp(computed, decoded + 12, 20) == 0;
+}
+
 /* SHA1SHA1SALTPASSSALT (e894): sha1(sha1(salt+pass+salt)) — 40hex:salt */
 static int verify_sha1sha1saltpasssalt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -9493,17 +9938,21 @@ static int verify_mssql2000(const char *hashstr, int hashlen,
     char *hex = (char *)WS->gp1;
     int u16len, i;
 
-    if (hashlen != 94) return 0;
-    if (strncasecmp(hashstr, "0x0100", 6) != 0) return 0;
-    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+    { int _off = 0;
+    if (hashlen == 94 && strncasecmp(hashstr, "0x0100", 6) == 0)
+        _off = 6;
+    else if (hashlen == 92 && strncasecmp(hashstr, "0100", 4) == 0)
+        _off = 4;
+    else return 0;
+    if (hex2bin(hashstr + _off, 8, salt_bin) != 4) return 0;
 
-    /* Case-sensitive SHA1: SHA1(UTF16LE(pass) + salt) — check offset 14 */
+    /* Case-sensitive SHA1: SHA1(UTF16LE(pass) + salt) — check offset _off+8 */
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
     if (u16len <= 0) return 0;
     memcpy(utf16 + u16len, salt_bin, 4);
     SHA1(utf16, u16len + 4, sha1);
     prmd5(sha1, hex, 40);
-    if (strncasecmp(hex, hashstr + 14, 40) == 0) return 1;
+    if (strncasecmp(hex, hashstr + _off + 8, 40) == 0) return 1;
 
     /* Uppercase SHA1: SHA1(UTF16LE(UC(pass)) + salt) — check offset 54 */
     for (i = 0; i < u16len; i += 2)
@@ -9512,7 +9961,8 @@ static int verify_mssql2000(const char *hashstr, int hashlen,
     memcpy(utf16 + u16len, salt_bin, 4);
     SHA1(utf16, u16len + 4, sha1);
     prmd5(sha1, hex, 40);
-    return strncasecmp(hex, hashstr + 54, 40) == 0;
+    return strncasecmp(hex, hashstr + _off + 48, 40) == 0;
+    }
 }
 
 /* MSSQL2005 (e851): SHA1(UTF16LE(pass) + salt) — 0x0100 + 8hex_salt + 40hex */
@@ -9524,9 +9974,13 @@ static int verify_mssql2005(const char *hashstr, int hashlen,
     unsigned char *salt_bin = (unsigned char *)WS->ctx2;
     int u16len;
 
-    if (hashlen != 54) return 0;
-    if (strncasecmp(hashstr, "0x0100", 6) != 0) return 0;
-    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+    { int _off = 0;
+    if (hashlen == 54 && strncasecmp(hashstr, "0x0100", 6) == 0)
+        _off = 6;
+    else if (hashlen == 52 && strncasecmp(hashstr, "0100", 4) == 0)
+        _off = 4;
+    else return 0;
+    if (hex2bin(hashstr + _off, 8, salt_bin) != 4) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
     if (u16len <= 0) return 0;
@@ -9535,7 +9989,8 @@ static int verify_mssql2005(const char *hashstr, int hashlen,
 
     { char hex[41];
       prmd5(sha1, hex, 40);
-      return strncasecmp(hex, hashstr + 14, 40) == 0;
+      return strncasecmp(hex, hashstr + _off + 8, 40) == 0;
+    }
     }
 }
 
@@ -9548,9 +10003,13 @@ static int verify_mssql2012(const char *hashstr, int hashlen,
     unsigned char *salt_bin = (unsigned char *)WS->ctx2;
     int u16len;
 
-    if (hashlen != 142) return 0;
-    if (strncasecmp(hashstr, "0x0200", 6) != 0) return 0;
-    if (hex2bin(hashstr + 6, 8, salt_bin) != 4) return 0;
+    { int _off = 0;
+    if (hashlen == 142 && strncasecmp(hashstr, "0x0200", 6) == 0)
+        _off = 6;
+    else if (hashlen == 140 && strncasecmp(hashstr, "0200", 4) == 0)
+        _off = 4;
+    else return 0;
+    if (hex2bin(hashstr + _off, 8, salt_bin) != 4) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
     if (u16len <= 0) return 0;
@@ -9559,7 +10018,8 @@ static int verify_mssql2012(const char *hashstr, int hashlen,
 
     { char hex[129];
       prmd5(sha512, hex, 128);
-      return strncasecmp(hex, hashstr + 14, 128) == 0;
+      return strncasecmp(hex, hashstr + _off + 8, 128) == 0;
+    }
     }
 }
 
@@ -10514,6 +10974,7 @@ static int verify_mysqlsha256crypt(const char *hashstr, int hashlen,
       if (salt_bin_len <= 0) return 0;
       rounds = nnn * 1000;
       if (rounds < 1000) rounds = 5000;
+      if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
       saltlen = salt_bin_len;
 
       /* sha256crypt algorithm */
@@ -10595,8 +11056,8 @@ static int verify_mysqlsha256crypt(const char *hashstr, int hashlen,
           /* Copy up to and including second '*' */
           memcpy(expected, hashstr, elen);
           for (ei = 0; ei < 43; ei++) {
-              expected[elen + ei*2]     = "0123456789ABCDEF"[(my256_encoded[ei]>>4)&0xf];
-              expected[elen + ei*2 + 1] = "0123456789ABCDEF"[my256_encoded[ei]&0xf];
+              expected[elen + ei*2]     = hextab_uc[(my256_encoded[ei]>>4)&0xf];
+              expected[elen + ei*2 + 1] = hextab_uc[my256_encoded[ei]&0xf];
           }
           expected[elen + 86] = 0;
           return hashlen == elen + 86 && strncasecmp(expected, hashstr, hashlen) == 0;
@@ -10620,6 +11081,7 @@ static int verify_drupal7(const char *hashstr, int hashlen,
       log2_count = pp - phpitoa64;
     }
     count = 1UL << log2_count;
+    if (verify_cost_exceeds(WS->cur_rate, 16384.0, (double)count)) return 0;
     salt_start = hashstr + 4;
 
     /* h = SHA512(salt + password) */
@@ -10772,7 +11234,6 @@ static int verify_domino6(const char *hashstr, int hashlen,
     unsigned char *d6_raw = (unsigned char *)WS->ctx4;
     unsigned char *d6_salt = (unsigned char *)WS->ctx5;
     char *encoded = (char *)WS->gp1;
-    static const char uchex[] = "0123456789ABCDEF";
     int x;
 
     if (hashlen != 22 || hashstr[0] != '(' || hashstr[hashlen-1] != ')' || hashstr[1] != 'G')
@@ -10830,8 +11291,8 @@ static int verify_domino6(const char *hashstr, int hashlen,
     memcpy(d6_buf, d6_salt, 5);
     d6_buf[5] = '(';
     for (x = 0; x < 14; x++) {
-        d6_buf[6+x*2]   = uchex[(h1[x]>>4)&0xf];
-        d6_buf[6+x*2+1] = uchex[h1[x]&0xf];
+        d6_buf[6+x*2]   = hextab_uc[(h1[x]>>4)&0xf];
+        d6_buf[6+x*2+1] = hextab_uc[h1[x]&0xf];
     }
 
     /* h2 = domino5_transform(d6_buf, 34) */
@@ -10873,6 +11334,834 @@ static int verify_domino6(const char *hashstr, int hashlen,
     }
 }
 
+/* DOMINO8 (e901, mode 9100): Lotus Notes/Domino 8
+ * Format: (H + 48 lotus64 chars + ) = 51 total
+ * Decodes to 36 bytes: salt16 + iter10 + chars2 + digest8
+ * Algorithm: domino5(pass) → hex UC → domino5(salt5+"("+hex28) → lotus6_encode(salt5+h2[0:10])
+ *            → PBKDF2-HMAC-SHA1(lotus6_22, salt16, iter) → 8 bytes */
+static int verify_domino8(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *h1 = (unsigned char *)WS->ctx1;  /* domino5 output */
+    unsigned char *h2 = (unsigned char *)WS->ctx2;  /* domino6 output */
+    unsigned char *d6_buf = (unsigned char *)WS->ctx3; /* salt5+"("+hex28 */
+    unsigned char *decoded = (unsigned char *)WS->ctx4; /* 36 decoded bytes */
+    unsigned char *pbkdf2_out = (unsigned char *)WS->ctx5;
+    unsigned char *d6_raw = (unsigned char *)WS->ctx6;
+    char *lotus6_str = (char *)WS->gp1;
+    static const signed char lotus64_rev[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9,-1,-1,-1,-1,-1,-1,
+        -1,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,
+        25,26,27,28,29,30,31,32,33,34,35,-1,-1,-1,-1,-1,
+        -1,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,
+        51,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1
+    };
+    int x, ri, ei;
+
+    /* Validate format: (H...48 lotus64...) = 51 chars */
+    if (hashlen != 51 || hashstr[0] != '(' || hashstr[1] != 'H' || hashstr[50] != ')')
+        return 0;
+    if (passlen > 256) return 0;
+
+    /* Decode 48 lotus64 chars → 36 bytes */
+    const char *enc = hashstr + 2;
+    ri = 0;
+    for (ei = 0; ei + 3 < 48 && ri + 2 < 36; ei += 4) {
+        int a = lotus64_rev[(unsigned char)enc[ei]];
+        int b = lotus64_rev[(unsigned char)enc[ei+1]];
+        int c = lotus64_rev[(unsigned char)enc[ei+2]];
+        int d = lotus64_rev[(unsigned char)enc[ei+3]];
+        if (a < 0 || b < 0 || c < 0 || d < 0) return 0;
+        decoded[ri++] = (a << 2) | (b >> 4);
+        decoded[ri++] = ((b & 0xf) << 4) | (c >> 2);
+        decoded[ri++] = ((c & 3) << 6) | d;
+    }
+    if (ri < 36) return 0;
+
+    /* Undo byte[3] quirk */
+    decoded[3] -= 4;
+
+    /* Extract fields */
+    unsigned char *salt16 = decoded;       /* bytes 0-15 */
+    char iter_str[11];
+    memcpy(iter_str, decoded + 16, 10);
+    iter_str[10] = 0;
+    int iterations = atoi(iter_str);
+    if (iterations < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)iterations)) return 0;
+    unsigned char *expected = decoded + 28; /* bytes 28-35 = 8-byte digest */
+
+    /* Step 1: Lotus 5 hash of password */
+    domino5_transform(pass, passlen, h1);
+
+    /* Step 2: Build Lotus 6 input: salt5 + "(" + UCHEX(h1[0:14]) = 34 bytes */
+    memcpy(d6_buf, salt16, 5);
+    d6_buf[5] = '(';
+    for (x = 0; x < 14; x++) {
+        d6_buf[6+x*2]   = hextab_uc[(h1[x]>>4)&0xf];
+        d6_buf[6+x*2+1] = hextab_uc[h1[x]&0xf];
+    }
+
+    /* Step 3: Lotus 6 hash */
+    domino5_transform(d6_buf, 34, h2);
+
+    /* Step 4: Build (G...) string from salt5 + h2[0:10] = 15 bytes → 19 lotus64 chars
+     * Note: hashcat encodes 15 bytes (5 full groups), truncates to 19 chars */
+    memcpy(d6_raw, salt16, 5);
+    memcpy(d6_raw + 5, h2, 11);
+    d6_raw[3] += 4; /* apply lotus encoding quirk to byte 3 */
+    lotus6_str[0] = '(';
+    lotus6_str[1] = 'G';
+    lotus64_encode(d6_raw, 15, lotus6_str + 2, 21);
+    lotus6_str[21] = ')';
+    lotus6_str[22] = 0;
+
+    /* Step 5: PBKDF2-HMAC-SHA1(key=lotus6_str, salt=salt16, iterations) → 8 bytes */
+    PKCS5_PBKDF2_HMAC(lotus6_str, 22, salt16, 16, iterations,
+                       EVP_sha1(), 8, pbkdf2_out);
+
+    return memcmp(pbkdf2_out, expected, 8) == 0;
+}
+
+/* SipHash-2-4 (e902, mode 10100)
+ * Format: HASH16HEX:2:4:KEY32HEX
+ * Algorithm: SipHash-2-4(message=password, key=16-byte key) → 8-byte hash */
+static uint64_t siphash24(const unsigned char *msg, int msglen,
+    const unsigned char *key)
+{
+    uint64_t k0, k1;
+    memcpy(&k0, key, 8);
+    memcpy(&k1, key + 8, 8);
+    uint64_t v0 = k0 ^ 0x736f6d6570736575ULL;
+    uint64_t v1 = k1 ^ 0x646f72616e646f6dULL;
+    uint64_t v2 = k0 ^ 0x6c7967656e657261ULL;
+    uint64_t v3 = k1 ^ 0x7465646279746573ULL;
+    int left = msglen & 7, blocks = msglen / 8, i;
+    for (i = 0; i < blocks; i++) {
+        uint64_t m; memcpy(&m, msg + i * 8, 8);
+        v3 ^= m;
+        v0+=v1;v1=((v1<<13)|(v1>>51));v1^=v0;v0=((v0<<32)|(v0>>32));v2+=v3;v3=((v3<<16)|(v3>>48));v3^=v2;v0+=v3;v3=((v3<<21)|(v3>>43));v3^=v0;v2+=v1;v1=((v1<<17)|(v1>>47));v1^=v2;v2=((v2<<32)|(v2>>32));
+        v0+=v1;v1=((v1<<13)|(v1>>51));v1^=v0;v0=((v0<<32)|(v0>>32));v2+=v3;v3=((v3<<16)|(v3>>48));v3^=v2;v0+=v3;v3=((v3<<21)|(v3>>43));v3^=v0;v2+=v1;v1=((v1<<17)|(v1>>47));v1^=v2;v2=((v2<<32)|(v2>>32));
+        v0 ^= m;
+    }
+    uint64_t m = (uint64_t)((unsigned char)msglen) << 56;
+    const unsigned char *tail = msg + blocks * 8;
+    switch (left) {
+        case 7: m |= (uint64_t)tail[6] << 48; /* fall through */
+        case 6: m |= (uint64_t)tail[5] << 40; /* fall through */
+        case 5: m |= (uint64_t)tail[4] << 32; /* fall through */
+        case 4: m |= (uint64_t)tail[3] << 24; /* fall through */
+        case 3: m |= (uint64_t)tail[2] << 16; /* fall through */
+        case 2: m |= (uint64_t)tail[1] << 8;  /* fall through */
+        case 1: m |= (uint64_t)tail[0];
+    }
+    v3 ^= m;
+    v0+=v1;v1=((v1<<13)|(v1>>51));v1^=v0;v0=((v0<<32)|(v0>>32));v2+=v3;v3=((v3<<16)|(v3>>48));v3^=v2;v0+=v3;v3=((v3<<21)|(v3>>43));v3^=v0;v2+=v1;v1=((v1<<17)|(v1>>47));v1^=v2;v2=((v2<<32)|(v2>>32));
+    v0+=v1;v1=((v1<<13)|(v1>>51));v1^=v0;v0=((v0<<32)|(v0>>32));v2+=v3;v3=((v3<<16)|(v3>>48));v3^=v2;v0+=v3;v3=((v3<<21)|(v3>>43));v3^=v0;v2+=v1;v1=((v1<<17)|(v1>>47));v1^=v2;v2=((v2<<32)|(v2>>32));
+    v0 ^= m;
+    v2 ^= 0xff;
+    for (i = 0; i < 4; i++) {
+        v0+=v1;v1=((v1<<13)|(v1>>51));v1^=v0;v0=((v0<<32)|(v0>>32));v2+=v3;v3=((v3<<16)|(v3>>48));v3^=v2;v0+=v3;v3=((v3<<21)|(v3>>43));v3^=v0;v2+=v1;v1=((v1<<17)|(v1>>47));v1^=v2;v2=((v2<<32)|(v2>>32));
+    }
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+static int verify_siphash(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *key = (unsigned char *)WS->ctx1;
+    unsigned char *expected = (unsigned char *)WS->ctx2;
+
+    /* Format: 16hex:1digit:1digit:32hex — total 53 chars */
+    if (hashlen != 53) return 0;
+    if (hashstr[16] != ':' || hashstr[18] != ':' || hashstr[20] != ':') return 0;
+    if (hashstr[17] != '2' || hashstr[19] != '4') return 0;
+
+    /* Decode expected hash (16 hex → 8 bytes) */
+    if (hex2bin(hashstr, 16, expected) != 8) return 0;
+    /* Decode key (32 hex → 16 bytes) */
+    if (hex2bin(hashstr + 21, 32, key) != 16) return 0;
+
+    uint64_t result = siphash24(pass, passlen, key);
+    unsigned char got[8];
+    memcpy(got, &result, 8);
+
+    return memcmp(got, expected, 8) == 0;
+}
+
+/* CRAM-MD5 (10200): $cram_md5$b64(challenge)$b64("user hmac_hex")
+ * HMAC-MD5(key=password, msg=challenge) */
+static int verify_crammd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *challenge = (unsigned char *)WS->gp2;
+    unsigned char *response = (unsigned char *)WS->gp3;
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$cram_md5$", 10) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Find the second $ after $cram_md5$ */
+    char *sep = strchr(buf + 10, '$');
+    if (!sep) return 0;
+    *sep = 0;
+
+    /* Decode challenge */
+    int chal_len = base64_decode(buf + 10, (int)(sep - buf - 10), challenge, WS_GP_SIZE);
+    if (chal_len < 1) return 0;
+
+    /* Decode response: "username hmac_hex" */
+    int resp_len = base64_decode(sep + 1, (int)(buf + hashlen - sep - 1), response, WS_GP_SIZE);
+    if (resp_len < 34) return 0; /* minimum: "u " + 32 hex */
+
+    /* Extract the last 32 hex chars as the expected HMAC */
+    char *resp_str = (char *)response;
+    resp_str[resp_len] = 0;
+    if (resp_len < 33 || resp_str[resp_len - 33] != ' ') return 0;
+    char *hex_start = resp_str + resp_len - 32;
+
+    unsigned char expected[16];
+    if (hex2bin(hex_start, 32, expected) != 16) return 0;
+
+    /* Compute HMAC-MD5(key=password, msg=challenge) */
+    compute_hmac_md5_kpass(pass, passlen, challenge, chal_len, hmac_out);
+
+    return memcmp(hmac_out, expected, 16) == 0;
+}
+
+/* SAP CODVN H (10300): {x-issha, ITER}BASE64(hash20 + salt)
+ * h = SHA1(pass + salt); for i in 1..iter-1: h = SHA1(pass + h) */
+static int verify_sapcodvnh(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *decoded = (unsigned char *)WS->gp2;
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    SHA_CTX *sha_ctx = (SHA_CTX *)WS->ctx2;
+
+    /* Format: {x-issha, ITER}BASE64... */
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "{x-issha, ", 10) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Extract iteration count */
+    char *p = buf + 10;
+    char *brace = strchr(p, '}');
+    if (!brace) return 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1024.0, (double)iter)) return 0;
+
+    /* Decode base64 payload: 20-byte hash + salt */
+    int b64len = (int)(buf + hashlen - brace - 1);
+    int dlen = base64_decode(brace + 1, b64len, decoded, WS_GP_SIZE);
+    if (dlen < 21) return 0; /* need at least 20 hash + 1 salt */
+
+    unsigned char *expected = decoded;
+    unsigned char *salt = decoded + 20;
+    int saltlen = dlen - 20;
+
+    /* Round 0: h = SHA1(pass + salt) */
+    SHA1_Init(sha_ctx);
+    SHA1_Update(sha_ctx, pass, passlen);
+    SHA1_Update(sha_ctx, salt, saltlen);
+    SHA1_Final(h, sha_ctx);
+
+    /* Rounds 1..iter-1: h = SHA1(pass + h) */
+    for (int i = 1; i < iter; i++) {
+        SHA1_Init(sha_ctx);
+        SHA1_Update(sha_ctx, pass, passlen);
+        SHA1_Update(sha_ctx, h, 20);
+        SHA1_Final(h, sha_ctx);
+    }
+
+    return memcmp(h, expected, 20) == 0;
+}
+
+/* RedHat 389-DS LDAP (10901): {PBKDF2_SHA256}BASE64(iter4_BE + salt64 + hash256)
+ * PBKDF2-HMAC-SHA256(password, salt, iterations, 256) */
+static int verify_redhat389ds(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *decoded = (unsigned char *)WS->gp1;
+    unsigned char *computed = (unsigned char *)WS->gp2;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "{PBKDF2_SHA256}", 15) != 0) return 0;
+
+    int dlen = base64_decode(hashstr + 15, hashlen - 15, decoded, WS_GP_SIZE);
+    if (dlen != 324) return 0; /* 4 iter + 64 salt + 256 hash */
+
+    /* Iterations: 4 bytes big-endian */
+    int iter = ((int)decoded[0] << 24) | ((int)decoded[1] << 16) |
+               ((int)decoded[2] << 8) | (int)decoded[3];
+    if (iter < 1 || iter > 1000000) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 8192.0, (double)iter)) return 0;
+
+    unsigned char *salt = decoded + 4;
+    unsigned char *expected = decoded + 68;
+
+    /* PBKDF2-HMAC-SHA256(password, salt64, iter, 256) */
+    unsigned int outlen = 256;
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       salt, 64, iter,
+                       EVP_sha256(), outlen, computed);
+
+    return memcmp(computed, expected, 256) == 0;
+}
+
+/* PostgreSQL CRAM (11100): MD5(hex(MD5(pass+user)) + challenge_bytes)
+ * Format: $postgres$USER*CHALLENGE_HEX*HASH_HEX */
+static int verify_postgrescram(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *digest = (unsigned char *)WS->gp2;
+    char *inner_input = (char *)WS->gp3;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$postgres$", 10) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Find USER*CHALLENGE*HASH */
+    char *star1 = strchr(buf + 10, '*');
+    if (!star1) return 0;
+    *star1 = 0;
+    char *user = buf + 10;
+    int ulen = star1 - user;
+
+    char *star2 = strchr(star1 + 1, '*');
+    if (!star2) return 0;
+    *star2 = 0;
+    char *challenge_hex = star1 + 1;
+    if (strlen(challenge_hex) != 8) return 0;
+    char *expected_hex = star2 + 1;
+    if (strlen(expected_hex) != 32) return 0;
+
+    /* Inner MD5: MD5(pass + user) */
+    memcpy(inner_input, pass, passlen);
+    memcpy(inner_input + passlen, user, ulen);
+    rhash_msg(RHASH_MD5, (const unsigned char *)inner_input, passlen + ulen, digest);
+
+    /* Hex-encode inner result (lowercase) */
+    char *hex = (char *)WS->gp4;
+    for (int i = 0; i < 16; i++) {
+        hex[i*2]   = hextab_lc[digest[i] >> 4];
+        hex[i*2+1] = hextab_lc[digest[i] & 0xf];
+    }
+
+    /* Decode 4-byte challenge from hex, append after hex digest */
+    for (int i = 0; i < 4; i++)
+        hex[32 + i] = (hexval(challenge_hex[i*2]) << 4) | hexval(challenge_hex[i*2+1]);
+
+    /* Outer MD5: MD5(hex_digest + challenge_bytes) = 36 bytes */
+    rhash_msg(RHASH_MD5, (const unsigned char *)hex, 36, digest);
+
+    /* Compare */
+    for (int i = 0; i < 16; i++) {
+        hex[i*2]   = hextab_lc[digest[i] >> 4];
+        hex[i*2+1] = hextab_lc[digest[i] & 0xf];
+    }
+    hex[32] = 0;
+
+    /* Case-insensitive compare */
+    for (int i = 0; i < 32; i++) {
+        char a = hex[i];
+        char b = expected_hex[i];
+        if (b >= 'A' && b <= 'F') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/* MySQL CRAM (11200): SHA1(pass) XOR SHA1(nonce + SHA1(SHA1(pass)))
+ * Format: $mysqlna$NONCE_HEX*HASH_HEX */
+static int verify_mysqlcram(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha1_pass = (unsigned char *)WS->gp1;
+    unsigned char *double_sha1 = (unsigned char *)WS->gp2;
+    unsigned char *scramble = (unsigned char *)WS->gp3;
+    unsigned char *concat = (unsigned char *)WS->gp4;
+
+    if (hashlen != 90) return 0;
+    if (memcmp(hashstr, "$mysqlna$", 9) != 0) return 0;
+    if (hashstr[49] != '*') return 0;
+
+    /* Validate hex chars */
+    for (int i = 9; i < 49; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+    for (int i = 50; i < 90; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+
+    /* SHA1(pass) */
+    rhash_msg(RHASH_SHA1, pass, passlen, sha1_pass);
+
+    /* SHA1(SHA1(pass)) */
+    rhash_msg(RHASH_SHA1, sha1_pass, 20, double_sha1);
+
+    /* Decode nonce from hex */
+    unsigned char *nonce = concat; /* first 20 bytes */
+    for (int i = 0; i < 20; i++)
+        nonce[i] = (hexval(hashstr[9+i*2]) << 4) | hexval(hashstr[10+i*2]);
+
+    /* SHA1(nonce + SHA1(SHA1(pass))) — concat into one buffer */
+    memcpy(concat + 20, double_sha1, 20);
+    rhash_msg(RHASH_SHA1, concat, 40, scramble);
+
+    /* response = SHA1(pass) XOR scramble, compare inline */
+    for (int i = 0; i < 20; i++) {
+        int expected = (hexval(hashstr[50+i*2]) << 4) | hexval(hashstr[51+i*2]);
+        if ((sha1_pass[i] ^ scramble[i]) != expected) return 0;
+    }
+    return 1;
+}
+
+/* Apache Shiro 1 (12150): SHA512(salt+pass), iterate N-1 SHA512(digest)
+ * Format: $shiro1$SHA-512$ITER$B64SALT$B64HASH */
+static int verify_shiro1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *salt = (unsigned char *)WS->gp2;
+    unsigned char *expected = (unsigned char *)WS->gp3;
+    unsigned char *digest = (unsigned char *)WS->gp4;
+    unsigned char *input = (unsigned char *)WS->ctx1;
+
+    if (hashlen < 30 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$shiro1$SHA-512$", 16) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Parse iter */
+    char *iter_start = buf + 16;
+    char *d1 = strchr(iter_start, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_start);
+    if (iter < 1 || iter > 1000000) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1024.0, (double)iter)) return 0;
+
+    /* Decode salt */
+    char *b64salt = d1 + 1;
+    char *d2 = strchr(b64salt, '$');
+    if (!d2) return 0;
+    *d2 = 0;
+    int slen = base64_decode(b64salt, strlen(b64salt), salt, WS_GP_SIZE);
+    if (slen != 16) return 0;
+
+    /* Decode expected hash */
+    char *b64hash = d2 + 1;
+    int hlen = base64_decode(b64hash, strlen(b64hash), expected, WS_GP_SIZE);
+    if (hlen != 64) return 0;
+
+    /* SHA512(salt + pass) */
+    memcpy(input, salt, 16);
+    memcpy(input + 16, pass, passlen);
+    rhash_msg(RHASH_SHA512, input, 16 + passlen, digest);
+
+    /* Iterate N-1 more */
+    for (int i = 1; i < iter; i++)
+        rhash_msg(RHASH_SHA512, digest, 64, digest);
+
+    return memcmp(digest, expected, 64) == 0;
+}
+
+/* eCryptfs (12200): SHA512(salt+pass), 65536 more SHA512(digest), first 8 bytes
+ * Format: $ecryptfs$0$1$HEX_SALT$HEX_HASH or $ecryptfs$0$HEX_HASH */
+static int verify_ecryptfs(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *digest = (unsigned char *)WS->gp2;
+    unsigned char *input = (unsigned char *)WS->ctx1;
+
+    if (hashlen < 15 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$ecryptfs$0$", 12) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    unsigned char salt[8];
+    unsigned char expected[8];
+    char *rest = buf + 12;
+
+    if (rest[0] == '1' && rest[1] == '$') {
+        /* $ecryptfs$0$1$SALT$HASH */
+        char *sep = strchr(rest + 2, '$');
+        if (!sep || sep - (rest + 2) != 16 || strlen(sep + 1) != 16) return 0;
+        if (hex2bin(rest + 2, 16, salt) != 8) return 0;
+        if (hex2bin(sep + 1, 16, expected) != 8) return 0;
+    } else if (strlen(rest) == 16) {
+        /* $ecryptfs$0$HASH — default salt */
+        if (hex2bin(rest, 16, expected) != 8) return 0;
+        if (hex2bin("0011223344556677", 16, salt) != 8) return 0;
+    } else {
+        return 0;
+    }
+
+    /* SHA512(salt + pass) */
+    memcpy(input, salt, 8);
+    memcpy(input + 8, pass, passlen);
+    rhash_msg(RHASH_SHA512, input, 8 + passlen, digest);
+
+    /* 65536 more iterations */
+    for (int i = 0; i < 65536; i++)
+        rhash_msg(RHASH_SHA512, digest, 64, digest);
+
+    return memcmp(digest, expected, 8) == 0;
+}
+
+/* Oracle 12+ (12300): PBKDF2-HMAC-SHA512(pass, salt+"AUTH_PBKDF2_SPEEDY_KEY", 4096, 64) -> SHA512(key+salt)
+ * Format: 160 uppercase hex = 128 hash + 32 salt */
+static int verify_oracle12(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->gp1;
+    unsigned char *expected = (unsigned char *)WS->gp2;
+    unsigned char *key = (unsigned char *)WS->gp3;
+    unsigned char *digest = (unsigned char *)WS->gp4;
+    unsigned char *pbsalt = (unsigned char *)WS->ctx1;
+
+    if (hashlen != 160) return 0;
+
+    /* Validate all hex */
+    for (int i = 0; i < 160; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+
+    /* Decode hash (64 bytes) and salt (16 bytes) */
+    if (hex2bin(hashstr, 128, expected) != 64) return 0;
+    if (hex2bin(hashstr + 128, 32, salt) != 16) return 0;
+
+    /* PBKDF2 salt = raw_salt + "AUTH_PBKDF2_SPEEDY_KEY" */
+    memcpy(pbsalt, salt, 16);
+    memcpy(pbsalt + 16, "AUTH_PBKDF2_SPEEDY_KEY", 22);
+
+    /* PBKDF2-HMAC-SHA512(pass, pbsalt, 4096, 64) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       pbsalt, 38, 4096,
+                       EVP_sha512(), 64, key);
+
+    /* SHA512(key + salt) */
+    unsigned char *concat = (unsigned char *)WS->ctx2;
+    memcpy(concat, key, 64);
+    memcpy(concat + 64, salt, 16);
+    rhash_msg(RHASH_SHA512, concat, 80, digest);
+
+    return memcmp(digest, expected, 64) == 0;
+}
+
+/* COLDFUSION10 (e911, mode 12600): SHA256(salt_text + UC(SHA1(pass)))
+ * Format: hash64hex:salt_text:password */
+static int verify_coldfusion10(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha1out = (unsigned char *)WS->gp1;
+    unsigned char *sha256out = (unsigned char *)WS->gp2;
+    unsigned char *concat = (unsigned char *)WS->ctx1;
+    char *hexbuf = (char *)WS->gp3;
+
+    /* Find first colon: hash:salt */
+    const char *c1 = memchr(hashstr, ':', hashlen);
+    if (!c1 || c1 - hashstr != 64) return 0;
+    int saltlen = hashlen - 65;
+    if (saltlen < 1) return 0;
+
+    /* Validate 64-hex hash */
+    for (int i = 0; i < 64; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+
+    /* SHA1(pass) -> UC hex */
+    rhash_msg(RHASH_SHA1, pass, passlen, sha1out);
+    for (int i = 0; i < 20; i++) {
+        hexbuf[i*2]   = hextab_uc[sha1out[i] >> 4];
+        hexbuf[i*2+1] = hextab_uc[sha1out[i] & 0xf];
+    }
+
+    /* concat = salt_text + UC(SHA1(pass)) */
+    const char *salt = c1 + 1;
+    memcpy(concat, salt, saltlen);
+    memcpy(concat + saltlen, hexbuf, 40);
+
+    /* SHA256(concat) */
+    rhash_msg(RHASH_SHA256, concat, saltlen + 40, sha256out);
+
+    /* Compare with expected hash */
+    unsigned char expected[32];
+    hex2bin(hashstr, 64, expected);
+    return memcmp(sha256out, expected, 32) == 0;
+}
+
+/* AZURESYNC (e912, mode 12800): PBKDF2-SHA256(UTF16LE(UC(NTLM(pass))), salt, iter, 32)
+ * Format: v1;PPH1_MD4,hex_salt20,iter,hash64hex:password */
+static int verify_azuresync(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *ntlm = (unsigned char *)WS->gp1;
+    unsigned char *az_pw = (unsigned char *)WS->ctx1; /* 64 bytes: UTF16LE of UC NTLM hex */
+    unsigned char *salt = (unsigned char *)WS->gp2;
+    unsigned char *derived = (unsigned char *)WS->gp3;
+    unsigned char *expected = (unsigned char *)WS->gp4;
+    char *hexbuf = (char *)WS->gp5;
+
+    if (hashlen < 30 || memcmp(hashstr, "v1;PPH1_MD4,", 12) != 0) return 0;
+
+    /* Parse: v1;PPH1_MD4,hex_salt20,iter,hash64hex */
+    const char *p = hashstr + 12;
+    const char *c1 = strchr(p, ',');
+    if (!c1 || c1 - p != 20) return 0; /* salt is 20 hex = 10 bytes */
+    const char *c2 = strchr(c1 + 1, ',');
+    if (!c2) return 0;
+    int iter = atoi(c1 + 1);
+    if (iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100.0, (double)iter)) return 0;
+    const char *hash_hex = c2 + 1;
+    if (hashlen - (int)(hash_hex - hashstr) != 64) return 0;
+
+    /* Decode salt */
+    if (hex2bin(p, 20, salt) != 10) return 0;
+    /* Decode expected hash */
+    if (hex2bin(hash_hex, 64, expected) != 32) return 0;
+
+    /* NTLM = MD4(UTF16LE(pass)) */
+    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+
+    /* UC hex of NTLM -> UTF16LE */
+    for (int i = 0; i < 16; i++) {
+        hexbuf[i*2]   = hextab_uc[ntlm[i] >> 4];
+        hexbuf[i*2+1] = hextab_uc[ntlm[i] & 0xf];
+    }
+    for (int i = 0; i < 32; i++) {
+        az_pw[i*2]   = (unsigned char)hexbuf[i];
+        az_pw[i*2+1] = 0;
+    }
+
+    /* PBKDF2-HMAC-SHA256(az_pw, 64, salt, 10, iter, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)az_pw, 64,
+                       salt, 10, iter,
+                       EVP_sha256(), 32, derived);
+
+    return memcmp(derived, expected, 32) == 0;
+}
+
+/* ANDROIDFDE (e913, mode 12900): HMAC-SHA256(PBKDF2-SHA256(pass,salt,4096,32), salt2)
+ * Format: salt2_hex64 + hmac_hex64 + salt_hex32:password (160 hex total) */
+static int verify_androidfde(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt2 = (unsigned char *)WS->gp1;
+    unsigned char *expected = (unsigned char *)WS->gp2;
+    unsigned char *salt = (unsigned char *)WS->gp3;
+    unsigned char *key = (unsigned char *)WS->gp4;
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;
+
+    if (hashlen != 160) return 0;
+    for (int i = 0; i < 160; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+
+    /* Decode: salt2(32B) + expected_hmac(32B) + salt(16B) */
+    hex2bin(hashstr, 64, salt2);
+    hex2bin(hashstr + 64, 64, expected);
+    hex2bin(hashstr + 128, 32, salt);
+
+    /* PBKDF2-SHA256(pass, salt, 4096, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       salt, 16, 4096,
+                       EVP_sha256(), 32, key);
+
+    /* HMAC-SHA256(key, salt2) */
+    unsigned int hmac_len = 32;
+    HMAC(EVP_sha256(), key, 32, salt2, 32, hmac_out, &hmac_len);
+
+    return memcmp(hmac_out, expected, 32) == 0;
+}
+
+/* KRB5TGS23 (e914, mode 13100): NTLM -> HMAC-MD5(usage=2) -> HMAC-MD5(checksum) -> RC4 -> ASN.1 verify
+ * Format: $krb5tgs$23$*user$realm$spn*$checksum32hex$edata2hex:password */
+static int verify_krb5tgs23(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *ntlm = (unsigned char *)WS->gp1;
+    unsigned char *k1 = (unsigned char *)WS->gp2;
+    unsigned char *k3 = (unsigned char *)WS->gp3;
+    unsigned char *checksum = (unsigned char *)WS->gp4;
+    unsigned char *edata = (unsigned char *)WS->ctx1; /* up to 4096 bytes */
+    unsigned char *decrypted = (unsigned char *)WS->ctx2;
+
+    if (hashlen < 80 || memcmp(hashstr, "$krb5tgs$23$", 12) != 0) return 0;
+
+    /* Find *user$realm$spn*$checksum$edata2 */
+    const char *star1 = memchr(hashstr + 12, '*', hashlen - 12);
+    if (!star1) return 0;
+    const char *star2 = memchr(star1 + 1, '*', hashlen - (star1 + 1 - hashstr));
+    if (!star2 || star2[1] != '$') return 0;
+    const char *p = star2 + 2; /* checksum hex */
+    int remaining = hashlen - (int)(p - hashstr);
+    if (remaining < 34) return 0; /* 32hex + $ + some edata */
+
+    /* Validate and decode checksum */
+    for (int i = 0; i < 32; i++)
+        if (hexval(p[i]) < 0) return 0;
+    if (p[32] != '$') return 0;
+    hex2bin(p, 32, checksum);
+
+    /* Decode edata2 */
+    const char *edata_hex = p + 33;
+    int edata_hexlen = remaining - 33;
+    if (edata_hexlen < 64 || edata_hexlen % 2 != 0) return 0;
+    int edata_len = edata_hexlen / 2;
+    if (edata_len > WS_CTX_SIZE) return 0;
+    if (hex2bin(edata_hex, edata_hexlen, edata) != edata_len) return 0;
+
+    /* NTLM(pass) */
+    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+
+    /* K1 = HMAC-MD5(ntlm, usage=2) */
+    unsigned char usage[4] = {2, 0, 0, 0};
+    unsigned int hlen = 16;
+    HMAC(EVP_md5(), ntlm, 16, usage, 4, k1, &hlen);
+
+    /* K3 = HMAC-MD5(K1, checksum) */
+    HMAC(EVP_md5(), k1, 16, checksum, 16, k3, &hlen);
+
+    /* RC4 decrypt */
+    hp_rc4_key rc4key;
+    hp_rc4_set_key(&rc4key, 16, k3);
+    hp_rc4(&rc4key, edata_len, edata, decrypted);
+
+    /* Verify ASN.1 ticket structure */
+    if (edata_len >= 22 &&
+        decrypted[8] == 0x63 && (decrypted[9] == 0x81 || decrypted[9] == 0x82) &&
+        decrypted[11] == 0x30)
+        return 1;
+    if (edata_len >= 24 &&
+        decrypted[16] == 0x03 && decrypted[17] == 0x05 && decrypted[18] == 0x00)
+        return 1;
+    if (edata_len >= 24 &&
+        decrypted[16] == 0x05 && decrypted[17] == 0x03 && decrypted[18] == 0x07 &&
+        decrypted[19] == 0xa0)
+        return 1;
+
+    return 0;
+}
+
+/* AXCRYPT (e915, mode 13200): SHA1(pass) XOR salt -> AES Key Unwrap
+ * Format: $axcrypt$*1*iter*salt32hex*wrapped48hex:password */
+static int verify_axcrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha1out = (unsigned char *)WS->gp1;
+    unsigned char *ax_salt = (unsigned char *)WS->gp2;
+    unsigned char *ax_wrapped = (unsigned char *)WS->gp3;
+
+    if (hashlen < 60 || memcmp(hashstr, "$axcrypt$*1*", 12) != 0) return 0;
+
+    /* Parse iter */
+    const char *iter_start = hashstr + 12;
+    const char *s1 = memchr(iter_start, '*', hashlen - 12);
+    if (!s1) return 0;
+    int ax_iter = atoi(iter_start);
+    if (ax_iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 10467.0, (double)ax_iter)) return 0;
+
+    /* Parse salt (32 hex) */
+    const char *salt_hex = s1 + 1;
+    const char *s2 = memchr(salt_hex, '*', hashlen - (salt_hex - hashstr));
+    if (!s2 || s2 - salt_hex != 32) return 0;
+
+    /* Parse wrapped key (48 hex) */
+    const char *wrap_hex = s2 + 1;
+    int wrap_hexlen = hashlen - (int)(wrap_hex - hashstr);
+    if (wrap_hexlen != 48) return 0;
+
+    /* Decode salt and wrapped key */
+    if (hex2bin(salt_hex, 32, ax_salt) != 16) return 0;
+    if (hex2bin(wrap_hex, 48, ax_wrapped) != 24) return 0;
+
+    /* SHA1(pass) */
+    rhash_msg(RHASH_SHA1, pass, passlen, sha1out);
+
+    /* KEK = SHA1(pass) XOR salt, truncate to 16 bytes */
+    unsigned char kek[16];
+    for (int i = 0; i < 16; i++)
+        kek[i] = sha1out[i] ^ ax_salt[i];
+
+    /* AES Key Unwrap (RFC 3394) with n=2 (A, R1, R2) */
+    unsigned char A[8], R1[8], R2[8];
+    memcpy(A, ax_wrapped, 8);
+    memcpy(R1, ax_wrapped + 8, 8);
+    memcpy(R2, ax_wrapped + 16, 8);
+
+    AES_KEY aes_dkey;
+    AES_set_decrypt_key(kek, 128, &aes_dkey);
+
+    for (int j = ax_iter - 1; j >= 0; j--) {
+        unsigned char block[16], out[16];
+        /* A ^= pack("l", 2*j+2) — little-endian 32-bit */
+        { unsigned long tv = 2 * j + 2;
+          A[0] ^= (tv) & 0xff;
+          A[1] ^= (tv >> 8) & 0xff;
+          A[2] ^= (tv >> 16) & 0xff;
+          A[3] ^= (tv >> 24) & 0xff;
+        }
+        memcpy(block, A, 8);
+        memcpy(block + 8, R2, 8);
+        AES_decrypt(block, out, &aes_dkey);
+        memcpy(A, out, 8);
+        memcpy(R2, out + 8, 8);
+        /* A ^= pack("l", 2*j+1) */
+        { unsigned long tv = 2 * j + 1;
+          A[0] ^= (tv) & 0xff;
+          A[1] ^= (tv >> 8) & 0xff;
+          A[2] ^= (tv >> 16) & 0xff;
+          A[3] ^= (tv >> 24) & 0xff;
+        }
+        memcpy(block, A, 8);
+        memcpy(block + 8, R1, 8);
+        AES_decrypt(block, out, &aes_dkey);
+        memcpy(A, out, 8);
+        memcpy(R1, out + 8, 8);
+    }
+
+    /* Verify: A == 0xA6A6A6A6A6A6A6A6 */
+    static const unsigned char ax_iv[8] = {0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6};
+    return memcmp(A, ax_iv, 8) == 0;
+}
+
+/* AXCRYPTSHA1 (e916, mode 13300): SHA1(pass), first 32 hex chars
+ * Format: $axcrypt_sha1$hash32hex:password */
+static int verify_axcryptsha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha1out = (unsigned char *)WS->gp1;
+
+    if (hashlen != 46 || memcmp(hashstr, "$axcrypt_sha1$", 14) != 0) return 0;
+
+    /* Validate 32 hex chars */
+    for (int i = 14; i < 46; i++)
+        if (hexval(hashstr[i]) < 0) return 0;
+
+    /* SHA1(pass) -> first 16 bytes (32 hex) */
+    rhash_msg(RHASH_SHA1, pass, passlen, sha1out);
+
+    /* Compare first 16 bytes */
+    unsigned char expected[16];
+    hex2bin(hashstr + 14, 32, expected);
+    return memcmp(sha1out, expected, 16) == 0;
+}
+
 /* SCRYPT: crypto_scrypt(pass, salt, N, r, p, output, 32)
  * Format: SCRYPT:N:r:p:base64_salt:base64_hash:password */
 static int verify_scrypt(const char *hashstr, int hashlen,
@@ -10905,6 +12194,7 @@ static int verify_scrypt(const char *hashstr, int hashlen,
     int sc_r = atoi(f[2]);
     int sc_p = atoi(f[3]);
     if (sc_N == 0 || sc_r == 0 || sc_p == 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1024.0, (double)(sc_N * sc_r * sc_p))) return 0;
 
     /* Decode base64 salt */
     int sc_salt_len = base64_decode(f[4], strlen(f[4]), salt_bin, WS_GP_SIZE);
@@ -11406,6 +12696,7 @@ static int verify_sha256crypt(const char *hashstr, int hashlen,
         if (!p) return 0;
         p++;
     }
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
     salt = p;
     for (saltlen = 0; saltlen < 16 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
         ;
@@ -11519,6 +12810,7 @@ static int verify_sha512crypt(const char *hashstr, int hashlen,
         if (!p) return 0;
         p++;
     }
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
     salt = p;
     for (saltlen = 0; saltlen < 16 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
         ;
@@ -11569,6 +12861,11 @@ static int verify_bcrypt256(const char *hashstr, int hashlen,
       int x;
 
       if (hashlen < 60) return 0;
+      { int cost = atoi(hashstr + 4);
+        if (cost > 0 && cost < 32 &&
+            verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+            return 0;
+      }
       /* Build setting: $2b$ + cost + $ + salt22 */
       memcpy(setting, hashstr, 28);
       setting[2] = 'b';
@@ -11626,6 +12923,7 @@ static int verify_pbkdf2_generic(const char *hashstr, int hashlen,
               if (c3) {
                   iters = atoi(c1 + 1);
                   if (iters <= 0) return 0;
+                  if (verify_cost_exceeds(WS->cur_rate, 100.0, (double)iters)) return 0;
                   *c2 = 0; *c3 = 0;
                   salt_len = base64_decode(c2 + 1, strlen(c2 + 1), salt_bin, WS_GP_SIZE);
                   if (salt_len <= 0) return 0;
@@ -11676,6 +12974,7 @@ static int verify_pbkdf2sha256(const char *hashstr, int hashlen,
           char *d1 = strchr(p, '$');
           if (!d1) return 0;
           iters = atoi(p);
+          if (verify_cost_exceeds(WS->cur_rate, 100.0, (double)iters)) return 0;
           { char *d2 = strchr(d1 + 1, '$');
             if (!d2) return 0;
             *d1 = 0; *d2 = 0;
@@ -11691,25 +12990,32 @@ static int verify_pbkdf2sha256(const char *hashstr, int hashlen,
     return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_sha256(), 32);
 }
 
-/* PBKDF2-SHA512 (e533): "sha512:iters:salt_b64:hash_b64" or "$ml$iters$hexsalt$hexhash" */
+/* PBKDF2-SHA512 (e533): "sha512:iters:salt_b64:hash_b64" or "$ml$iters$hexsalt$hexhash"
+ * or "grub.pbkdf2.sha512.iters.hexsalt.hexhash" (GRUB 2, hashcat 7200) */
 static int verify_pbkdf2sha512(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     if (hashlen < 10) return 0;
-    /* macOS $ml$ format */
-    if (memcmp(hashstr, "$ml$", 4) == 0) {
+    /* macOS $ml$ format or GRUB 2 grub.pbkdf2.sha512. format */
+    if (memcmp(hashstr, "$ml$", 4) == 0 ||
+        (hashlen > 20 && memcmp(hashstr, "grub.pbkdf2.sha512.", 19) == 0)) {
         char *buf = (char *)WS->gp1;
         unsigned char *salt_bin = (unsigned char *)WS->gp2;
         unsigned char *derived = (unsigned char *)WS->ctx1;
         unsigned char *expected = (unsigned char *)WS->ctx2;
         int iters, salt_len, expected_len;
+        int pfxlen;
+        char sep;
         if (hashlen >= (int)WS_GP_SIZE) return 0;
         memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
-        { char *p = buf + 4;
-          char *d1 = strchr(p, '$');
+        if (buf[0] == '$') { pfxlen = 4; sep = '$'; }
+        else               { pfxlen = 19; sep = '.'; }
+        { char *p = buf + pfxlen;
+          char *d1 = strchr(p, sep);
           if (!d1) return 0;
           iters = atoi(p);
-          { char *d2 = strchr(d1 + 1, '$');
+          if (verify_cost_exceeds(WS->cur_rate, 100.0, (double)iters)) return 0;
+          { char *d2 = strchr(d1 + 1, sep);
             if (!d2) return 0;
             *d1 = 0; *d2 = 0;
             salt_len = hex2bin(d1 + 1, d2 - d1 - 1, salt_bin);
@@ -11774,9 +13080,971 @@ static int verify_cisco8(const char *hashstr, int hashlen,
             if (rem > 2) encoded[ei++] = phpitoa64[b2 & 0x3f];
         }
         encoded[ei] = 0;
-        return strcmp(encoded, hash_part) == 0;
+        int hash_part_len = hashlen - (hash_part - hashstr);
+        return ei == hash_part_len && memcmp(encoded, hash_part, ei) == 0;
       }
     }
+}
+
+/* CISCO9 (e917, mode 9300): scrypt(pass, salt, 16384, 1, 1, 32) + phpitoa64
+ * Format: $9$salt$hash (61 chars total) */
+static int verify_cisco9(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *derived = (unsigned char *)WS->ctx1;
+    char *encoded = (char *)WS->gp1;
+    const char *salt, *hash_part;
+
+    if (hashlen != 61 || memcmp(hashstr, "$9$", 3) != 0) return 0;
+    salt = hashstr + 3;
+    hash_part = memchr(salt, '$', hashlen - 3);
+    if (!hash_part) return 0;
+    { int saltlen = hash_part - salt;
+      hash_part++;
+      int ret = crypto_scrypt((const uint8_t *)pass, passlen,
+                              (const uint8_t *)salt, saltlen,
+                              16384, 1, 1,
+                              derived, 32);
+      if (ret != 0) return 0;
+      /* Encode with phpitoa64 — same as Cisco 8 */
+      { int ei = 0, bi;
+        for (bi = 0; bi < 32; bi += 3) {
+            unsigned char b0 = derived[bi];
+            unsigned char b1 = (bi + 1 < 32) ? derived[bi + 1] : 0;
+            unsigned char b2 = (bi + 2 < 32) ? derived[bi + 2] : 0;
+            int rem = 32 - bi;
+            encoded[ei++] = phpitoa64[b0 >> 2];
+            encoded[ei++] = phpitoa64[((b0 & 3) << 4) | (b1 >> 4)];
+            if (rem > 1) encoded[ei++] = phpitoa64[((b1 & 0xf) << 2) | (b2 >> 6)];
+            if (rem > 2) encoded[ei++] = phpitoa64[b2 & 0x3f];
+        }
+        encoded[ei] = 0;
+        int hash_part_len = hashlen - (hash_part - hashstr);
+        return ei == hash_part_len && memcmp(encoded, hash_part, ei) == 0;
+      }
+    }
+}
+
+/* DCC2 (e918): $DCC2$iter#username#hash32hex
+ * DCC1 = MD4(NTLM + UTF16LE(lc(user))), DCC2 = PBKDF2-HMAC-SHA1(DCC1, UTF16LE(lc(user)), iter, 16) */
+static int verify_dcc2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *ntlm = (unsigned char *)WS->ctx1;
+    unsigned char *dcc1 = (unsigned char *)WS->ctx2;
+    unsigned char *derived = (unsigned char *)WS->ctx3;
+    unsigned char *expected = (unsigned char *)WS->ctx4;
+    unsigned char *u16salt = WS->u16b;
+    unsigned char *lcsalt = WS->gp1;
+    const char *p, *user, *hash_start;
+    int iter, userlen, u16slen, i;
+    rhash ctx;
+
+    if (hashlen < 14 || memcmp(hashstr, "$DCC2$", 6) != 0) return 0;
+
+    /* Parse iteration count */
+    p = hashstr + 6;
+    iter = 0;
+    while (*p >= '0' && *p <= '9') { iter = iter * 10 + (*p - '0'); p++; }
+    if (*p != '#') return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 10240.0, (double)iter)) return 0;
+    p++;
+
+    /* Parse username */
+    user = p;
+    hash_start = NULL;
+    while (p < hashstr + hashlen) {
+        if (*p == '#') { hash_start = p + 1; break; }
+        p++;
+    }
+    if (!hash_start) return 0;
+    userlen = (int)((p - user));
+    if (hashlen - (int)(hash_start - hashstr) != 32) return 0;
+    if (hex2bin(hash_start, 32, expected) != 16) return 0;
+
+    /* NTLM = MD4(UTF16LE(pass)) */
+    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+
+    /* DCC1 = MD4(NTLM + UTF16LE(lc(user))) */
+    for (i = 0; i < userlen && i < MAXLINE - 1; i++)
+        lcsalt[i] = tolower(user[i]);
+    u16slen = utf8_to_utf16le(lcsalt, i, u16salt, WS_U16_SIZE);
+    ctx = rhash_init(RHASH_MD4);
+    rhash_update(ctx, ntlm, 16);
+    rhash_update(ctx, u16salt, u16slen);
+    rhash_final(ctx, dcc1); rhash_free(ctx);
+
+    /* DCC2 = PBKDF2-HMAC-SHA1(DCC1, UTF16LE(lc(user)), iter, 16) */
+    PKCS5_PBKDF2_HMAC((const char *)dcc1, 16,
+        u16salt, u16slen, iter, EVP_sha1(), 16, derived);
+
+    return memcmp(derived, expected, 16) == 0;
+}
+
+/* PWSAFE3 (e919): Password Safe v3
+ * Format: hex-encoded binary: "50575333" + salt(64hex) + iter(8hex LE) + hash(64hex) + ...
+ * Algorithm: SHA256(pass+salt), then iterate SHA256 iter+1 times */
+static int verify_pwsafe3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->gp1;
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *digest = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp2;
+    unsigned char iter_bytes[4];
+    int iter, x;
+
+    if (hashlen < 144) return 0;
+    if (memcmp(hashstr, "50575333", 8) != 0) return 0;
+
+    if (hex2bin(hashstr + 8, 64, salt) != 32) return 0;
+    if (hex2bin(hashstr + 72, 8, iter_bytes) != 4) return 0;
+    iter = iter_bytes[0] | (iter_bytes[1] << 8) | (iter_bytes[2] << 16) | (iter_bytes[3] << 24);
+    if (verify_cost_exceeds(WS->cur_rate, 2048.0, (double)iter)) return 0;
+    if (hex2bin(hashstr + 80, 64, expected) != 32) return 0;
+
+    /* SHA256(pass + salt) */
+    if (passlen + 32 > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, salt, 32);
+    SHA256(buf, passlen + 32, digest);
+
+    /* Iterate SHA256 iter+1 times (PasswordSafe convention) */
+    for (x = 0; x <= iter; x++)
+        SHA256(digest, 32, digest);
+
+    return memcmp(digest, expected, 32) == 0;
+}
+
+/* IKE-PSK MD5 (e920): 9 colon-separated hex fields
+ * Fields 0-5 = msg_buf, 6-7 = nonces, 8 = hash (32 hex)
+ * SKEYID = HMAC-MD5(pass, nr_i + nr_r), hash = HMAC-MD5(SKEYID, msg) */
+static int verify_ikepsk_md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *skeyid = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *expected = (unsigned char *)WS->ctx3;
+    unsigned char *nonce_buf = (unsigned char *)WS->gp1;
+    unsigned char *msg_buf = (unsigned char *)WS->gp2;
+    const char *fields[9];
+    int flens[9], nf = 0, i, n;
+    int nonce_len = 0, msg_len = 0;
+    unsigned int hmac_len;
+    const char *p = hashstr, *end = hashstr + hashlen;
+
+    /* Parse 9 colon-separated fields */
+    fields[0] = p;
+    while (p < end && nf < 8) {
+        if (*p == ':') { flens[nf] = p - fields[nf]; nf++; fields[nf] = p + 1; }
+        p++;
+    }
+    if (nf != 8) return 0;
+    flens[8] = end - fields[8];
+
+    if (flens[8] != 32) return 0;
+    if (hex2bin(fields[8], 32, expected) != 16) return 0;
+
+    /* Decode nonces (fields 6,7) */
+    n = hex2bin(fields[6], flens[6], nonce_buf);
+    if (n <= 0) return 0; nonce_len = n;
+    n = hex2bin(fields[7], flens[7], nonce_buf + nonce_len);
+    if (n <= 0) return 0; nonce_len += n;
+
+    /* Decode msg fields (fields 0-5) */
+    for (i = 0; i < 6; i++) {
+        n = hex2bin(fields[i], flens[i], msg_buf + msg_len);
+        if (n < 0) return 0; msg_len += n;
+    }
+
+    /* SKEYID = HMAC-MD5(pass, nonces) */
+    hmac_len = 16;
+    HMAC(EVP_md5(), pass, passlen, nonce_buf, nonce_len, skeyid, &hmac_len);
+
+    /* hash = HMAC-MD5(SKEYID, msg_buf) */
+    hmac_len = 16;
+    HMAC(EVP_md5(), skeyid, 16, msg_buf, msg_len, computed, &hmac_len);
+
+    return memcmp(computed, expected, 16) == 0;
+}
+
+/* IKE-PSK SHA1 (e921): same as MD5 variant but HMAC-SHA1, field 8 = 40 hex */
+static int verify_ikepsk_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *skeyid = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *expected = (unsigned char *)WS->ctx3;
+    unsigned char *nonce_buf = (unsigned char *)WS->gp1;
+    unsigned char *msg_buf = (unsigned char *)WS->gp2;
+    const char *fields[9];
+    int flens[9], nf = 0, i, n;
+    int nonce_len = 0, msg_len = 0;
+    unsigned int hmac_len;
+    const char *p = hashstr, *end = hashstr + hashlen;
+
+    /* Parse 9 colon-separated fields */
+    fields[0] = p;
+    while (p < end && nf < 8) {
+        if (*p == ':') { flens[nf] = p - fields[nf]; nf++; fields[nf] = p + 1; }
+        p++;
+    }
+    if (nf != 8) return 0;
+    flens[8] = end - fields[8];
+
+    if (flens[8] != 40) return 0;
+    if (hex2bin(fields[8], 40, expected) != 20) return 0;
+
+    /* Decode nonces (fields 6,7) */
+    n = hex2bin(fields[6], flens[6], nonce_buf);
+    if (n <= 0) return 0; nonce_len = n;
+    n = hex2bin(fields[7], flens[7], nonce_buf + nonce_len);
+    if (n <= 0) return 0; nonce_len += n;
+
+    /* Decode msg fields (fields 0-5) */
+    for (i = 0; i < 6; i++) {
+        n = hex2bin(fields[i], flens[i], msg_buf + msg_len);
+        if (n < 0) return 0; msg_len += n;
+    }
+
+    /* SKEYID = HMAC-SHA1(pass, nonces) */
+    hmac_len = 20;
+    HMAC(EVP_sha1(), pass, passlen, nonce_buf, nonce_len, skeyid, &hmac_len);
+
+    /* hash = HMAC-SHA1(SKEYID, msg_buf) */
+    hmac_len = 20;
+    HMAC(EVP_sha1(), skeyid, 20, msg_buf, msg_len, computed, &hmac_len);
+
+    return memcmp(computed, expected, 20) == 0;
+}
+
+/* SAP BCODE (e922, hashcat 7700) / SAP BCODE4 (e923, hashcat 7701)
+ * Format: SALT_UC$HASH_UC (salt up to 12 chars, hash 16 hex UC for 7700, 8 hex for 7701)
+ * Algorithm: sapb_trans(pass+salt) → MD5 → walld0rf_magic → MD5 → XOR fold
+ * Password max 8 chars, uppercased. */
+
+static const unsigned char sapb_trans_tbl[256] = {
+    0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0x3f,0x40,0x41,0x50,0x43,0x44,0x45,0x4b,0x47,0x48,0x4d,0x4e,0x54,0x51,0x53,0x46,
+    0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x56,0x55,0x5c,0x49,0x5d,0x4a,
+    0x42,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+    0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x58,0x5b,0x59,0xff,0x52,
+    0x4c,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+    0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x57,0x5e,0x5a,0x4f,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff
+};
+
+static const unsigned char bcodeArray[48] = {
+    0x14,0x77,0xf3,0xd4,0xbb,0x71,0x23,0xd0,0x03,0xff,0x47,0x93,0x55,0xaa,0x66,0x91,
+    0xf2,0x88,0x6b,0x99,0xbf,0xcb,0x32,0x1a,0x19,0xd9,0xa7,0x82,0x22,0x49,0xa2,0x51,
+    0xe2,0xb7,0x33,0x71,0x8b,0x9f,0x5d,0x01,0x44,0x70,0xae,0x11,0xef,0x28,0xf0,0x0d
+};
+
+static int verify_sap_bcode(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int cmpbytes)
+{
+    unsigned char *tbuf = (unsigned char *)WS->gp1;     /* walld0rf_magic work buffer (64 bytes) */
+    unsigned char *md5in = (unsigned char *)WS->gp2;    /* MD5 input + concatenation buffer */
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char digest[16];
+    const char *dollar;
+    int saltlen, hlen, i;
+    unsigned char trans_pass[8], trans_salt[12];
+
+    /* Parse SALT$HASH */
+    dollar = memchr(hashstr, '$', hashlen);
+    if (!dollar) return 0;
+    saltlen = dollar - hashstr;
+    if (saltlen < 0 || saltlen > 12) return 0;
+    hlen = hashlen - saltlen - 1;
+
+    /* Decode expected hash — full length, compare only cmpbytes */
+    int fullbytes = hlen / 2;
+    if (fullbytes != 8 && fullbytes != 4) return 0;  /* must be 16 or 8 hex chars */
+    if (fullbytes < cmpbytes) return 0;
+    if (hex2bin(dollar + 1, hlen, expected) != fullbytes) return 0;
+
+    /* Password max 8 chars, uppercase */
+    int pwlen = passlen > 8 ? 8 : passlen;
+
+    /* Transform password and salt through sapb_trans */
+    for (i = 0; i < 8; i++) {
+        if (i < pwlen) {
+            unsigned char c = pass[i];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            trans_pass[i] = sapb_trans_tbl[c];
+        } else {
+            trans_pass[i] = 0x00;
+        }
+    }
+    for (i = 0; i < saltlen; i++) {
+        unsigned char c = hashstr[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        trans_salt[i] = sapb_trans_tbl[c];
+    }
+
+    /* First MD5: MD5(trans_pass + trans_salt) */
+    int md5len = 0;
+    memcpy(md5in, trans_pass, pwlen);
+    md5len = pwlen;
+    memcpy(md5in + md5len, trans_salt, saltlen);
+    md5len += saltlen;
+    rhash_msg(RHASH_MD5, md5in, md5len, digest);
+
+    /* walld0rf_magic: build buffer from interleaved pass/salt/bcodeArray */
+    {
+        unsigned int sum20 = ((digest[0] >> 0) & 3)
+                           + ((digest[0] >> 2) & 3)
+                           + ((digest[1] >> 0) & 3)
+                           + ((digest[1] >> 2) & 3)
+                           + ((digest[2] >> 2) & 3);
+        sum20 |= 0x20;
+
+        unsigned int i1 = 0, i2 = 0, i3 = 0;
+        memset(tbuf, 0, 64);
+
+        while (i2 < sum20) {
+            if (i1 < (unsigned int)pwlen) {
+                if (digest[15 - i1] & 1) {
+                    tbuf[i2++] = bcodeArray[48 - 1 - i1];
+                    if (i2 == sum20) break;
+                }
+                tbuf[i2++] = trans_pass[i1];
+                if (i2 == sum20) break;
+                i1++;
+            }
+            if (i3 < (unsigned int)saltlen) {
+                tbuf[i2++] = trans_salt[i3];
+                if (i2 == sum20) break;
+                i3++;
+            }
+            tbuf[i2] = bcodeArray[i2 - i1 - i3];
+            i2++;
+            i2++;
+        }
+
+        /* Second MD5 */
+        rhash_msg(RHASH_MD5, tbuf, sum20, digest);
+    }
+
+    /* XOR fold: result = digest[0..3] ^ digest[8..11], digest[4..7] ^ digest[12..15] */
+    unsigned char result[8];
+    for (i = 0; i < 4; i++) {
+        result[i] = digest[i] ^ digest[i + 8];
+        result[i + 4] = digest[i + 4] ^ digest[i + 12];
+    }
+
+    return memcmp(result, expected, cmpbytes) == 0;
+}
+
+static int verify_sap_bcode_full(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_sap_bcode(hashstr, hashlen, pass, passlen, 8);
+}
+
+static int verify_sap_bcode4(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_sap_bcode(hashstr, hashlen, pass, passlen, 4);
+}
+
+/* SAP PASSCODE (e924, hashcat 7800) / SAP PASSCODE5 (e925, hashcat 7801)
+ * Format: SALT_UC$HASH_UC (salt up to 12 chars, hash 40 hex UC for 7800, 10 hex for 7801)
+ * Algorithm: SHA1(pass + UC_salt) → compute magic array offset/length → SHA1(pass + magic + salt) */
+
+static const unsigned char theMagicArray[160] = {
+    0x91,0xac,0x51,0x14,0x9f,0x67,0x54,0x43,0x24,0xe7,0x3b,0xe0,0x28,0x74,0x7b,0xc2,
+    0x86,0x33,0x13,0xeb,0x5a,0x4f,0xcb,0x5c,0x08,0x0a,0x73,0x37,0x0e,0x5d,0x1c,0x2f,
+    0x33,0x8f,0xe6,0xe5,0xf8,0x9b,0xae,0xdd,0x16,0xf2,0x4b,0x8d,0x2c,0xe1,0xd4,0xdc,
+    0xb0,0xcb,0xdf,0x9d,0xd4,0x70,0x6d,0x17,0xf9,0x4d,0x42,0x3f,0x9b,0x1b,0x11,0x94,
+    0x9f,0x5b,0xc1,0x9b,0x06,0x05,0x9d,0x03,0x9d,0x5e,0x13,0x8a,0x1e,0x9a,0x6a,0xe8,
+    0xd9,0x7c,0x14,0x17,0x58,0xc7,0x2a,0xf6,0xa1,0x99,0x63,0x0a,0xd7,0xfd,0x70,0xc3,
+    0xf6,0x5e,0x74,0x13,0x03,0xc9,0x0b,0x04,0x26,0x98,0xf7,0x26,0x8a,0x92,0x93,0x25,
+    0xb0,0xa2,0x0d,0x23,0xed,0x63,0x79,0x6d,0x13,0x32,0xfa,0x3c,0x35,0x02,0x9a,0xa3,
+    0xb3,0xdd,0x8e,0x0a,0x24,0xbf,0x51,0xc3,0x7c,0xcd,0x55,0x9f,0x37,0xaf,0x94,0x4c,
+    0x29,0x08,0x52,0x82,0xb2,0x3b,0x4e,0x37,0x9f,0x17,0x07,0x91,0x11,0x3b,0xfd,0xcd
+};
+
+static int verify_sap_passcode(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int cmpbytes)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char digest[20];
+    unsigned char *sha_buf = (unsigned char *)WS->gp1;   /* concatenation buffer */
+    const char *dollar;
+    int saltlen, hlen, i;
+    rhash ctx;
+
+    /* Parse SALT$HASH */
+    dollar = memchr(hashstr, '$', hashlen);
+    if (!dollar) return 0;
+    saltlen = dollar - hashstr;
+    if (saltlen < 0 || saltlen > 12) return 0;
+    hlen = hashlen - saltlen - 1;
+
+    /* Decode expected hash — full length, compare only cmpbytes */
+    int fullbytes = hlen / 2;
+    if (fullbytes != 20 && fullbytes != 5) return 0;  /* must be 40 or 10 hex chars */
+    if (fullbytes < cmpbytes) return 0;
+    if (hex2bin(dollar + 1, hlen, expected) != fullbytes) return 0;
+
+    /* Build uppercase salt */
+    unsigned char uc_salt[12];
+    for (i = 0; i < saltlen; i++) {
+        unsigned char c = hashstr[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        uc_salt[i] = c;
+    }
+
+    /* First SHA1: SHA1(pass + UC_salt) */
+    ctx = rhash_init(RHASH_SHA1);
+    rhash_update(ctx, pass, passlen);
+    rhash_update(ctx, uc_salt, saltlen);
+    rhash_final(ctx, digest);
+
+    /* Compute lengthMagicArray and offsetMagicArray from digest bytes */
+    unsigned int lengthMagicArray = 0x20;
+    unsigned int offsetMagicArray = 0;
+
+    /* lengthMagicArray += each of first 10 digest bytes % 6 */
+    for (i = 0; i < 10; i++)
+        lengthMagicArray += digest[i] % 6;
+
+    /* offsetMagicArray += each of next 10 digest bytes & 7 */
+    for (i = 10; i < 20; i++)
+        offsetMagicArray += digest[i] & 7;
+
+    /* Second SHA1: SHA1(pass + magicArray[offset..offset+length] + salt) */
+    rhash_reset(ctx);
+    rhash_update(ctx, pass, passlen);
+    rhash_update(ctx, theMagicArray + offsetMagicArray, lengthMagicArray);
+    rhash_update(ctx, uc_salt, saltlen);
+    rhash_final(ctx, digest);
+    rhash_free(ctx);
+
+    return memcmp(digest, expected, cmpbytes) == 0;
+}
+
+static int verify_sap_passcode_full(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_sap_passcode(hashstr, hashlen, pass, passlen, 20);
+}
+
+static int verify_sap_passcode5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return verify_sap_passcode(hashstr, hashlen, pass, passlen, 5);
+}
+
+/* AS/400 DES (e926, hashcat 8501)
+ * Format: $as400$des$*USERNAME*HASH16HEX
+ * Algorithm: password → EBCDIC_PC (pad to 8 with 0x2a), used as DES key
+ *            username → EBCDIC (pad to 8 with 0x40, fold if >8), used as plaintext
+ *            DES-ECB-encrypt(plaintext=username, key=password) == hash */
+
+static const unsigned char a2e_pc[256] = {
+    0x2a,0xa8,0xae,0xad,0xc4,0xf1,0xf7,0xf4,0x86,0xa1,0xe0,0xbc,0xb3,0xb0,0xb6,0xb5,
+    0x8a,0x89,0x8f,0x8c,0xd3,0xd0,0xce,0xe6,0x9b,0x98,0xd5,0xe5,0x92,0x91,0x97,0x94,
+    0x2a,0x34,0x54,0x5d,0x1c,0x73,0x0b,0x51,0x31,0x10,0x13,0x37,0x7c,0x6b,0x3d,0x68,
+    0x4a,0x49,0x4f,0x4c,0x43,0x40,0x46,0x45,0x5b,0x58,0x5e,0x16,0x32,0x57,0x76,0x75,
+    0x52,0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,
+    0x04,0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x3e,0x6b,0x1f,0x15,0x70,
+    0x58,0xa8,0xae,0xad,0xa2,0xa1,0xa7,0xa4,0xba,0xb9,0x89,0x8f,0x8c,0x83,0x80,0x86,
+    0x85,0x9b,0x98,0xef,0xec,0xe3,0xe0,0xe6,0xe5,0xfb,0xf8,0x2a,0x7f,0x0b,0xe9,0xa4,
+    0xea,0xe9,0xef,0xec,0xe3,0x80,0xa7,0x85,0xfb,0xf8,0xfe,0xfd,0xf2,0xb9,0xbf,0x9d,
+    0xcb,0xc8,0x9e,0xcd,0xc2,0xc1,0xc7,0xba,0xda,0xd9,0xdf,0xdc,0xa2,0x83,0xd6,0x68,
+    0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,0x04,
+    0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x4a,0x49,0x4f,0x4c,0x43,0x40,
+    0x46,0x45,0x5b,0xab,0xbf,0xbc,0xb3,0xb0,0xb6,0xb5,0x8a,0x9e,0x9d,0x92,0x91,0x97,
+    0x94,0xea,0xfe,0xfd,0xf2,0xf1,0xf7,0xf4,0xcb,0xc8,0xce,0xcd,0xc2,0xc1,0xc7,0xc4,
+    0xda,0xd9,0xdf,0xdc,0xd3,0xd0,0xd6,0xd5,0x3e,0x3d,0x32,0x31,0x37,0x34,0x1f,0x1c,
+    0x13,0x10,0x16,0x15,0x7f,0x7c,0x73,0x70,0x76,0x75,0x5e,0x5d,0x52,0x51,0x57,0x54
+};
+
+static int verify_as400des(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *euser = (unsigned char *)WS->ctx2;
+    unsigned char *ciphertext = (unsigned char *)WS->ctx3;
+    unsigned char *deskey = (unsigned char *)WS->ctx4;
+    DES_key_schedule *ks = (DES_key_schedule *)WS->ctx5;
+    const char *p1, *p2;
+    int ulen, i;
+
+    /* Parse $as400$des$*USERNAME*HASH16HEX */
+    if (hashlen < 14) return 0;
+    if (memcmp(hashstr, "$as400$des$*", 12) != 0) return 0;
+    p1 = hashstr + 12;  /* start of username */
+    p2 = memchr(p1, '*', hashlen - 12);
+    if (!p2) return 0;
+    ulen = p2 - p1;
+    if (ulen < 0 || ulen > 10) return 0;
+    p2++;  /* skip second '*' */
+    int hlen = (hashstr + hashlen) - p2;
+    if (hlen != 16) return 0;
+    if (hex2bin(p2, 16, expected) != 8) return 0;
+
+    /* Password → EBCDIC_PC, pad to 8 with 0x2a */
+    int pwlen = passlen > 8 ? 8 : passlen;
+    for (i = 0; i < 8; i++)
+        deskey[i] = (i < pwlen) ? a2e_pc[pass[i]] : 0x2a;
+
+    DES_set_key_unchecked((DES_cblock *)deskey, ks);
+
+    /* Username → standard EBCDIC, pad to 8 with 0x40, fold if > 8 */
+    for (i = 0; i < 8; i++) {
+        char c = (i < ulen) ? p1[i] : ' ';
+        if (c >= 'a' && c <= 'z') c -= 32;
+        euser[i] = a2e[(unsigned char)c];
+    }
+    /* Fold bytes 8-9 if username > 8 */
+    if (ulen > 8) {
+        unsigned char eb8, eb9 = 0x40;
+        char c = p1[8];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        eb8 = a2e[(unsigned char)c];
+        if (ulen > 9) {
+            c = p1[9];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            eb9 = a2e[(unsigned char)c];
+        }
+        euser[0] ^= (eb8 & 0xC0);
+        euser[1] ^= (eb8 & 0x30) << 2;
+        euser[2] ^= (eb8 & 0x0C) << 4;
+        euser[3] ^= (eb8 & 0x03) << 6;
+        euser[4] ^= (eb9 & 0xC0);
+        euser[5] ^= (eb9 & 0x30) << 2;
+        euser[6] ^= (eb9 & 0x0C) << 4;
+        euser[7] ^= (eb9 & 0x03) << 6;
+    }
+
+    DES_ecb_encrypt((const_DES_cblock *)euser, (DES_cblock *)ciphertext, ks, DES_ENCRYPT);
+    return memcmp(ciphertext, expected, 8) == 0;
+}
+
+/* RACF-KDFAES (e929, hashcat 14200): DES + memory-hard PBKDF2-SHA256 + AES-256
+ * Format: $racf-kdfaes$*USER*HEADER32HEX*SALT32HEX*HASH32HEX
+ * Password max 8 chars. Algorithm:
+ *   1. DES-encrypt(EBCDIC_username, key=EBCDIC_PC(password)) -> 8-byte derived key
+ *   2. Memory-filling: mem_fac rounds of PBKDF2-SHA256(key, salt, rep_fac*100)
+ *      with pre-last-U capture for next salt
+ *   3. Transposition: mem_fac rounds of PBKDF2-SHA256(key, membuf[data_dep_idx], 1)
+ *   4. Final PBKDF2-SHA256(key, membuf_concat, rep_fac*100) -> AES-256 key
+ *   5. AES-256-ECB-encrypt(EBCDIC_username_16, aes_key) == stored hash */
+
+/* Custom PBKDF2-HMAC-SHA256 with pre-last-U capture.
+ * out: 32-byte standard PBKDF2 output.  prelast: 32-byte U_{n-1} (NULL to skip). */
+static void racf_pbkdf2_sha256(
+    const unsigned char *key, int keylen,
+    const unsigned char *salt, int saltlen,
+    int iterations,
+    unsigned char *out, unsigned char *prelast)
+{
+    unsigned char U[32];
+    unsigned char saltplus[1024];
+    unsigned int hmlen = 32;
+    int i, j;
+
+    if (saltlen + 4 > (int)sizeof(saltplus)) return;
+    memcpy(saltplus, salt, saltlen);
+    saltplus[saltlen] = 0; saltplus[saltlen+1] = 0;
+    saltplus[saltlen+2] = 0; saltplus[saltlen+3] = 1;  /* block index 1 */
+    HMAC(EVP_sha256(), key, keylen, saltplus, saltlen + 4, U, &hmlen);
+    memcpy(out, U, 32);
+
+    for (i = 1; i < iterations; i++) {
+        if (prelast && i == iterations - 1)
+            memcpy(prelast, U, 32);
+        HMAC(EVP_sha256(), key, keylen, U, 32, U, &hmlen);
+        for (j = 0; j < 32; j++) out[j] ^= U[j];
+    }
+}
+
+static int verify_racf_kdfaes(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;  /* 16 bytes stored hash */
+    unsigned char *euser = (unsigned char *)WS->ctx2;     /* 8 bytes EBCDIC username */
+    unsigned char *deskey_buf = (unsigned char *)WS->ctx3; /* 8 bytes DES key */
+    DES_key_schedule *ks = (DES_key_schedule *)WS->ctx4;
+    unsigned char *header = (unsigned char *)WS->ctx5;    /* 16 bytes decoded header */
+    unsigned char *salt16 = (unsigned char *)WS->ctx6;    /* 16 bytes salt */
+    unsigned char *des_out = (unsigned char *)WS->ctx7;   /* 8 bytes DES output */
+    AES_KEY *aeskey = (AES_KEY *)WS->ctx8;
+    unsigned char *pbkdf_key = (unsigned char *)WS->gp1;  /* 32 bytes current key */
+    unsigned char *pbkdf_salt = (unsigned char *)WS->gp2; /* up to 1024 bytes salt */
+    unsigned char *pbkdf_out = (unsigned char *)WS->gp3;  /* 32 bytes PBKDF2 output */
+    unsigned char *prelast = (unsigned char *)WS->gp4;    /* 32 bytes pre-last U */
+    unsigned char *membuf = WS->testvec;                  /* mem_fac * 32 bytes */
+    unsigned char *aes_plain = (unsigned char *)WS->ctx9; /* 16 bytes AES plaintext */
+    unsigned char *aes_cipher = (unsigned char *)WS->ctx10; /* 16 bytes AES output */
+    const char *p, *f[5];
+    int flen[5], nf, i;
+    int mem_fac_raw, rep_fac, mem_fac, pbkdf_iters;
+
+    /* Parse: $racf-kdfaes$*USER*HEADER*SALT*HASH */
+    if (hashlen < 28) return 0;
+    if (memcmp(hashstr, "$racf-kdfaes$*", 14) != 0) return 0;
+    p = hashstr + 14;
+    nf = 0;
+    for (i = 0; i < 4; i++) {
+        f[i] = p;
+        const char *star = memchr(p, '*', hashstr + hashlen - p);
+        if (i < 3) {
+            if (!star) return 0;
+            flen[i] = star - p;
+            p = star + 1;
+        } else {
+            flen[i] = hashstr + hashlen - p;
+        }
+    }
+
+    /* f[0]=username, f[1]=header(32hex), f[2]=salt(32hex), f[3]=hash(32hex) */
+    if (flen[0] < 0 || flen[0] > 8) return 0;
+    if (flen[1] != 32 || flen[2] != 32 || flen[3] != 32) return 0;
+    if (hex2bin(f[1], 32, header) != 16) return 0;
+    if (hex2bin(f[2], 32, salt16) != 16) return 0;
+    if (hex2bin(f[3], 32, expected) != 16) return 0;
+
+    /* Extract mem_fac and rep_fac from header (big-endian u16 at bytes 8-9 and 10-11) */
+    mem_fac_raw = ((int)header[8] << 8) | header[9];
+    rep_fac = ((int)header[10] << 8) | header[11];
+    if (mem_fac_raw < 1 || mem_fac_raw > 15) return 0;
+    if (rep_fac < 1) return 0;
+    mem_fac = (2 << (mem_fac_raw - 1)) / 32;
+    if (mem_fac < 1) return 0;
+    pbkdf_iters = rep_fac * 100;
+    if ((unsigned)mem_fac * 32 > TESTVECSIZE) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 85000.0,
+        (double)pbkdf_iters * (2 * mem_fac + 1))) return 0;
+
+    /* Phase 1: DES — password → EBCDIC_PC key, encrypt EBCDIC username */
+    int pwlen = passlen > 8 ? 8 : passlen;
+    for (i = 0; i < 8; i++)
+        deskey_buf[i] = (i < pwlen) ? a2e_pc[pass[i]] : 0x2a;
+
+    /* Username → standard EBCDIC, pad to 8 with 0x40 */
+    for (i = 0; i < 8; i++) {
+        char c = (i < flen[0]) ? f[0][i] : ' ';
+        if (c >= 'a' && c <= 'z') c -= 32;
+        euser[i] = a2e[(unsigned char)c];
+    }
+
+    DES_set_key_unchecked((DES_cblock *)deskey_buf, ks);
+    DES_ecb_encrypt((const_DES_cblock *)euser, (DES_cblock *)des_out, ks, DES_ENCRYPT);
+
+    /* Phase 2: Memory-filling PBKDF2 loop */
+    memset(pbkdf_key, 0, 32);
+    memcpy(pbkdf_key, des_out, 8);
+
+    /* Initial salt: 16-byte salt + 4-byte mem_fac (big-endian u32).
+     * hashcat stores mem_fac as native u32 in salt_buf[4] (no hc_swap32_S),
+     * but SHA256 treats u32 words as big-endian, so the effective byte
+     * representation is big-endian. Use htonl for byte-level equivalent. */
+    memcpy(pbkdf_salt, salt16, 16);
+    pbkdf_salt[16] = (mem_fac >> 24) & 0xff;
+    pbkdf_salt[17] = (mem_fac >> 16) & 0xff;
+    pbkdf_salt[18] = (mem_fac >>  8) & 0xff;
+    pbkdf_salt[19] = (mem_fac      ) & 0xff;
+    int cur_saltlen = 20;
+
+    for (i = 0; i < mem_fac; i++) {
+        racf_pbkdf2_sha256(pbkdf_key, 8, pbkdf_salt, cur_saltlen,
+                           pbkdf_iters, pbkdf_out, prelast);
+        memcpy(membuf + i * 32, pbkdf_out, 32);
+
+        /* Update salt: prelast[0..15] || pbkdf_out[0..31] = 48 bytes */
+        memcpy(pbkdf_salt, prelast, 16);
+        memcpy(pbkdf_salt + 16, pbkdf_out, 32);
+        cur_saltlen = 48;
+    }
+
+    /* Phase 3: Transposition */
+    /* key = last PBKDF2 output (from salt_buf[4..11] in hashcat = pbkdf_out) */
+    memcpy(pbkdf_key, pbkdf_out, 32);
+
+    for (i = 0; i < mem_fac; i++) {
+        /* Data-dependent index: last u32 of key (big-endian) mod mem_fac */
+        uint32_t n_val = ((uint32_t)pbkdf_key[28] << 24) |
+                         ((uint32_t)pbkdf_key[29] << 16) |
+                         ((uint32_t)pbkdf_key[30] << 8) |
+                         pbkdf_key[31];
+        int n_key = n_val & (mem_fac - 1);
+
+        /* PBKDF2-SHA256(key=32, salt=membuf[n_key]=32, iter=1) */
+        racf_pbkdf2_sha256(pbkdf_key, 32, membuf + n_key * 32, 32,
+                           1, pbkdf_out, NULL);
+        memcpy(membuf + i * 32, pbkdf_out, 32);
+        memcpy(pbkdf_key, pbkdf_out, 32);
+    }
+
+    /* Phase 4: Final PBKDF2 */
+    /* Zero last block */
+    memset(membuf + (mem_fac - 1) * 32, 0, 32);
+
+    /* Salt = membuf[0..(mem_fac-2)] = (mem_fac-1)*32 bytes */
+    int final_saltlen = (mem_fac - 1) * 32;
+    racf_pbkdf2_sha256(pbkdf_key, 32, membuf, final_saltlen,
+                       pbkdf_iters, pbkdf_out, NULL);
+
+    /* Phase 5: AES-256-ECB encrypt EBCDIC username (padded to 16 with 0x00).
+     * hashcat's salt_buf_pc stores only 8 bytes; bytes 8-15 are zero. */
+    memset(aes_plain, 0, 16);
+    memcpy(aes_plain, euser, 8);
+
+    AES_set_encrypt_key(pbkdf_out, 256, aeskey);
+    AES_ecb_encrypt(aes_plain, aes_cipher, aeskey, AES_ENCRYPT);
+
+    WS->verify_iter = pbkdf_iters;
+    return memcmp(aes_cipher, expected, 16) == 0;
+}
+
+/* PS_TOKEN (e927, hashcat 13500): SHA1(hex_salt + UTF16LE(pass))
+ * Format: 40hex_hash:hex_salt (salt up to 1024 hex = 512 bytes binary) */
+static int verify_ps_token(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *saltbin = (unsigned char *)WS->gp1;     /* decoded salt (up to 512 bytes) */
+    unsigned char *u16buf = (unsigned char *)WS->u16a;     /* UTF-16LE password */
+    unsigned char digest[20];
+    const char *colon;
+    int hpart, saltlen, u16len;
+    rhash ctx;
+
+    /* Parse hash:salt */
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 40) return 0;
+    if (hex2bin(hashstr, 40, expected) != 20) return 0;
+
+    /* Decode hex salt */
+    int salthex = hashlen - hpart - 1;
+    if (salthex < 2 || salthex > 1024 || (salthex & 1)) return 0;
+    saltlen = hex2bin(colon + 1, salthex, saltbin);
+    if (saltlen <= 0) return 0;
+
+    /* UTF-16LE encode password */
+    u16len = utf8_to_utf16le(pass, passlen, u16buf, WS_U16_SIZE);
+    if (u16len <= 0) return 0;
+
+    /* SHA1(salt + UTF16LE(pass)) */
+    ctx = rhash_init(RHASH_SHA1);
+    rhash_update(ctx, saltbin, saltlen);
+    rhash_update(ctx, u16buf, u16len);
+    rhash_final(ctx, digest);
+    rhash_free(ctx);
+
+    return memcmp(digest, expected, 20) == 0;
+}
+
+/* WINPHONE (e928, hashcat 13800): SHA256(UTF16LE(pass) + hex_salt)
+ * Format: 64hex_hash:256hex_salt (salt = 128 bytes binary) */
+static int verify_winphone(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *saltbin = (unsigned char *)WS->gp1;     /* 128-byte salt */
+    unsigned char *u16buf = (unsigned char *)WS->u16a;     /* UTF-16LE password */
+    unsigned char digest[32];
+    const char *colon;
+    int hpart, u16len;
+    rhash ctx;
+
+    /* Parse hash:salt */
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon) return 0;
+    hpart = colon - hashstr;
+    if (hpart != 64) return 0;
+    if (hex2bin(hashstr, 64, expected) != 32) return 0;
+
+    /* Decode hex salt — must be exactly 256 hex = 128 bytes */
+    int salthex = hashlen - hpart - 1;
+    if (salthex != 256) return 0;
+    if (hex2bin(colon + 1, 256, saltbin) != 128) return 0;
+
+    /* UTF-16LE encode password */
+    u16len = utf8_to_utf16le(pass, passlen, u16buf, WS_U16_SIZE);
+    if (u16len <= 0) return 0;
+
+    /* SHA256(UTF16LE(pass) + salt) */
+    ctx = rhash_init(RHASH_SHA256);
+    rhash_update(ctx, u16buf, u16len);
+    rhash_update(ctx, saltbin, 128);
+    rhash_final(ctx, digest);
+    rhash_free(ctx);
+
+    return memcmp(digest, expected, 32) == 0;
+}
+
+/* BLAKE2B512 with $BLAKE2$ prefix (e841, hashcat mode 600)
+ * Format: $BLAKE2$128hex  or  bare 128hex */
+static int verify_blake2b512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    const char *hex; int hexlen;
+
+    if (hashlen == 136 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        hex = hashstr + 8; hexlen = 128;
+    } else if (hashlen == 128) {
+        hex = hashstr; hexlen = 128;
+    } else return 0;
+    if (hex2bin(hex, hexlen, expected) != 64) return 0;
+    blake2b_hash(computed, 64, pass, passlen);
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* BLAKE2B512PASSSALT with $BLAKE2$ prefix (e842, hashcat mode 610)
+ * Format: $BLAKE2$128hex:salt  or  128hex:salt */
+static int verify_blake2b512passsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    const char *hex, *colon;
+    int prefix, saltlen, total;
+
+    if (hashlen > 8 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        prefix = 8;
+    } else {
+        prefix = 0;
+    }
+    hex = hashstr + prefix;
+    colon = memchr(hex, ':', hashlen - prefix);
+    if (!colon || (colon - hex) != 128) return 0;
+    if (hex2bin(hex, 128, expected) != 64) return 0;
+
+    saltlen = hashlen - (int)(colon + 1 - hashstr);
+    total = passlen + saltlen;
+    if (total > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, colon + 1, saltlen);
+    blake2b_hash(computed, 64, buf, total);
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* BLAKE2B512SALTPASS with $BLAKE2$ prefix (e843, hashcat mode 620)
+ * Format: $BLAKE2$128hex:salt  or  128hex:salt */
+static int verify_blake2b512saltpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    const char *hex, *colon;
+    int prefix, saltlen, total;
+
+    if (hashlen > 8 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        prefix = 8;
+    } else {
+        prefix = 0;
+    }
+    hex = hashstr + prefix;
+    colon = memchr(hex, ':', hashlen - prefix);
+    if (!colon || (colon - hex) != 128) return 0;
+    if (hex2bin(hex, 128, expected) != 64) return 0;
+
+    saltlen = hashlen - (int)(colon + 1 - hashstr);
+    total = saltlen + passlen;
+    if (total > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, colon + 1, saltlen);
+    memcpy(buf + saltlen, pass, passlen);
+    blake2b_hash(computed, 64, buf, total);
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* BLAKE2B256 with $BLAKE2$ prefix (e845, hashcat mode 34800)
+ * Format: $BLAKE2$64hex  or  bare 64hex */
+static int verify_blake2b256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    const char *hex; int hexlen;
+
+    if (hashlen == 72 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        hex = hashstr + 8; hexlen = 64;
+    } else if (hashlen == 64) {
+        hex = hashstr; hexlen = 64;
+    } else return 0;
+    if (hex2bin(hex, hexlen, expected) != 32) return 0;
+    blake2b_hash(computed, 32, pass, passlen);
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* BLAKE2B256PASSSALT with $BLAKE2$ prefix (e846, hashcat mode 34810)
+ * Format: $BLAKE2$64hex:salt  or  64hex:salt */
+static int verify_blake2b256passsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    const char *hex, *colon;
+    int prefix, saltlen, total;
+
+    if (hashlen > 8 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        prefix = 8;
+    } else {
+        prefix = 0;
+    }
+    hex = hashstr + prefix;
+    colon = memchr(hex, ':', hashlen - prefix);
+    if (!colon || (colon - hex) != 64) return 0;
+    if (hex2bin(hex, 64, expected) != 32) return 0;
+
+    saltlen = hashlen - (int)(colon + 1 - hashstr);
+    total = passlen + saltlen;
+    if (total > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, colon + 1, saltlen);
+    blake2b_hash(computed, 32, buf, total);
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* BLAKE2B256SALTPASS with $BLAKE2$ prefix (e847, hashcat mode 34820)
+ * Format: $BLAKE2$64hex:salt  or  64hex:salt */
+static int verify_blake2b256saltpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    const char *hex, *colon;
+    int prefix, saltlen, total;
+
+    if (hashlen > 8 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        prefix = 8;
+    } else {
+        prefix = 0;
+    }
+    hex = hashstr + prefix;
+    colon = memchr(hex, ':', hashlen - prefix);
+    if (!colon || (colon - hex) != 64) return 0;
+    if (hex2bin(hex, 64, expected) != 32) return 0;
+
+    saltlen = hashlen - (int)(colon + 1 - hashstr);
+    total = saltlen + passlen;
+    if (total > (int)WS_GP_SIZE) return 0;
+    memcpy(buf, colon + 1, saltlen);
+    memcpy(buf + saltlen, pass, passlen);
+    blake2b_hash(computed, 32, buf, total);
+    return memcmp(computed, expected, 32) == 0;
 }
 
 /* ================================================================= */
@@ -15377,7 +17645,7 @@ static void init_hashtypes(void)
     HTV("BCRYPTSHA1", 0, verify_bcryptsha1, "$2b$12$0gky1pAf50ToA0A9tqo8P.JCO.x82x3oKv7QflLyP/ZuuDVWFs43m:password123");
     HTV("PHPBB3",     0, verify_phpbb3, "$H$997LdNzHMtxNZ26WousH1K.At2SnCs0:password123");
     HTV("APR1",       0, verify_apr1, "$apr1$rndSa1t$UuNY2EWlcn4SkHJxQh1G3/:password123");
-    HTV("SCRYPT",     0, verify_scrypt, "SCRYPT:1024:1:1:MDIwMzMwNTQwNDQyNQ==:5FW+zWivLxgCWj7qLiQbeC8zaNQ+qdO0NUinvqyFcfo=:hashcat");
+    HTV("SCRYPT",     0, verify_scrypt, "SCRYPT:1024:1:1:AA==:m3hB8eGi24+6bsMZkTf+If0G0liOTm26E7zsUzY/SRg=:password123");
 
     /* Wave 1: Simple salted hex types */
     HTV("POSTGRESQL",  0, verify_postgresql, "md5c3a6d24526b9285dd98be631e8271309:testuser:password123");
@@ -15429,11 +17697,46 @@ static void init_hashtypes(void)
     HTV("NSEC3",       0, verify_nsec3, "44jvntvfj82gq27k8ps7pqrjlo5h9c58:.x.net:1:00:password123");
     HTV("DOMINO5",     0, verify_domino5, "173127311326bb6eeacdfef5c2791514:password123");
     HTV("DOMINO6",     0, verify_domino6, "(G0000101iBosJ2cVSZqu):password123");
+    HTV("DOMINO8",     0, verify_domino8, "(HC34tD3KtDp4oCZWmCJ4qC30mC30mC3KmC30mCZLHhfRy7SQG):password123");
+    HTV("SIPHASH",     0, verify_siphash, "df4e9628b5664b3f:2:4:47356410265714355482333327356688:password123");
+    HTV("CRAMMD5",     0, verify_crammd5, "$cram_md5$MTI=$dXNlciBhZTBjM2VmMGE2NTM0NWY4MzFhMDEyYjlhMTg2ZDVjNQ==:password123");
+    HTV("SAPCODVNH",  0, verify_sapcodvnh, "{x-issha, 1024}J/gd5d88iJICTDsKpDiuiED4gDw2NzU4MzE2MTA=:password123");
+    HTV("REDHAT389DS", 0, verify_redhat389ds, "{PBKDF2_SHA256}AAAgAEFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUF9h4FZYLxdoiv6COGSMJkvo7NTruAVtL80gwJdyIE2RjA+v3s8nal9A3D/NjSVxlBnuEbzbyi0h2QMEBopkWRDTY5CDn/tQbfXS97KYKkG9QYWztJbPvAqPXtcGsu86TJ8WhHS3tZAyluhXdcQTPZNWFQe0x2bgYoPwUFbzfOEUl16ssQOmsslEofV3OP6U3iTIGR3BnnbfFRr818ObLdoMOwSBwXM1ffu4lu2iUkACTw93LPfT7dXlCx9HzW+3c4T5NImdICsY1OPcXb7UdjpS3ULFAM6tRkMKInZzFltmegiUqOEqWFdu7hcVzFNUfdneKg3jEXZbHngIO4sJG10:password123");
+    HTV("POSTGRESCRAM", 0, verify_postgrescram, "$postgres$postgres*41414141*e189d76dcdaf3bb15764784e2f24eee3:password123");
+    HTV("MYSQLCRAM",    0, verify_mysqlcram, "$mysqlna$4141414141414141414141414141414141414141*024763fc7fa983ef4c424bb91c4c9ca58a4c6a20:password123");
+    HTV("SHIRO1",       0, verify_shiro1, "$shiro1$SHA-512$1024$QUFBQUFBQUFBQUFBQUFBQQ==$PGoJ83m0phYuc1i1rh7Vqv2+kkuSqxgEX+Ah0luTEOXRcKChRdW2wI38pCMRLTWzeEhMNricVDAqJ3cwO95ItA==:password123");
+    HTV("ECRYPTFS",     0, verify_ecryptfs, "$ecryptfs$0$1$4141414141414141$a07ae5f28a1db69d:password123");
+    HTV("ORACLE12",     0, verify_oracle12, "00A4881893C78287CD84EB39D3DA49F05A4DF2FC48A97A70B0A9FC941C3CB465C5B0EEEF06686DA9F0B1BB3E0BEBFBBB65192CB51118EC775C9D1941724AF65941414141414141414141414141414141:password123");
+    HTV("COLDFUSION10", 0, verify_coldfusion10, "443120b78d8eede52f25e291ce6621499348ba363b0b563a4e98c69a7f24993b:1234567890123456789012345678901234567890123456789012345678901234:password123");
+    HTV("AZURESYNC",    0, verify_azuresync, "v1;PPH1_MD4,41414141414141414141,100,9bd986554189ab1bdf2c85eed4d381cc6be472be53b9a54e08816680e93987f9:password123");
+    HTV("ANDROIDFDE",   0, verify_androidfde, "42424242424242424242424242424242424242424242424242424242424242424eb9e9cc64cf5d82eb7aaa88119a411233a1b93c15db5fcf1cee1aecf9bf844241414141414141414141414141414141:password123");
+    HTV("KRB5TGS23",    0, verify_krb5tgs23, "$krb5tgs$23$*user$REALM$test/spn*$ef5b8ff40b085c0db7b56e6c138a746b$c5f8ac38e28042d9a9b69d9667d1c8cd7ad0a7fe2849c3502fa7437e5108c2e73932b4ac570d899bbef1aa1b96efb37406e5619ca542a13659916788ebc53cce:password123");
+    HTV("AXCRYPT",      0, verify_axcrypt, "$axcrypt$*1*10467*deadbeef01020304deadbeef01020304*a85333a6027147fd1db9a67f5ec969c6cdc19f018043fe68:password123");
+    HTV("AXCRYPTSHA1",  0, verify_axcryptsha1, "$axcrypt_sha1$cbfdac6008f9cab4083784cbd1874f76:password123");
+    HTV("CISCO9",       0, verify_cisco9, "$9$rndSa1tRndSa1t$vNe65wzVje3iwyqNXv34z3vaHXV9qbyYgYB37IWc5uA:password123");
+    HTV("DCC2",         0, verify_dcc2, "$DCC2$10240#6848#4f9d6397a4756474a8ee1bdf701f4db5:password123");
+    HTV("PWSAFE3",      0, verify_pwsafe3, "50575333e4e2a590a5e5c8269f57ec04a8a1c0c03da55b311c51236dab8c6b96b0afca0200080000a146c17e011363b180b2a121713dc6ea94accb57a2751a99e67528a5872622bd:password123");
+    HTV("IKEPSK_MD5",   0, verify_ikepsk_md5, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:37b806b82e7cd215df7283dc417e61a1:password123");
+    HTV("IKEPSK_SHA1",  0, verify_ikepsk_sha1, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:8bcc01c0e06096876785012e8ddb071e7b629917:password123");
+    HTV("SAP-BCODE",          0, verify_sap_bcode_full, "027642760180$77EC38630C08DF8D:HASHCAT");
+    HTV("SAP-BCODE4",         0, verify_sap_bcode4, "027642760180$77EC386300000000:HASHCAT");
+    HTV("SAP-PASSCODE",       0, verify_sap_passcode_full, "ABCDEFGH$66251d3727a1d78eac92fe616a5174aa8a8f6632:password123");
+    HTV("SAP-PASSCODE5",      0, verify_sap_passcode5, "ABCDEFGH$66251d3727000000000000000000000000000000:password123");
+    HTV("AS400-DES",          0, verify_as400des, "$as400$des$*OPEN3*EC76FC0DEF5B0A83:SYS1");
+    HTV("RACF-KDFAES",       0, verify_racf_kdfaes, "$racf-kdfaes$*USER*E7D7E66D000180000008003200100010*00112233445566778899AABBCCDDEEFF*57558AFDA9513B926E3E2BE86DFAF72D:pass1234");
+    HTV("PS_TOKEN",           0, verify_ps_token, "d7ace0616a3ae62d2c271e3bb3fa4204099cfea0:deadbeef01020304:password123");
+    HTV("WINPHONE",           0, verify_winphone, "d032042e65aea887f5d3a8b9a18dfd66fb4c7df6bd45721f5f3a18dda8f01f0f:4141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141:password123");
+    HTV("BLAKE2B512",        0, verify_blake2b512, "$BLAKE2$fbdba996cade3bae2d948c2f03f8149ffa7068584731ac6efbef1688e64609b6969a52dcc203b74aa87d6d9d1b0cd93bea724cddd12443f2b808bc03776b81cc:password123");
+    HTV("BLAKE2B512PASSSALT", 0, verify_blake2b512passsalt, "$BLAKE2$74e4702fac1576179c957877cb8b4f1f5a8a5bfa3c2fd8a572ede80c6aec857152384db229489b0b89db69c62e9597637516d68a9bda2ce661464eb9d7b6f11c:testsalt:password123");
+    HTV("BLAKE2B512SALTPASS", 0, verify_blake2b512saltpass, "$BLAKE2$b0c082a1f1e2a385668619b450897546ed0f382598c0e355198a493479f0c9915ebe750092c34f844de701ab3f77ea5d3e966016036122ce4eeeee509444388a:testsalt:password123");
+    HTV("BLAKE2B256",        0, verify_blake2b256, "$BLAKE2$4482542d0cdfeb679f2e0c4d5780af2c33dc57892390c9d5a17e8fa8be01100f:password123");
+    HTV("BLAKE2B256PASSSALT", 0, verify_blake2b256passsalt, "$BLAKE2$eee9fc18ca12f18c0a700b07c464d58a7e6f624800d7e5b13170f4e4cd5eb1e9:testsalt:password123");
+    HTV("BLAKE2B256SALTPASS", 0, verify_blake2b256saltpass, "$BLAKE2$f4fdf6b1cda2872527244ff036f1670af39c39decbd9aab4765a7aaa2b1d41d0:testsalt:password123");
 
     /* Phase 1: Crypt-based verify types */
     HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
     HTV("MD5CRYPT",    0, verify_md5crypt, "$1$rndSa1t$Qprc9yqwxuXgLPGQYn8/M1:password123");
-    HTV("JUNIPERIVE",  0, verify_juniperive, "3u+UR6n8AgABAAAAHxxdXKmiOmUoqKnZlf8lTOhlPYy93EAkbPfs5+49YLFd/B1+omSKbW7DoqNM40/EeVnwJ8kYoXv9zy9D5C5m5A==:hashcat");
+    HTV("JUNIPERIVE",  0, verify_juniperive, "hn9NPzVmhLxotWISQlgcHIt7y1p5zPDZXqW5AGKrTSNi7lgSKXbXGCGVIgfwMDir8FuS+x0+4MxIfdErHoaZ6aDkvMuMSlYSXG8hvw==:password123");
     HTV("SHA256CRYPT",  0, verify_sha256crypt, "$5$rndSa1t$128qLp1GH7Qcc2/kyO/.6dtTlHHiHyRcNMAdCAFSjU1:password123");
     HTV("SHA512CRYPT",  0, verify_sha512crypt, "$6$rndSa1t$DOby8RCDS9bqigcwmpaMwAlFOxGdrhVKkZNgli1bqKDoKl0w62cJ3BF6ze4AF0vY3wvOj6iLJNUc.D45MxjTM0:password123");
     HTV("SHA512CRYPTMD5", 0, verify_sha512cryptmd5, "$6$rndSa1t$VEiMRPskJtV5DgDifIJPozJKKcU9qnofAewMbRvGQz0F5pG6kimj02ELUVsQOozdhtM1X8Qya4d9HzW7Wistg/:password123");
@@ -15460,14 +17763,20 @@ static void init_hashtypes(void)
     HTV("PHPBB3MD5",     0, verify_phpbb3md5, "$H$9rndSa1tXzz3PJ.hT4y5reUgL7cbu6.:password123");
     HTV("PHPS",          0, verify_phps, "$PHPS$3031$216cb30ddee43eced3bb76fd38e0b7df:password123");
     HTV("ARUBAOS",       0, verify_arubaos, "5387280701b9809a521b6175cb9519910413a11227468b252f:password123");
-    HTV("ISCSI-CHAP",    0, verify_iscsi_chap, "afd09efdd6f8ca9f18ec77c5869788c3:01020304050607080910111213141516:01:hashcat");
-    HTV("WERKZEUG-MD5",  0, verify_werkzeug_md5, "md5$84143$7f51edecfa6fb401a0b5e63d33fc8c0e:hashcat");
-    HTV("WERKZEUG-SHA256", 0, verify_werkzeug_sha256, "sha256$70108387805$8b9472281c36c3a693703de0e0f1ffab8fc0ecdd3bc5ead04c76dd74ef431e49:hashcat");
-    HTV("AUTHME",         0, verify_authme, "$SHA$7218532375810603$bfede293ecf6539211a7305ea218b9f3f608953130405cda9eaba6fb6250f824:hashcat");
-    HTV("NETWITNESS",    0, verify_netwitness, "6F48F44C46F5ADC534597687B086278F0AAF7D262ADDB3978562A7D55BBDF467:MDAwMzY1NzYwODI4MQ==:hashcat");
-    HTV("NETSCALER-SHA512", 0, verify_netscaler512, "2f9282ade42ce148175dc3b4d8b5916dae5211eee49886c3f7cc768f6b9f2eb982a5ac2f2672a0223999bfd15349093278adf12f6276e8b61dacf5572b3f93d0b4fa886ce:hashcat");
-    HTV("SHA1SHA1SALTPASSSALT", 0, verify_sha1sha1saltpasssalt, "05ac0c544060af48f993f9c3cdf2fc03937ea35b:232725102020:hashcat");
-    HTV("NETSCALER-PBKDF2", 0, verify_netscaler_pbkdf2, "5567243c55099b6b10a714a350db53beea8be6ac9c247fd40fea7e96d206a9f11fd1c45735556ac2004138640de206d0e1522607ab3c3f92816156d2d7845068e:hashcat");
+    HTV("ISCSI-CHAP",    0, verify_iscsi_chap, "1171aa2341d965193eeba2e514a5fc56:01020304050607080910111213141516:01:password123");
+    HTV("WERKZEUG-MD5",  0, verify_werkzeug_md5, "md5$Salt$917c64e2f34481b721fa235ef1cb7f95:password123");
+    HTV("WERKZEUG-SHA256", 0, verify_werkzeug_sha256, "sha256$Salt$5470a0da1e556b61d89430bc25aa630436e7bf8d68db104d76f024d68d5fce07:password123");
+    HTV("AUTHME",         0, verify_authme, "$SHA$1234567890123456$6b7d5ab9458f1d9ef8316945b3904d19d90eabf67a8bf98b0ddacede6baaf5a3:password123");
+    HTV("NETWITNESS",    0, verify_netwitness, "7F6B6E9ECD0E25FA22A5CB1A6433CC193C70CF476B8294B9C0AAA8F583AE38D4:U2FsdA==:password123");
+    HTV("NETSCALER-SHA512", 0, verify_netscaler512, "2f9282ade00462c9682f0f7d4f0546c3e5f3152f0da4f9a66fd621fd12d20e0fadb15f25ba3b6bbc93ad8e83880eebf3b17022c2de7f7fd70d8e8d98bfb98ffefd4390481:password123");
+    HTV("SHA1SHA1SALTPASSSALT", 0, verify_sha1sha1saltpasssalt, "47c1f3cdec346eec1c735f48b8865e07051669e2:232725102020:password123");
+    HTV("NETSCALER-PBKDF2", 0, verify_netscaler_pbkdf2, "5567243c55099b6b10a714a350db53beea8be6ac9c247fd40fea7e96d206a9f11998b7c6b32242e28c311596e9cabcf6ccd0d14af94ae904820a36e7fb9a8277f:password123");
+    HTV("ORACLE7",          0, verify_oracle7, "192802346638CC4F:7284616727:password123");
+    HTV("NETNTLMV1",        0, verify_netntlmv1, "::WG:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:3a29fd33694feaa7c51547f0055054b373b5c1813551756a:1122334455667788:password123");
+    HTV("NETNTLMV2",        0, verify_netntlmv2, "user::domain:1122334455667788:d5add1cebafed2180b3cca8728f5aff8:01010000000000000000000000000000aabbccdd1122334400000000:password123");
+    HTV("LASTPASS",          0, verify_lastpass, "e70e2b8e01e218f19f4cbfaf3c9dcd98:100100:pmix@trash-mail.com:9b071db7b8e265d4cadd3eb65ac0864a:password123");
+    HTV("LASTPASS",          0, verify_lastpass, "e70e2b8e01e218f19f4cbfaf3c9dcd98:100100:pmix@trash-mail.com:password123");
+    HTV("FORTIGATE",         0, verify_fortigate, "AK1FCIhM0IUIQVFJgcDvmNyl2Vlb6Lq9PVehp2IN/JtDbM=:password123");
     HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
     HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk= AQIDBA==:password123");
     HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
@@ -15591,6 +17900,8 @@ static void init_hashtypes(void)
             ht->vclass = HCLASS_PREFIX;  /* POSTGRESQL md5..., WERKZEUG md5$... */
         } else if (strncmp(ex, "sha256$", 7) == 0) {
             ht->vclass = HCLASS_PREFIX;  /* WERKZEUG SHA256 */
+        } else if (strncmp(ex, "v1;PPH1_MD4,", 12) == 0) {
+            ht->vclass = HCLASS_PREFIX;  /* AZURESYNC */
         } else if (elen == 13 && !memchr(ex, ':', elen)) {
             ht->vclass = HCLASS_DES;     /* DESCRYPT: 13-char, no colon */
         } else {
@@ -15745,16 +18056,8 @@ static inline int hash_verify(const struct hashtype *ht,
     const unsigned char *pass, int passlen)
 {
     atomic_fetch_add(&StatTry[ht - Hashtypes], 1);
+    WS->cur_rate = ht->rate;
     return ht->verify(hashstr, hashlen, pass, passlen);
-}
-
-/* Hex char to nibble, -1 on invalid */
-static inline int hexval(int c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
 }
 
 /* Decode hex string to binary. Returns byte count, or -1 on error. */
@@ -16574,6 +18877,10 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         memcpy(saltbin, ModeDefaultSalt, saltbinlen);
     }
 
+    /* salt_present: true when a salt field exists (even if zero-length).
+     * Used to dispatch salted types with empty salt (e.g. MD5SALT with salt=""). */
+    int salt_present = (item->salt != NULL) || (saltbinlen > 0);
+
     /* Decode alternate salt/password if available */
     altsaltbinlen = 0;
     altpass = NULL;
@@ -16983,7 +19290,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
 
             if (ht->hashlen < hashbytes) continue;
 
-            if ((ht->flags & HTF_SALTED) && saltbinlen > 0) {
+            if ((ht->flags & HTF_SALTED) && salt_present) {
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, computed);
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                     item->verified = 1;
@@ -17105,7 +19412,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             }
 
             /* Salted: salt in base computation, iterate without salt */
-            if ((ht->flags & HTF_SALTED) && saltbinlen > 0 &&
+            if ((ht->flags & HTF_SALTED) && salt_present &&
                 !(ht->flags & HTF_UC)) {
                 int maxinner = ht->iter_fn ? Iterstep : Maxiter;
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, iterbuf);
@@ -17688,7 +19995,7 @@ static void worker(void *dummy)
             } else if (b->items[i].alt_password ||
                        (b->items[i].fullpass &&
                         !(hot_type >= 0 && (Hashtypes[hot_type].flags & HTF_SALTED)))) {
-                /* Has alternate split, or fullpass with unsalted/unknown hot type */
+                /* Has alternate split or fullpass with unsalted/unknown hot type */
                 hard[nhard++] = i;
             } else {
                 /* Unresolved → stderr */
@@ -17705,28 +20012,61 @@ static void worker(void *dummy)
             }
         }
 
-        /* Hard pass: retry deferred items with alternate splits */
+        /* Hard pass: backward-scanning salt/password boundary algorithm.
+         * rest = everything after first colon (fixed start of salt region).
+         * Scan backward from end of rest through each ':' separator.
+         * At each colon: salt = [rest..colon), password = (colon..end].
+         * Also try empty-password (salt=all of rest) and
+         * no-salt (password=all of rest) interpretations. */
         for (i = 0; i < nhard; i++) {
             struct workitem *item = &b->items[hard[i]];
 
-            /* Try alternate colon split (different salt boundary) */
-            if (item->alt_password) {
-                item->salt = item->alt_salt;
-                item->saltlen = item->alt_saltlen;
-                item->password = item->alt_password;
-                item->passlen = item->alt_passlen;
+            if (item->rest && item->restlen >= 0) {
+                const char *rp = item->rest;
+                int rlen = item->restlen;
+                int found = 0;
 
+                /* Build array of colon positions in rest, right-to-left */
+                const char *colpos[256];
+                int nrc = 0;
+                { int j;
+                  for (j = rlen - 1; j >= 0 && nrc < 256; j--)
+                    if (rp[j] == ':') colpos[nrc++] = rp + j;
+                }
+
+                /* Split 0: empty password (salt = entire rest) */
+                item->salt = (char *)rp;
+                item->saltlen = rlen;
+                item->password = (char *)rp + rlen;
+                item->passlen = 0;
+                item->alt_salt = NULL; item->alt_saltlen = 0;
+                item->alt_password = NULL; item->alt_passlen = 0;
                 verify_item(item, &hot_type, &hot_iter, hot_list, &nhot);
                 if (item->verified) goto hard_ok;
-            }
 
-            /* Try no-salt interpretation (full password with colons) */
-            if (item->fullpass) {
+                /* Splits 1..nrc: at each colon boundary, right to left */
+                { int ci;
+                  for (ci = 0; ci < nrc && !found; ci++) {
+                    const char *cp = colpos[ci];
+                    item->salt = (char *)rp;
+                    item->saltlen = cp - rp;
+                    item->password = (char *)cp + 1;
+                    item->passlen = rlen - (int)(cp + 1 - rp);
+                    item->alt_salt = NULL; item->alt_saltlen = 0;
+                    item->alt_password = NULL; item->alt_passlen = 0;
+                    verify_item(item, &hot_type, &hot_iter, hot_list, &nhot);
+                    if (item->verified) { found = 1; break; }
+                  }
+                }
+                if (found) goto hard_ok;
+
+                /* Final: no salt (entire rest = password) */
                 item->salt = NULL;
                 item->saltlen = 0;
-                item->password = item->fullpass;
-                item->passlen = item->fullpasslen;
-
+                item->password = (char *)rp;
+                item->passlen = rlen;
+                item->alt_salt = NULL; item->alt_saltlen = 0;
+                item->alt_password = NULL; item->alt_passlen = 0;
                 verify_item(item, &hot_type, &hot_iter, hot_list, &nhot);
                 if (item->verified) goto hard_ok;
             }
@@ -17894,79 +20234,214 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     hashstart = p;
     item->hashlen = colon1 - hashstart;
 
-    /* Prefix-based hint detection for verify types with recognizable formats */
+    /* Prefix-based hint detection for verify types with recognizable formats.
+     * Dispatch on first character to skip irrelevant checks for hex hashes. */
     if (!item->hint) {
         int _remaining = end - hashstart;  /* bytes from hash start to end of line */
-        if (_remaining >= 14 && memcmp(hashstart, "$episerver$*", 12) == 0)
-            item->hint = find_type_by_name("EPISERVER");
-        else if (_remaining >= 6 && memcmp(hashstart, "{smd5}", 6) == 0)
-            item->hint = find_type_by_name("AIX-MD5");
-        else if (_remaining >= 7 && memcmp(hashstart, "{ssha1}", 7) == 0)
-            item->hint = find_type_by_name("AIX-SHA1");
-        else if (_remaining >= 9 && memcmp(hashstart, "{ssha256}", 9) == 0)
-            item->hint = find_type_by_name("AIX-SHA256");
-        else if (_remaining >= 9 && memcmp(hashstart, "{ssha512}", 9) == 0)
-            item->hint = find_type_by_name("AIX-SHA512");
-        else if (_remaining >= 3 && memcmp(hashstart, "$S$", 3) == 0)
-            item->hint = find_type_by_name("DRUPAL7");
-        else if (_remaining >= 3 && memcmp(hashstart, "$B$", 3) == 0)
-            item->hint = find_type_by_name("MEDIAWIKI");
-        else if (_remaining >= 9 && memcmp(hashstart, "$mysql$A$", 9) == 0)
-            item->hint = find_type_by_name("MYSQL-SHA256CRYPT");
-        else if (_remaining >= 6 && strncasecmp(hashstart, "0x0200", 6) == 0)
-            item->hint = find_type_by_name("MSSQL2012");
-        else if (_remaining >= 6 && strncasecmp(hashstart, "0x0100", 6) == 0) {
-            /* MSSQL2000 = 0x0100 + 8salt + 40cs + 40uc (94 hex after 0x); MSSQL2005 = 0x0100 + 8salt + 40 (54 hex after 0x) */
-            int _hlen = colon_last - hashstart;
-            if (_hlen >= 94)
-                item->hint = find_type_by_name("MSSQL2000");
-            else
-                item->hint = find_type_by_name("MSSQL2005");
+        char _fc = hashstart[0];
+
+        if (_fc == '$') {
+            /* All $-prefixed formats */
+            if (_remaining >= 14 && memcmp(hashstart, "$episerver$*", 12) == 0)
+                item->hint = find_type_by_name("EPISERVER");
+            else if (hashstart[1] == 'S' && _remaining >= 3 && hashstart[2] == '$')
+                item->hint = find_type_by_name("DRUPAL7");
+            else if (hashstart[1] == 'B' && _remaining >= 3 && hashstart[2] == '$')
+                item->hint = find_type_by_name("MEDIAWIKI");
+            else if (_remaining >= 9 && memcmp(hashstart, "$mysql$A$", 9) == 0)
+                item->hint = find_type_by_name("MYSQL-SHA256CRYPT");
+            else if (hashstart[1] == 'S' && _remaining >= 10 && memcmp(hashstart, "$SHA$", 5) == 0)
+                item->hint = find_type_by_name("AUTHME");
+            else if (_remaining >= 15 && memcmp(hashstart, "$cram_md5$", 10) == 0)
+                item->hint = find_type_by_name("CRAMMD5");
+            else if (_remaining >= 20 && memcmp(hashstart, "$postgres$", 10) == 0)
+                item->hint = find_type_by_name("POSTGRESCRAM");
+            else if (_remaining >= 50 && memcmp(hashstart, "$mysqlna$", 9) == 0)
+                item->hint = find_type_by_name("MYSQLCRAM");
+            else if (_remaining >= 30 && memcmp(hashstart, "$shiro1$SHA-512$", 16) == 0)
+                item->hint = find_type_by_name("SHIRO1");
+            else if (_remaining >= 15 && memcmp(hashstart, "$ecryptfs$", 10) == 0)
+                item->hint = find_type_by_name("ECRYPTFS");
+            else if (_remaining >= 20 && memcmp(hashstart, "$krb5tgs$23$", 12) == 0)
+                item->hint = find_type_by_name("KRB5TGS23");
+            else if (_remaining >= 20 && memcmp(hashstart, "$axcrypt$*1*", 12) == 0)
+                item->hint = find_type_by_name("AXCRYPT");
+            else if (_remaining == 61 && memcmp(hashstart, "$9$", 3) == 0)
+                item->hint = find_type_by_name("CISCO9");
+            else if (_remaining >= 47 && memcmp(hashstart, "$axcrypt_sha1$", 14) == 0)
+                item->hint = find_type_by_name("AXCRYPTSHA1");
+            else if (_remaining >= 14 && memcmp(hashstart, "$as400$des$*", 12) == 0)
+                item->hint = find_type_by_name("AS400-DES");
+            else if (_remaining >= 16 && memcmp(hashstart, "$racf-kdfaes$*", 14) == 0)
+                item->hint = find_type_by_name("RACF-KDFAES");
+            else if (_remaining >= 10 && memcmp(hashstart, "$krb5pa$23$", 11) == 0)
+                item->hint = find_type_by_name("KRB5PA23");
+            else if (_remaining >= 10 && memcmp(hashstart, "$DCC2$", 6) == 0)
+                item->hint = find_type_by_name("DCC2");
         }
-        else if (_remaining >= 6 && strncasecmp(hashstart, "0xc007", 6) == 0)
-            item->hint = find_type_by_name("SYBASE-ASE");
-        else if (_remaining >= 3 && hashstart[0] == '(' && hashstart[1] == 'G')
-            item->hint = find_type_by_name("DOMINO6");
-        else if (item->hashlen == 137 && hashstart[0] == '2' && is_hex(hashstart + 1, 136))
-            item->hint = find_type_by_name("NETSCALER-SHA512");
-        else if (item->hashlen == 129 && hashstart[0] == '5' && is_hex(hashstart + 1, 128))
-            item->hint = find_type_by_name("NETSCALER-PBKDF2");
-        else if (item->hashlen == 49 && hashstart[0] == '1' && is_hex(hashstart + 1, 48))
-            item->hint = find_type_by_name("NETSCALER");
-        else if (_remaining >= 10 && memcmp(hashstart, "$SHA$", 5) == 0)
-            item->hint = find_type_by_name("AUTHME");
-        else if (_remaining >= 8 && memcmp(hashstart, "md5$", 4) == 0)
-            item->hint = find_type_by_name("WERKZEUG-MD5");
-        else if (_remaining >= 11 && memcmp(hashstart, "sha256$", 7) == 0)
-            item->hint = find_type_by_name("WERKZEUG-SHA256");
-        else if (_remaining >= 68 && ncolons >= 2 && hashstart[64] == ':' &&
-                 is_hex(hashstart, 64) && *(colon_last - 1) == '=')
-            item->hint = find_type_by_name("NETWITNESS");
-        else if (_remaining >= 35 && memcmp(hashstart, "md5", 3) == 0)
-            item->hint = find_type_by_name("POSTGRESQL");
-        else if (_remaining >= 10 && memcmp(hashstart, "$krb5pa$23$", 11) == 0)
-            item->hint = find_type_by_name("KRB5PA23");
-        /* IPMI2/Dahua: multi-colon hex formats */
-        else if (!item->hint && ncolons >= 2 && is_hex(hashstart, item->hashlen)) {
-            const char *c2 = memchr(colon1 + 1, ':', end - colon1 - 1);
-            if (c2) {
-                int seg1len = c2 - (colon1 + 1);
-                if (item->hashlen == 32 && seg1len >= 40
-                    && is_hex(colon1 + 1, seg1len))
-                    item->hint = find_type_by_name("IPMI2-MD5");
-                else if (item->hashlen == 32 && seg1len < 20 && ncolons >= 3)
-                    item->hint = find_type_by_name("DAHUA");
-                /* ISCSI-CHAP: 32hex_hash:hex_challenge:2hex_id */
-                else if (item->hashlen == 32 && seg1len >= 2
-                    && is_hex(colon1 + 1, seg1len) && ncolons >= 3) {
-                    const char *c3 = memchr(c2 + 1, ':', end - c2 - 1);
-                    int seg2len = (c3 ? c3 : end) - (c2 + 1);
-                    if (seg2len == 2 && is_hex(c2 + 1, 2))
-                        item->hint = find_type_by_name("ISCSI-CHAP");
+        else if (_fc == '{') {
+            /* All {-prefixed formats */
+            if (_remaining >= 6 && memcmp(hashstart, "{smd5}", 6) == 0)
+                item->hint = find_type_by_name("AIX-MD5");
+            else if (_remaining >= 7 && memcmp(hashstart, "{ssha1}", 7) == 0)
+                item->hint = find_type_by_name("AIX-SHA1");
+            else if (_remaining >= 9 && memcmp(hashstart, "{ssha256}", 9) == 0)
+                item->hint = find_type_by_name("AIX-SHA256");
+            else if (_remaining >= 9 && memcmp(hashstart, "{ssha512}", 9) == 0)
+                item->hint = find_type_by_name("AIX-SHA512");
+            else if (_remaining >= 20 && memcmp(hashstart, "{x-issha, ", 10) == 0)
+                item->hint = find_type_by_name("SAPCODVNH");
+            else if (_remaining >= 20 && memcmp(hashstart, "{PBKDF2_SHA256}", 15) == 0)
+                item->hint = find_type_by_name("REDHAT389DS");
+        }
+        else if (_fc == '(') {
+            if (_remaining == 51 && hashstart[1] == 'H' && hashstart[50] == ')')
+                item->hint = find_type_by_name("DOMINO8");
+            else if (_remaining >= 3 && hashstart[1] == 'G')
+                item->hint = find_type_by_name("DOMINO6");
+        }
+        else if (_fc == '0') {
+            /* MSSQL/SYBASE 0x-prefixed formats */
+            if (_remaining >= 6 && strncasecmp(hashstart, "0x0200", 6) == 0)
+                item->hint = find_type_by_name("MSSQL2012");
+            else if (_remaining >= 6 && strncasecmp(hashstart, "0x0100", 6) == 0) {
+                int _hlen = colon_last - hashstart;
+                if (_hlen >= 94)
+                    item->hint = find_type_by_name("MSSQL2000");
+                else
+                    item->hint = find_type_by_name("MSSQL2005");
+            }
+            else if (item->hashlen == 140 && strncasecmp(hashstart, "0200", 4) == 0)
+                item->hint = find_type_by_name("MSSQL2012");
+            else if (item->hashlen == 92 && strncasecmp(hashstart, "0100", 4) == 0)
+                item->hint = find_type_by_name("MSSQL2000");
+            else if (item->hashlen == 52 && strncasecmp(hashstart, "0100", 4) == 0)
+                item->hint = find_type_by_name("MSSQL2005");
+            else if (_remaining >= 6 && strncasecmp(hashstart, "0xc007", 6) == 0)
+                item->hint = find_type_by_name("SYBASE-ASE");
+        }
+        else if (_fc == 'A') {
+            if (item->hashlen == 47 && memcmp(hashstart, "AK1", 3) == 0)
+                item->hint = find_type_by_name("FORTIGATE");
+        }
+        else if (_fc == 'g') {
+            if (_remaining >= 20 && memcmp(hashstart, "grub.pbkdf2.sha512.", 19) == 0)
+                item->hint = find_type_by_name("PBKDF2-SHA512");
+        }
+        else if (_fc == 'v') {
+            if (_remaining >= 20 && memcmp(hashstart, "v1;PPH1_MD4,", 12) == 0)
+                item->hint = find_type_by_name("AZURESYNC");
+        }
+        else if (_fc == 'm') {
+            if (_remaining >= 8 && memcmp(hashstart, "md5$", 4) == 0)
+                item->hint = find_type_by_name("WERKZEUG-MD5");
+            else if (_remaining >= 35 && memcmp(hashstart, "md5", 3) == 0)
+                item->hint = find_type_by_name("POSTGRESQL");
+        }
+        else if (_fc == 's') {
+            if (_remaining >= 11 && memcmp(hashstart, "sha256$", 7) == 0)
+                item->hint = find_type_by_name("WERKZEUG-SHA256");
+        }
+        else if (_fc == 'S') {
+            if (_remaining >= 7 && memcmp(hashstart, "SCRYPT:", 7) == 0)
+                item->hint = find_type_by_name("SCRYPT");
+        }
+
+        /* Hashlen/ncolons-based checks (first char already hex or no prefix match) */
+        if (!item->hint) {
+            if (_remaining == 53 && hashstart[16] == ':' && hashstart[17] == '2' && hashstart[18] == ':' && hashstart[19] == '4' && hashstart[20] == ':')
+                item->hint = find_type_by_name("SIPHASH");
+            else if (item->hashlen == 137 && _fc == '2' && is_hex(hashstart + 1, 136))
+                item->hint = find_type_by_name("NETSCALER-SHA512");
+            else if (item->hashlen == 129 && _fc == '5' && is_hex(hashstart + 1, 128))
+                item->hint = find_type_by_name("NETSCALER-PBKDF2");
+            else if (item->hashlen == 49 && _fc == '1' && is_hex(hashstart + 1, 48))
+                item->hint = find_type_by_name("NETSCALER");
+            else if (_remaining >= 68 && ncolons >= 2 && hashstart[64] == ':' &&
+                     is_hex(hashstart, 64) && *(colon_last - 1) == '=')
+                item->hint = find_type_by_name("NETWITNESS");
+            else if (ncolons == 1 && _fc != '$' && _fc != '{' && _fc != '(') {
+                if (item->hashlen == 40 && is_hex(hashstart, 40) &&
+                    colon1 && (colon_last - colon1 - 1) >= 16 &&
+                    is_hex(colon1 + 1, colon_last - colon1 - 1))
+                    item->hint = find_type_by_name("PS_TOKEN");
+                else if (item->hashlen == 64 && is_hex(hashstart, 64) &&
+                         colon1 && (colon_last - colon1 - 1) == 256)
+                    item->hint = find_type_by_name("WINPHONE");
+                else {
+                    /* SAP BCODE/PASSCODE: SALT$HASH where hash is uppercase hex */
+                    const char *dol = memchr(hashstart, '$', item->hashlen);
+                    if (dol) {
+                        int _hpart = (hashstart + item->hashlen) - (dol + 1);
+                        if (_hpart == 16 || _hpart == 8)
+                            item->hint = find_type_by_name("SAP-BCODE");
+                        else if (_hpart == 40 || _hpart == 10)
+                            item->hint = find_type_by_name("SAP-PASSCODE");
+                    }
                 }
-                /* IPMI2-SHA1: salt_hex:hash_hex(40):password — salt is first, hash is second */
-                else if (seg1len == 40 && is_hex(colon1 + 1, 40))
-                    item->hint = find_type_by_name("IPMI2-SHA1");
+            }
+            else if (item->hashlen == 32 && ncolons >= 3 && is_hex(hashstart, 32)) {
+                const char *c2 = colon1 + 1;
+                int isiter = 1, ci;
+                for (ci = 0; c2 + ci < end && c2[ci] != ':'; ci++)
+                    if (c2[ci] < '0' || c2[ci] > '9') { isiter = 0; break; }
+                if (isiter && ci >= 1 && ci <= 6)
+                    item->hint = find_type_by_name("LASTPASS");
+            }
+            /* IKE-PSK: 9 colon-separated hex fields */
+            else if (ncolons >= 9 && is_hex(hashstart, item->hashlen)) {
+                const char *lc = colon_last;
+                const char *prev = lc - 1;
+                while (prev > hashstart && *prev != ':') prev--;
+                if (prev > hashstart && *prev == ':') {
+                    int lastlen = lc - (prev + 1);
+                    if (lastlen == 40 && is_hex(prev + 1, 40))
+                        item->hint = find_type_by_name("IKEPSK_SHA1");
+                    else if (lastlen == 32 && is_hex(prev + 1, 32))
+                        item->hint = find_type_by_name("IKEPSK_MD5");
+                }
+            }
+            else if (item->hashlen == 16 && is_hex(hashstart, 16) && ncolons >= 1)
+                item->hint = find_type_by_name("ORACLE7");
+            else if (ncolons >= 6 && _remaining >= 40) {
+                const char *dc = memchr(hashstart, ':', _remaining);
+                if (dc && dc + 1 < hashstart + _remaining && dc[1] == ':') {
+                    const char *c = dc + 2;
+                    int ci = 0;
+                    const char *f4 = NULL, *f5 = NULL;
+                    while (c < hashstart + _remaining && ci < 3) {
+                        if (*c == ':') { ci++; if (ci == 2) f4 = c + 1; if (ci == 3) f5 = c + 1; }
+                        c++;
+                    }
+                    if (f4 && f5) {
+                        int f4len = (f5 - 1) - f4;
+                        if (f4len == 48)
+                            item->hint = find_type_by_name("NETNTLMV1");
+                        else if (f4len == 32)
+                            item->hint = find_type_by_name("NETNTLMV2");
+                    }
+                }
+            }
+            /* IPMI2/Dahua: multi-colon hex formats */
+            else if (ncolons >= 2 && is_hex(hashstart, item->hashlen)) {
+                const char *c2 = memchr(colon1 + 1, ':', end - colon1 - 1);
+                if (c2) {
+                    int seg1len = c2 - (colon1 + 1);
+                    if (item->hashlen == 32 && seg1len >= 40
+                        && is_hex(colon1 + 1, seg1len))
+                        item->hint = find_type_by_name("IPMI2-MD5");
+                    else if (item->hashlen == 32 && seg1len < 20 && ncolons >= 3)
+                        item->hint = find_type_by_name("DAHUA");
+                    else if (item->hashlen == 32 && seg1len >= 2
+                        && is_hex(colon1 + 1, seg1len) && ncolons >= 3) {
+                        const char *c3 = memchr(c2 + 1, ':', end - c2 - 1);
+                        int seg2len = (c3 ? c3 : end) - (c2 + 1);
+                        if (seg2len == 2 && is_hex(c2 + 1, 2))
+                            item->hint = find_type_by_name("ISCSI-CHAP");
+                    }
+                    else if (seg1len == 40 && is_hex(colon1 + 1, 40))
+                        item->hint = find_type_by_name("IPMI2-SHA1");
+                }
             }
         }
     }
@@ -18042,6 +20517,8 @@ hash_parsed:
         } else if (hl >= 4 && strncmp(hs, "md5", 3) == 0 && !is_hex(hs, 3)) {
             item->hash_class = HCLASS_PREFIX;
         } else if (hl >= 7 && strncmp(hs, "sha256$", 7) == 0) {
+            item->hash_class = HCLASS_PREFIX;
+        } else if (hl >= 12 && strncmp(hs, "v1;PPH1_MD4,", 12) == 0) {
             item->hash_class = HCLASS_PREFIX;
         } else if (hl == 13 && is_des_salt_char(hs[0]) && is_des_salt_char(hs[1])) {
             item->hash_class = HCLASS_DES | HCLASS_OTHER;
@@ -18482,6 +20959,7 @@ static long long bench_one_type_timed(int idx, double max_seconds)
         if (hashstrlen >= (int)sizeof(tmp)) return 0;
         memcpy(tmp, hashstr, hashstrlen);
         tmp[hashstrlen] = 0;
+        WS->cur_rate = ht->rate;
         ht->verify(tmp, hashstrlen, pass, passlen);
     } else {
         hash_compute(ht, pass, passlen, salt, saltlen, dest);
@@ -18609,7 +21087,7 @@ static void run_benchmark(void)
 static void usage(int brief)
 {
     fprintf(stderr,
-        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-b spec] [-B] [-V] [-h] [file ...]\n"
+        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
@@ -18620,8 +21098,10 @@ static void usage(int brief)
         "  -O F   Write verified results to file (truncate)\n"
         "  -e F   Append unresolved lines to file (default: stderr)\n"
         "  -E F   Write unresolved lines to file (truncate)\n"
+        "  -s F   Append statistics to file\n"
         "  -b S   Benchmark selected types (e.g., -b e1-10,e15)\n"
         "  -B     Benchmark all registered types\n"
+        "  -T     Run self-tests on all registered types\n"
         "  -V     Print version and exit\n"
         "  -h     Print this help and list all hash types\n"
         "\n"
@@ -18666,284 +21146,238 @@ static void usage(int brief)
 static void init_rates(void)
 {
     static const struct { int idx; long long rate; } bench_rates[] = {
-        {1, 5384128LL}, {2, 5423179LL}, {3, 6396389LL}, {4, 279245LL}, 
-        {5, 1115684LL}, {6, 2850332LL}, {7, 3852616LL}, {8, 4203898LL}, 
-        {9, 2005772LL}, {10, 2016476LL}, {11, 1604885LL}, {12, 1582264LL}, 
-        {13, 604025LL}, {14, 594974LL}, {15, 2921852LL}, {16, 5178472LL}, 
-        {17, 2431664LL}, {18, 4922259LL}, {19, 2979856LL}, {20, 3832204LL}, 
-        {21, 2014094LL}, {22, 3094380LL}, {23, 2243535LL}, {24, 2251544LL}, 
-        {25, 327857LL}, {26, 325855LL}, {27, 290747LL}, {28, 295381LL}, 
-        {29, 222656LL}, {30, 148092LL}, {31, 2708654LL}, {32, 757169LL}, 
-        {33, 3022856LL}, {34, 2150919LL}, {35, 993867LL}, {36, 979435LL}, 
-        {37, 790441LL}, {38, 771387LL}, {39, 2129268LL}, {40, 1733645LL}, 
-        {41, 2798200LL}, {42, 2097105LL}, {43, 1708976LL}, {44, 2836077LL}, 
-        {45, 2113338LL}, {46, 1731407LL}, {47, 2832695LL}, {48, 2187628LL}, 
-        {49, 1747479LL}, {50, 2090939LL}, {51, 1724746LL}, {52, 1982025LL}, 
-        {53, 1983503LL}, {54, 1708425LL}, {55, 1689396LL}, {56, 1777431LL}, 
-        {57, 1791622LL}, {58, 1601667LL}, {59, 1582463LL}, {60, 180608LL}, 
-        {61, 179731LL}, {62, 181030LL}, {63, 180557LL}, {64, 315651LL}, 
-        {65, 308455LL}, {66, 250106LL}, {67, 248137LL}, {68, 540905LL}, 
-        {69, 535649LL}, {70, 355138LL}, {71, 257737LL}, {72, 574113LL}, 
-        {73, 574302LL}, {74, 176944LL}, {75, 176597LL}, {76, 1457026LL}, 
-        {77, 1456917LL}, {78, 384567LL}, {79, 382111LL}, {80, 311798LL}, 
-        {81, 310355LL}, {82, 308198LL}, {83, 306201LL}, {84, 726613LL}, 
-        {85, 719866LL}, {86, 717164LL}, {87, 724595LL}, {88, 774663LL}, 
-        {89, 777925LL}, {90, 777132LL}, {91, 781313LL}, {92, 1290797LL}, 
-        {93, 1278769LL}, {94, 690162LL}, {95, 515017LL}, {96, 575507LL}, 
-        {97, 915596LL}, {98, 911161LL}, {99, 1023517LL}, {100, 1035694LL}, 
-        {101, 1023694LL}, {102, 1040675LL}, {103, 1316060LL}, 
-        {104, 1307941LL}, {105, 413225LL}, {106, 409004LL}, 
-        {107, 361485LL}, {108, 359588LL}, {109, 151612LL}, {110, 150476LL}, 
-        {111, 2114299LL}, {112, 2198160LL}, {113, 2065596LL}, 
-        {114, 2065732LL}, {115, 4639359LL}, {116, 750494LL}, 
-        {117, 749577LL}, {118, 5000966LL}, {119, 125006LL}, 
-        {120, 125310LL}, {121, 2848207LL}, {122, 2514943LL}, 
-        {123, 2056125LL}, {124, 482786LL}, {125, 374252LL}, 
-        {126, 1760467LL}, {127, 1559600LL}, {128, 1292627LL}, 
-        {129, 1324004LL}, {130, 1226453LL}, {131, 1103772LL}, 
-        {132, 1658923LL}, {133, 1660121LL}, {134, 1398499LL}, 
-        {135, 1371639LL}, {136, 1211110LL}, {137, 1189464LL}, 
-        {138, 1647158LL}, {139, 1584822LL}, {140, 1352569LL}, 
-        {141, 1293630LL}, {142, 1220064LL}, {143, 1157824LL}, 
-        {144, 1625059LL}, {145, 1712479LL}, {146, 1348419LL}, 
-        {147, 1326359LL}, {148, 1229364LL}, {149, 1138316LL}, 
-        {150, 1766546LL}, {151, 1710225LL}, {152, 1420060LL}, 
-        {153, 1385318LL}, {154, 1189482LL}, {155, 1121592LL}, 
-        {156, 2312742LL}, {157, 2080086LL}, {158, 1554315LL}, 
-        {159, 1471318LL}, {160, 2023442LL}, {161, 2188524LL}, 
-        {162, 1334013LL}, {163, 1314391LL}, {164, 1364079LL}, 
-        {165, 1257441LL}, {166, 1155144LL}, {167, 1126114LL}, 
-        {168, 1137949LL}, {169, 1113474LL}, {170, 2507315LL}, 
-        {171, 2370761LL}, {172, 491722LL}, {173, 465913LL}, 
-        {174, 297901LL}, {175, 292592LL}, {176, 291739LL}, {177, 204962LL}, 
-        {178, 2117508LL}, {179, 1099292LL}, {180, 828280LL}, 
-        {181, 1872167LL}, {182, 3851217LL}, {183, 2399980LL}, 
-        {184, 2009172LL}, {185, 1267680LL}, {186, 380536LL}, 
-        {187, 1495200LL}, {188, 1481952LL}, {189, 1012697LL}, 
-        {190, 761930LL}, {191, 1329620LL}, {192, 1096544LL}, 
-        {193, 1738075LL}, {194, 1009954LL}, {195, 898863LL}, 
-        {196, 1610492LL}, {197, 842860LL}, {198, 468382LL}, 
-        {199, 680330LL}, {200, 1449281LL}, {201, 1981783LL}, 
-        {202, 1326873LL}, {203, 2166199LL}, {204, 706372LL}, 
-        {205, 1360350LL}, {206, 1345301LL}, {207, 1175258LL}, 
-        {208, 77238LL}, {209, 2123971LL}, {210, 1239903LL}, 
-        {211, 431462LL}, {212, 407613LL}, {213, 352188LL}, {214, 600152LL}, 
-        {215, 523124LL}, {216, 322260LL}, {217, 318662LL}, {218, 274177LL}, 
-        {219, 753145LL}, {220, 752057LL}, {221, 741688LL}, {222, 749523LL}, 
-        {223, 756211LL}, {224, 426304LL}, {225, 423913LL}, {226, 424083LL}, 
-        {227, 111497LL}, {228, 124908LL}, {229, 57770LL}, {230, 44356LL}, 
-        {231, 1665838LL}, {232, 4433634LL}, {233, 2234459LL}, 
-        {234, 1800109LL}, {235, 1236816LL}, {236, 3296363LL}, 
-        {237, 1936456LL}, {238, 1958909LL}, {239, 2068807LL}, 
-        {240, 1919019LL}, {241, 1303277LL}, {242, 1297944LL}, 
-        {243, 1714630LL}, {244, 1327123LL}, {245, 1335631LL}, 
-        {246, 2124453LL}, {247, 1490408LL}, {248, 1090408LL}, 
-        {249, 1953474LL}, {250, 2058402LL}, {251, 1235298LL}, 
-        {252, 1731851LL}, {253, 2207679LL}, {254, 1397666LL}, 
-        {255, 1624525LL}, {256, 1466976LL}, {257, 1334849LL}, 
-        {258, 1973332LL}, {259, 2067951LL}, {260, 2505645LL}, 
-        {261, 1747659LL}, {262, 2547080LL}, {263, 4304602LL}, 
-        {264, 2906580LL}, {265, 1411114LL}, {266, 1192371LL}, 
-        {267, 1437222LL}, {268, 1183022LL}, {269, 1675210LL}, 
-        {270, 1262630LL}, {271, 1719565LL}, {272, 1258115LL}, 
-        {273, 2467647LL}, {274, 1219082LL}, {275, 2350192LL}, 
-        {276, 1066771LL}, {277, 1370119LL}, {278, 1745678LL}, 
-        {279, 1615602LL}, {280, 1095205LL}, {281, 1323040LL}, 
-        {282, 1455679LL}, {283, 1756633LL}, {284, 1564251LL}, 
-        {285, 986109LL}, {286, 1637359LL}, {287, 1443405LL}, 
-        {288, 1355155LL}, {289, 1026979LL}, {290, 815393LL}, 
-        {291, 1060679LL}, {292, 860956LL}, {293, 925095LL}, 
-        {294, 801679LL}, {295, 1083410LL}, {296, 820719LL}, 
-        {297, 1116525LL}, {298, 1874420LL}, {299, 952239LL}, 
-        {300, 1202462LL}, {301, 957055LL}, {302, 1260517LL}, 
-        {303, 2005012LL}, {304, 1520328LL}, {305, 1238464LL}, 
-        {306, 929637LL}, {307, 958616LL}, {308, 1662251LL}, 
-        {309, 1287419LL}, {310, 1401029LL}, {311, 1462400LL}, 
-        {312, 1782408LL}, {313, 972438LL}, {314, 1264782LL}, 
-        {315, 791798LL}, {316, 747789LL}, {317, 1412938LL}, 
-        {318, 1012862LL}, {319, 1026797LL}, {320, 928280LL}, 
-        {321, 793024LL}, {322, 1286688LL}, {323, 1364951LL}, 
-        {324, 1159794LL}, {325, 1165240LL}, {326, 1108638LL}, 
-        {327, 1096224LL}, {328, 920944LL}, {329, 919899LL}, 
-        {330, 830039LL}, {331, 829847LL}, {332, 698040LL}, 
-        {333, 1264981LL}, {334, 3653141LL}, {335, 5263262LL}, 
-        {336, 2597359LL}, {337, 959715LL}, {338, 862845LL}, 
-        {339, 726852LL}, {340, 2321969LL}, {341, 916420LL}, 
-        {342, 511352LL}, {343, 1056405LL}, {344, 696817LL}, 
-        {345, 510234LL}, {346, 3332784LL}, {347, 1210032LL}, 
-        {348, 1253061LL}, {349, 886996LL}, {350, 1740404LL}, 
-        {351, 2394621LL}, {352, 1530881LL}, {353, 4214232LL}, 
-        {354, 1886241LL}, {355, 1727848LL}, {356, 1736821LL}, 
-        {357, 2496628LL}, {358, 2224572LL}, {359, 1506437LL}, 
-        {360, 1512368LL}, {361, 792452LL}, {362, 1445633LL}, 
-        {363, 1675781LL}, {364, 1564926LL}, {365, 1445151LL}, 
-        {366, 1643310LL}, {367, 1503959LL}, {368, 1969884LL}, 
-        {369, 3087545LL}, {370, 2787778LL}, {371, 1863417LL}, 
-        {372, 4715206LL}, {373, 4693186LL}, {374, 1030801LL}, 
-        {375, 2498361LL}, {376, 2045856LL}, {377, 1059444LL}, 
-        {378, 1206421LL}, {379, 1402563LL}, {380, 1038606LL}, 
-        {381, 1003837LL}, {382, 558317LL}, {383, 1936317LL}, 
-        {384, 2269379LL}, {385, 2436518LL}, {386, 1192918LL}, 
-        {387, 418109LL}, {388, 1177250LL}, {389, 421451LL}, 
-        {390, 971156LL}, {391, 263605LL}, {392, 969533LL}, {393, 258818LL}, 
-        {394, 4613876LL}, {395, 2276917LL}, {396, 925597LL}, 
-        {397, 908272LL}, {398, 3721276LL}, {399, 1948326LL}, 
-        {400, 1542609LL}, {401, 1597302LL}, {402, 1617466LL}, 
-        {403, 1543476LL}, {404, 3LL}, {405, 2377288LL}, {406, 1107391LL}, 
-        {407, 2575145LL}, {408, 1554687LL}, {409, 3651924LL}, 
-        {410, 4545771LL}, {411, 4074909LL}, {412, 1419183LL}, 
-        {413, 1417246LL}, {414, 2190719LL}, {415, 631534LL}, 
-        {416, 2360546LL}, {417, 2749038LL}, {418, 1922883LL}, 
-        {419, 1099481LL}, {420, 2133120LL}, {421, 743878LL}, 
-        {422, 1086956LL}, {423, 1097042LL}, {424, 382163LL}, 
-        {425, 56382546LL}, {427, 351720LL}, {428, 351723LL}, 
-        {430, 352834LL}, {431, 348913LL}, {434, 2798694LL}, 
-        {435, 2790054LL}, {436, 228924LL}, {437, 359194LL}, 
-        {438, 890381LL}, {439, 1303607LL}, {440, 1257827LL}, 
-        {441, 2511426LL}, {442, 1255614LL}, {443, 1113137LL}, 
-        {444, 419128LL}, {445, 215094LL}, {446, 1790745LL}, 
-        {447, 1434814LL}, {448, 649695LL}, {449, 4432926LL}, {450, 4LL}, 
-        {451, 4LL}, {452, 4LL}, {453, 2767214LL}, {454, 1841980LL}, 
-        {455, 2823LL}, {456, 19831134LL}, {457, 3494187LL}, 
-        {458, 1365587LL}, {459, 2728298LL}, {460, 1108101LL}, 
-        {461, 3735LL}, {462, 858568LL}, {463, 2432704LL}, {464, 628276LL}, 
-        {465, 2230214LL}, {466, 1518396LL}, {467, 1495546LL}, 
-        {468, 1609542LL}, {469, 2107100LL}, {470, 1190246LL}, 
-        {471, 1656798LL}, {472, 1542666LL}, {473, 1448893LL}, 
-        {474, 2041350LL}, {475, 1026372LL}, {476, 869428LL}, 
-        {477, 737432LL}, {478, 3173259LL}, {479, 597375LL}, 
-        {480, 348692LL}, {481, 594002LL}, {482, 275823LL}, {483, 464695LL}, 
-        {484, 415344LL}, {485, 422632LL}, {486, 782222LL}, 
-        {487, 1240856LL}, {488, 1812658LL}, {489, 1536295LL}, 
-        {490, 1921402LL}, {491, 1301954LL}, {492, 984546LL}, 
-        {493, 238164LL}, {494, 244892LL}, {495, 1305101LL}, 
-        {496, 2933423LL}, {497, 1102926LL}, {498, 2578327LL}, 
-        {499, 2171541LL}, {500, 237181LL}, {501, 216208LL}, 
-        {502, 218815LL}, {503, 1297321LL}, {504, 1510117LL}, 
-        {505, 1207643LL}, {506, 1946260LL}, {507, 2063631LL}, 
-        {508, 1083954LL}, {509, 494915LL}, {510, 676841LL}, {511, 4685LL}, 
-        {512, 253LL}, {513, 294LL}, {514, 955889LL}, {515, 1917154LL}, 
-        {516, 2397809LL}, {517, 2042483LL}, {518, 2603710LL}, 
-        {519, 2532082LL}, {520, 1366737LL}, {521, 127021LL}, 
-        {522, 334729LL}, {523, 539325LL}, {524, 4273993LL}, 
-        {525, 5097282LL}, {526, 3808130LL}, {527, 3197584LL}, 
-        {528, 1387343LL}, {529, 16LL}, {530, 3182LL}, {531, 2976LL}, 
-        {532, 5179LL}, {533, 2656LL}, {534, 26LL}, {536, 2706821LL}, 
-        {537, 2741LL}, {538, 166LL}, {539, 1380505LL}, {540, 1805513LL}, 
-        {541, 2518163LL}, {542, 2243468LL}, {543, 275501LL}, 
-        {544, 1962619LL}, {545, 2186705LL}, {546, 2735041LL}, 
-        {547, 1845008LL}, {548, 608135LL}, {549, 784694LL}, 
-        {550, 805587LL}, {551, 876461LL}, {552, 1268506LL}, 
-        {553, 1269885LL}, {554, 1693945LL}, {555, 2021970LL}, 
-        {556, 2153973LL}, {557, 754380LL}, {558, 1879622LL}, 
-        {559, 1035472LL}, {560, 783406LL}, {561, 1648436LL}, 
-        {562, 1143387LL}, {563, 1119826LL}, {564, 527541LL}, 
-        {565, 345052LL}, {566, 258815LL}, {567, 1285277LL}, 
-        {568, 1175958LL}, {569, 588888LL}, {570, 3152150LL}, 
-        {571, 994436LL}, {572, 1382048LL}, {573, 217950LL}, 
-        {574, 215387LL}, {575, 2224061LL}, {576, 1890881LL}, {577, 4LL}, 
-        {578, 1665597LL}, {579, 1430096LL}, {580, 1015342LL}, 
-        {581, 1012882LL}, {582, 488267LL}, {583, 485893LL}, 
-        {584, 321558LL}, {585, 369296LL}, {586, 1233662LL}, 
-        {587, 1608384LL}, {588, 1032047LL}, {589, 1478954LL}, 
-        {590, 1459614LL}, {591, 1128097LL}, {592, 998083LL}, 
-        {593, 654381LL}, {594, 1045525LL}, {595, 1330650LL}, 
-        {596, 817140LL}, {597, 1119336LL}, {598, 1367272LL}, 
-        {599, 773537LL}, {600, 796347LL}, {601, 3855956LL}, 
-        {602, 1139292LL}, {603, 1227132LL}, {604, 1898872LL}, 
-        {605, 1874442LL}, {606, 1887213LL}, {607, 1282560LL}, 
-        {608, 999493LL}, {609, 990994LL}, {610, 992511LL}, {611, 926025LL}, 
-        {612, 990544LL}, {613, 487495LL}, {614, 322595LL}, {615, 992243LL}, 
-        {616, 1001783LL}, {617, 1641684LL}, {618, 820249LL}, 
-        {619, 749548LL}, {620, 1881784LL}, {621, 981419LL}, 
-        {622, 1000824LL}, {623, 814733LL}, {624, 1887578LL}, 
-        {625, 1880617LL}, {626, 1889589LL}, {627, 731800LL}, 
-        {628, 2165359LL}, {629, 1540556LL}, {630, 972696LL}, 
-        {631, 1557702LL}, {632, 979332LL}, {633, 1121611LL}, 
-        {634, 988483LL}, {635, 590932LL}, {636, 731660LL}, {637, 407919LL}, 
-        {638, 583796LL}, {639, 976542LL}, {640, 1572155LL}, 
-        {641, 2304784LL}, {642, 237536LL}, {643, 2095629LL}, 
-        {644, 255988LL}, {645, 1609553LL}, {646, 685553LL}, 
-        {647, 341596LL}, {648, 369796LL}, {649, 1381251LL}, 
-        {650, 1012175LL}, {651, 1158990LL}, {652, 1621126LL}, 
-        {653, 583583LL}, {654, 1013595LL}, {655, 1278781LL}, 
-        {656, 1288605LL}, {657, 243432LL}, {658, 1502778LL}, 
-        {659, 1560682LL}, {660, 1313906LL}, {661, 1828882LL}, 
-        {662, 678578LL}, {663, 1507700LL}, {664, 1517233LL}, 
-        {665, 1493902LL}, {666, 1403402LL}, {667, 1015760LL}, 
-        {668, 802845LL}, {669, 1622710LL}, {670, 902639LL}, 
-        {671, 715310LL}, {672, 507344LL}, {673, 709664LL}, {674, 589385LL}, 
-        {675, 460420LL}, {677, 1070548LL}, {678, 751364LL}, 
-        {679, 665791LL}, {680, 482193LL}, {681, 1053457LL}, 
-        {682, 1226943LL}, {683, 1061166LL}, {684, 943851LL}, 
-        {685, 1403645LL}, {686, 1052042LL}, {687, 767101LL}, 
-        {688, 1354883LL}, {689, 688087LL}, {690, 577676LL}, 
-        {691, 738253LL}, {692, 945393LL}, {693, 1289577LL}, 
-        {694, 4457467LL}, {695, 3256085LL}, {696, 1246784LL}, 
-        {697, 586192LL}, {698, 607106LL}, {699, 933863LL}, 
-        {700, 1212474LL}, {701, 760093LL}, {702, 1977228LL}, 
-        {703, 2159174LL}, {704, 1180589LL}, {705, 1505215LL}, 
-        {706, 431710LL}, {707, 1070680LL}, {708, 194860LL}, 
-        {709, 1230648LL}, {710, 547317LL}, {711, 552071LL}, 
-        {712, 995808LL}, {713, 821885LL}, {714, 2017184LL}, 
-        {715, 1020518LL}, {716, 1483215LL}, {717, 1193855LL}, 
-        {718, 1364067LL}, {719, 937759LL}, {720, 1361593LL}, 
-        {721, 1179474LL}, {722, 746295LL}, {723, 655341LL}, 
-        {724, 2115333LL}, {725, 745578LL}, {726, 647138LL}, 
-        {727, 2228432LL}, {728, 2182943LL}, {729, 2139365LL}, 
-        {730, 2161126LL}, {731, 2095004LL}, {732, 1607040LL}, 
-        {733, 226573LL}, {734, 1980813LL}, {735, 1379856LL}, 
-        {736, 1320185LL}, {737, 1336031LL}, {738, 1059487LL}, 
-        {739, 987712LL}, {740, 1319670LL}, {741, 1078237LL}, 
-        {742, 824235LL}, {743, 994407LL}, {744, 1025368LL}, 
-        {745, 805618LL}, {746, 1332458LL}, {747, 1694063LL}, 
-        {748, 997764LL}, {749, 1218473LL}, {750, 700103LL}, 
-        {751, 999317LL}, {752, 2063555LL}, {753, 1647018LL}, 
-        {754, 2118233LL}, {755, 1188112LL}, {756, 867700LL}, 
-        {757, 1047137LL}, {758, 964596LL}, {759, 976848LL}, 
-        {760, 897257LL}, {761, 740845LL}, {762, 1710626LL}, 
-        {763, 625470LL}, {764, 636945LL}, {765, 1839455LL}, 
-        {766, 1126793LL}, {767, 1301852LL}, {768, 2961887LL}, 
-        {769, 2874432LL}, {770, 1590778LL}, {771, 1953235LL}, 
-        {772, 1382889LL}, {773, 933169LL}, {774, 1694898LL}, 
-        {775, 583164LL}, {776, 815538LL}, {777, 999976LL}, {778, 821384LL}, 
-        {779, 774825LL}, {780, 762415LL}, {781, 674944LL}, {782, 784054LL}, 
-        {783, 894542LL}, {784, 836861LL}, {785, 762535LL}, 
-        {786, 2506182LL}, {787, 2007328LL}, {788, 2147879LL}, 
-        {789, 2140179LL}, {790, 1079489LL}, {791, 438514LL}, 
-        {792, 605593LL}, {793, 518078LL}, {794, 316374LL}, {795, 312424LL}, 
-        {796, 266364LL}, {797, 264040LL}, {798, 423310LL}, {799, 339436LL}, 
-        {800, 2738464LL}, {801, 2577990LL}, {802, 2553271LL}, 
-        {803, 1636552LL}, {804, 1622835LL}, {805, 1345166LL}, 
-        {806, 1159911LL}, {807, 1135219LL}, {808, 1103668LL}, 
-        {809, 978611LL}, {810, 972685LL}, {811, 1176947LL}, 
-        {812, 1176182LL}, {813, 1139745LL}, {814, 972264LL}, 
-        {815, 972108LL}, {816, 1047943LL}, {817, 1628341LL}, 
-        {818, 2521225LL}, {819, 1270498LL}, {820, 1186134LL}, 
-        {821, 1275789LL}, {822, 1418514LL}, {823, 1220179LL}, 
-        {824, 1356413LL}, {825, 1463259LL}, {826, 835408LL}, 
-        {827, 993541LL}, {828, 1235193LL}, {829, 18651729LL}, 
-        {830, 20952347LL}, {831, 1541192LL}, {832, 1601424LL}, 
-        {833, 2941718LL}, {834, 2318584LL}, {835, 1612010LL}, 
-        {836, 1208679LL}, {837, 135732LL}, {838, 134849LL}, 
-        {839, 119085LL}, {840, 119201LL}, {841, 2530046LL}, 
-        {842, 2401427LL}, {843, 2405648LL}, {844, 4523753LL}, 
-        {845, 2536547LL}, {846, 2409625LL}, {847, 2422845LL}, 
-        {848, 2482422LL}, {849, 933194LL}, {850, 1563784LL}, 
-        {851, 1575067LL}, {852, 684927LL}, {853, 2224585LL}, 
-        {854, 773243LL}, {855, 4604185LL}, {856, 3750907LL}, 
-        {857, 4668458LL}, {858, 2114500LL}, {859, 1748604LL}, 
-        {860, 1131008LL}, {861, 5353654LL}, {862, 3573401LL}, 
-        {863, 1473209LL}, {864, 1780491LL}, {865, 1726100LL}, 
-        {866, 14442LL}, {867, 2281LL}, {868, 3518LL}, {869, 8229LL}, 
-        {870, 4904LL}, {871, 4142LL}, {872, 508339LL}, {873, 577046LL}, 
-        {874, 219006LL}, {875, 243LL}, {876, 89LL}, {877, 230687LL}, 
-        {878, 2079880LL}, {879, 1308947LL}, {880, 746214LL}, 
-        {881, 1965075LL}, {882, 216594LL}, {883, 74714LL}, {884, 5241LL}, 
-        {885, 4651LL}, {886, 1945671LL}, {887, 2573951LL}, 
-        {888, 3421857LL}, {889, 670992LL}, {890, 414901LL}, 
-        {891, 667588LL}, {892, 667120LL}, {893, 1072510LL}, 
-        {894, 2146292LL}, {895, 214LL},
+
+        {1, 3000425LL}, {2, 3048910LL}, {3, 3689982LL}, {4, 211638LL}, 
+        {5, 1593059LL}, {6, 2364183LL}, {7, 3325244LL}, {8, 2630022LL}, 
+        {9, 1837308LL}, {10, 1953065LL}, {11, 1483239LL}, {12, 1457750LL}, 
+        {13, 550242LL}, {14, 573193LL}, {15, 2904056LL}, {16, 3237238LL}, 
+        {17, 1775086LL}, {18, 3439430LL}, {19, 2289949LL}, {20, 2890939LL}, 
+        {21, 1516696LL}, {22, 2507566LL}, {23, 2800870LL}, {24, 2827628LL}, 
+        {25, 314726LL}, {26, 312040LL}, {27, 546734LL}, {28, 533294LL}, 
+        {29, 395314LL}, {30, 287700LL}, {31, 2332280LL}, {32, 817364LL}, 
+        {33, 2281210LL}, {34, 1636923LL}, {35, 959142LL}, {36, 962733LL}, 
+        {37, 753971LL}, {38, 767501LL}, {39, 1995542LL}, {40, 1893790LL}, 
+        {41, 3034368LL}, {42, 2034727LL}, {43, 1850404LL}, {44, 2614240LL}, 
+        {45, 1890517LL}, {46, 1791040LL}, {47, 2558091LL}, {48, 1910279LL}, 
+        {49, 1841251LL}, {50, 1932410LL}, {51, 1829098LL}, {52, 2239342LL}, 
+        {53, 2233472LL}, {54, 2016528LL}, {55, 2029346LL}, {56, 2195639LL}, 
+        {57, 2817079LL}, {58, 2775565LL}, {59, 2811547LL}, {60, 519270LL}, 
+        {61, 521011LL}, {62, 545644LL}, {63, 538646LL}, {64, 739532LL}, 
+        {65, 728689LL}, {66, 598840LL}, {67, 555983LL}, {68, 1079688LL}, 
+        {69, 1077894LL}, {70, 707401LL}, {71, 497556LL}, {72, 1604654LL}, 
+        {73, 1801063LL}, {74, 538572LL}, {75, 560142LL}, {76, 2581122LL}, 
+        {77, 2541498LL}, {78, 954100LL}, {79, 1044914LL}, {80, 724139LL}, 
+        {81, 746038LL}, {82, 724142LL}, {83, 746192LL}, {84, 1803019LL}, 
+        {85, 1845900LL}, {86, 1826240LL}, {87, 1839210LL}, {88, 1787075LL}, 
+        {89, 1709218LL}, {90, 1848633LL}, {91, 1750012LL}, {92, 1947911LL}, 
+        {93, 2000866LL}, {94, 1113217LL}, {95, 902854LL}, {96, 1651246LL}, 
+        {97, 2328387LL}, {98, 2162732LL}, {99, 1254265LL}, {100, 1263174LL}, 
+        {101, 1275559LL}, {102, 1281142LL}, {103, 2280559LL}, {104, 2346927LL}, 
+        {105, 977654LL}, {106, 1023177LL}, {107, 723105LL}, {108, 694922LL}, 
+        {109, 334685LL}, {110, 308238LL}, {111, 2250840LL}, {112, 2334225LL}, 
+        {113, 1955616LL}, {114, 2084598LL}, {115, 4146793LL}, {116, 1904118LL}, 
+        {117, 1995586LL}, {118, 3537586LL}, {119, 108233LL}, {120, 110421LL}, 
+        {121, 2566609LL}, {122, 2596293LL}, {123, 2221069LL}, {124, 506346LL}, 
+        {125, 400797LL}, {126, 1967163LL}, {127, 1919205LL}, {128, 1519225LL}, 
+        {129, 1442012LL}, {130, 1374476LL}, {131, 1330005LL}, {132, 1689199LL}, 
+        {133, 1722529LL}, {134, 1415203LL}, {135, 1408540LL}, {136, 1309536LL}, 
+        {137, 1386733LL}, {138, 1780554LL}, {139, 1853920LL}, {140, 1353557LL}, 
+        {141, 1429591LL}, {142, 1366215LL}, {143, 1403312LL}, {144, 1796819LL}, 
+        {145, 1730092LL}, {146, 1322579LL}, {147, 1419591LL}, {148, 1296819LL}, 
+        {149, 1296441LL}, {150, 1724602LL}, {151, 1738205LL}, {152, 1415424LL}, 
+        {153, 1502555LL}, {154, 1302974LL}, {155, 1419828LL}, {156, 1850527LL}, 
+        {157, 1818389LL}, {158, 1527538LL}, {159, 1480443LL}, {160, 1957612LL}, 
+        {161, 1684480LL}, {162, 1241416LL}, {163, 1212966LL}, {164, 1223400LL}, 
+        {165, 1226111LL}, {166, 1064113LL}, {167, 1095928LL}, {168, 1053251LL}, 
+        {169, 1158386LL}, {170, 2338124LL}, {171, 2162293LL}, {172, 1008233LL}, 
+        {173, 963772LL}, {174, 289684LL}, {175, 289572LL}, {176, 296933LL}, 
+        {177, 207808LL}, {178, 1895346LL}, {179, 1098703LL}, {180, 800955LL}, 
+        {181, 1467380LL}, {182, 2490426LL}, {183, 2020708LL}, {184, 1564655LL}, 
+        {185, 1272418LL}, {186, 408137LL}, {187, 1995564LL}, {188, 1404887LL}, 
+        {189, 984432LL}, {190, 773155LL}, {191, 1183207LL}, {192, 956605LL}, 
+        {193, 1855259LL}, {194, 1012807LL}, {195, 839997LL}, {196, 1553436LL}, 
+        {197, 871170LL}, {198, 532666LL}, {199, 946061LL}, {200, 1391662LL}, 
+        {201, 2292056LL}, {202, 1162408LL}, {203, 1756140LL}, {204, 686045LL}, 
+        {205, 1304695LL}, {206, 1195230LL}, {207, 1548525LL}, {208, 65635LL}, 
+        {209, 2057929LL}, {210, 1005494LL}, {211, 609378LL}, {212, 908068LL}, 
+        {213, 673617LL}, {214, 769754LL}, {215, 850007LL}, {216, 475978LL}, 
+        {217, 526281LL}, {218, 413114LL}, {219, 958014LL}, {220, 919867LL}, 
+        {221, 904080LL}, {222, 919377LL}, {223, 892206LL}, {224, 1030153LL}, 
+        {225, 1035332LL}, {226, 1043610LL}, {227, 171429LL}, {228, 452088LL}, 
+        {229, 56505LL}, {230, 42010LL}, {231, 1461697LL}, {232, 4415714LL}, 
+        {233, 2162694LL}, {234, 1670319LL}, {235, 1312745LL}, {236, 2540502LL}, 
+        {237, 2202468LL}, {238, 1799257LL}, {239, 1562997LL}, {240, 1497166LL}, 
+        {241, 1330446LL}, {242, 1126647LL}, {243, 1365323LL}, {244, 1162945LL}, 
+        {245, 1294790LL}, {246, 1727604LL}, {247, 1323867LL}, {248, 1312274LL}, 
+        {249, 1662569LL}, {250, 1944207LL}, {251, 1177293LL}, {252, 2127610LL}, 
+        {253, 2205497LL}, {254, 1484585LL}, {255, 1405801LL}, {256, 1214150LL}, 
+        {257, 1143144LL}, {258, 1758907LL}, {259, 1630032LL}, {260, 1929647LL}, 
+        {261, 1407118LL}, {262, 2001976LL}, {263, 3122544LL}, {264, 2152441LL}, 
+        {265, 1643821LL}, {266, 934152LL}, {267, 1521806LL}, {268, 1209852LL}, 
+        {269, 1663096LL}, {270, 1091179LL}, {271, 1338992LL}, {272, 1079421LL}, 
+        {273, 2264784LL}, {274, 946870LL}, {275, 2026780LL}, {276, 965000LL}, 
+        {277, 1210606LL}, {278, 2149296LL}, {279, 1430720LL}, {280, 1128504LL}, 
+        {281, 1448297LL}, {282, 1195033LL}, {283, 2006536LL}, {284, 2139467LL}, 
+        {285, 1489248LL}, {286, 2387867LL}, {287, 1279431LL}, {288, 1293986LL}, 
+        {289, 998228LL}, {290, 711973LL}, {291, 885386LL}, {292, 797856LL}, 
+        {293, 846308LL}, {294, 738039LL}, {295, 976278LL}, {296, 821128LL}, 
+        {297, 1280615LL}, {298, 1734373LL}, {299, 1023590LL}, {300, 1258143LL}, 
+        {301, 1040776LL}, {302, 1327881LL}, {303, 1620642LL}, {304, 1228357LL}, 
+        {305, 1117324LL}, {306, 798346LL}, {307, 745522LL}, {308, 1480178LL}, 
+        {309, 1110531LL}, {310, 1321078LL}, {311, 1859004LL}, {312, 1546832LL}, 
+        {313, 1281483LL}, {314, 931766LL}, {315, 920830LL}, {316, 851161LL}, 
+        {317, 1343119LL}, {318, 1092409LL}, {319, 982993LL}, {320, 877335LL}, 
+        {321, 736946LL}, {322, 996151LL}, {323, 1106704LL}, {324, 1043831LL}, 
+        {325, 1092282LL}, {326, 952073LL}, {327, 920874LL}, {328, 795398LL}, 
+        {329, 812625LL}, {330, 880443LL}, {331, 856499LL}, {332, 728300LL}, 
+        {333, 1230817LL}, {334, 2361891LL}, {335, 3873833LL}, {336, 2239803LL}, 
+        {337, 1057174LL}, {338, 814400LL}, {339, 678033LL}, {340, 2109526LL}, 
+        {341, 895194LL}, {342, 582348LL}, {343, 1183520LL}, {344, 965306LL}, 
+        {345, 825429LL}, {346, 3421909LL}, {347, 1366163LL}, {348, 1481128LL}, 
+        {349, 1182406LL}, {350, 2131272LL}, {351, 2264617LL}, {352, 1412354LL}, 
+        {353, 3654239LL}, {354, 1578811LL}, {355, 1266564LL}, {356, 1464638LL}, 
+        {357, 1963998LL}, {358, 1785118LL}, {359, 1330684LL}, {360, 1362170LL}, 
+        {361, 815174LL}, {362, 1098857LL}, {363, 2056804LL}, {364, 1451780LL}, 
+        {365, 1272315LL}, {366, 1843266LL}, {367, 1219872LL}, {368, 1253701LL}, 
+        {369, 1629881LL}, {370, 2136399LL}, {371, 1159425LL}, {372, 3254741LL}, 
+        {373, 3307987LL}, {374, 877477LL}, {375, 1983146LL}, {376, 1817105LL}, 
+        {377, 1110498LL}, {378, 1152477LL}, {379, 1726332LL}, {380, 1270684LL}, 
+        {381, 1251331LL}, {382, 843314LL}, {383, 1623472LL}, {384, 1897727LL}, 
+        {385, 2008046LL}, {386, 1964959LL}, {387, 701316LL}, {388, 2021370LL}, 
+        {389, 695227LL}, {390, 1829794LL}, {391, 585276LL}, {392, 1837764LL}, 
+        {393, 591972LL}, {394, 4376561LL}, {395, 1964777LL}, {396, 915526LL}, 
+        {397, 895209LL}, {398, 3295991LL}, {399, 1591789LL}, {400, 1240635LL}, 
+        {401, 1388913LL}, {402, 1287525LL}, {403, 1393249LL}, {404, 4LL}, 
+        {405, 1956572LL}, {406, 1571479LL}, {407, 2085630LL}, {408, 1420300LL}, 
+        {409, 2508166LL}, {410, 4057818LL}, {411, 3306760LL}, {412, 2494412LL}, 
+        {413, 2452457LL}, {414, 1938656LL}, {415, 603861LL}, {416, 1799673LL}, 
+        {417, 2156890LL}, {418, 1201509LL}, {419, 935864LL}, {420, 1891017LL}, 
+        {421, 665942LL}, {422, 950179LL}, {423, 861336LL}, {424, 586252LL}, 
+        {425, 66835017LL}, {427, 498423LL}, {428, 521440LL}, {430, 528477LL}, 
+        {431, 503206LL}, {434, 2286155LL}, {435, 2366482LL}, {436, 269809LL}, 
+        {437, 313074LL}, {438, 860049LL}, {439, 851660LL}, {440, 1150962LL}, 
+        {441, 2371723LL}, {442, 1131373LL}, {443, 912553LL}, {444, 751454LL}, 
+        {445, 259950LL}, {446, 2480520LL}, {447, 3017926LL}, {448, 829325LL}, 
+        {449, 3794915LL}, {450, 3LL}, {451, 3LL}, {452, 3LL}, 
+        {453, 2054094LL}, {454, 1509300LL}, {455, 2898LL}, {456, 29950492LL}, 
+        {457, 4017267LL}, {458, 1212321LL}, {459, 3700250LL}, {460, 1431685LL}, 
+        {461, 5481LL}, {462, 854733LL}, {463, 1937175LL}, {464, 904715LL}, 
+        {465, 1701741LL}, {466, 1186393LL}, {467, 1260775LL}, {468, 1433061LL}, 
+        {469, 1687611LL}, {470, 920968LL}, {471, 1482492LL}, {472, 1449194LL}, 
+        {473, 1454289LL}, {474, 2603958LL}, {475, 1030726LL}, {476, 887518LL}, 
+        {477, 775994LL}, {478, 2396717LL}, {479, 915705LL}, {480, 595562LL}, 
+        {481, 579655LL}, {482, 555216LL}, {483, 484733LL}, {484, 412683LL}, 
+        {485, 442503LL}, {486, 1213036LL}, {487, 1193831LL}, {488, 1738275LL}, 
+        {489, 1497287LL}, {490, 1646220LL}, {491, 1300489LL}, {492, 1084953LL}, 
+        {493, 221493LL}, {494, 207747LL}, {495, 1390758LL}, {496, 1650823LL}, 
+        {497, 662884LL}, {498, 2209351LL}, {499, 2288493LL}, {500, 196926LL}, 
+        {501, 184709LL}, {502, 195471LL}, {503, 1355638LL}, {504, 1478953LL}, 
+        {505, 1004612LL}, {506, 1612574LL}, {507, 1919471LL}, {508, 1018919LL}, 
+        {509, 496177LL}, {510, 950523LL}, {511, 5570LL}, {512, 403LL}, 
+        {513, 538LL}, {514, 1545972LL}, {515, 2137687LL}, {516, 2108947LL}, 
+        {517, 2122242LL}, {518, 2170922LL}, {519, 2158048LL}, {520, 1287208LL}, 
+        {521, 129325LL}, {522, 355181LL}, {523, 904182LL}, {524, 3800382LL}, 
+        {525, 3599288LL}, {526, 3135486LL}, {527, 2854262LL}, {528, 1330895LL}, 
+        {529, 27LL}, {530, 5375LL}, {531, 4156LL}, {532, 8653LL}, 
+        {533, 4249LL}, {534, 45LL}, {536, 2670482LL}, {537, 2855LL}, 
+        {538, 297LL}, {539, 1414801LL}, {540, 2542036LL}, {541, 2347318LL}, 
+        {542, 2239221LL}, {543, 423496LL}, {544, 1595755LL}, {545, 1830462LL}, 
+        {546, 2224864LL}, {547, 1548015LL}, {548, 710954LL}, {549, 808213LL}, 
+        {550, 855346LL}, {551, 591559LL}, {552, 1136316LL}, {553, 1084780LL}, 
+        {554, 1304804LL}, {555, 1775805LL}, {556, 1914138LL}, {557, 736500LL}, 
+        {558, 1989052LL}, {559, 684811LL}, {560, 540682LL}, {561, 1067400LL}, 
+        {562, 868961LL}, {563, 878003LL}, {564, 522992LL}, {565, 368056LL}, 
+        {566, 291180LL}, {567, 872042LL}, {568, 914422LL}, {569, 387429LL}, 
+        {570, 1771669LL}, {571, 1117218LL}, {572, 1479300LL}, {573, 190037LL}, 
+        {574, 185242LL}, {575, 1904817LL}, {576, 1624093LL}, {577, 3LL}, 
+        {578, 1500103LL}, {579, 1317136LL}, {580, 1041465LL}, {581, 1052597LL}, 
+        {582, 605713LL}, {583, 573795LL}, {584, 412199LL}, {585, 453348LL}, 
+        {586, 1172993LL}, {587, 1530913LL}, {588, 960321LL}, {589, 1390627LL}, 
+        {590, 1741605LL}, {591, 1317833LL}, {592, 924276LL}, {593, 670515LL}, 
+        {594, 1071678LL}, {595, 1163992LL}, {596, 837335LL}, {597, 1273396LL}, 
+        {598, 1288075LL}, {599, 773173LL}, {600, 745405LL}, {601, 2517268LL}, 
+        {602, 1362275LL}, {603, 1132101LL}, {604, 1492187LL}, {605, 1459332LL}, 
+        {606, 1361356LL}, {607, 1639819LL}, {608, 973878LL}, {609, 1005673LL}, 
+        {610, 992106LL}, {611, 994864LL}, {612, 1000639LL}, {613, 561155LL}, 
+        {614, 377298LL}, {615, 1002330LL}, {616, 1017342LL}, {617, 1063347LL}, 
+        {618, 725519LL}, {619, 753454LL}, {620, 1530456LL}, {621, 962634LL}, 
+        {622, 962232LL}, {623, 786684LL}, {624, 1348502LL}, {625, 1381515LL}, 
+        {626, 1392304LL}, {627, 623243LL}, {628, 1515808LL}, {629, 1226346LL}, 
+        {630, 956792LL}, {631, 1198371LL}, {632, 992795LL}, {633, 1055497LL}, 
+        {634, 1014613LL}, {635, 898510LL}, {636, 826861LL}, {637, 462521LL}, 
+        {638, 770165LL}, {639, 1153514LL}, {640, 1533607LL}, {641, 1774982LL}, 
+        {642, 207109LL}, {643, 1628609LL}, {644, 458611LL}, {645, 1120687LL}, 
+        {646, 647171LL}, {647, 505464LL}, {648, 614179LL}, {649, 1729213LL}, 
+        {650, 903579LL}, {651, 1493708LL}, {652, 1548495LL}, {653, 959619LL}, 
+        {654, 1315502LL}, {655, 1285957LL}, {656, 1648754LL}, {657, 472856LL}, 
+        {658, 1276160LL}, {659, 1482346LL}, {660, 1138731LL}, {661, 1543063LL}, 
+        {662, 917990LL}, {663, 1241224LL}, {664, 1851463LL}, {665, 1517672LL}, 
+        {666, 1338133LL}, {667, 1020429LL}, {668, 894079LL}, {669, 1516242LL}, 
+        {670, 1057482LL}, {671, 805274LL}, {672, 937197LL}, {673, 708499LL}, 
+        {674, 559200LL}, {675, 522240LL}, {677, 1245151LL}, {678, 1028350LL}, 
+        {679, 809774LL}, {680, 683374LL}, {681, 1396499LL}, {682, 1288091LL}, 
+        {683, 1396376LL}, {684, 1117614LL}, {685, 1227647LL}, {686, 889690LL}, 
+        {687, 976676LL}, {688, 1295326LL}, {689, 795964LL}, {690, 793492LL}, 
+        {691, 1052121LL}, {692, 1296319LL}, {693, 1238289LL}, {694, 3915274LL}, 
+        {695, 2379805LL}, {696, 1095452LL}, {697, 570716LL}, {698, 711011LL}, 
+        {699, 866540LL}, {700, 1374960LL}, {701, 878318LL}, {702, 1860354LL}, 
+        {703, 2046029LL}, {704, 1133329LL}, {705, 1342145LL}, {706, 484262LL}, 
+        {707, 894696LL}, {708, 243488LL}, {709, 1074170LL}, {710, 990747LL}, 
+        {711, 977401LL}, {712, 894172LL}, {713, 757660LL}, {714, 1611130LL}, 
+        {715, 950570LL}, {716, 1313525LL}, {717, 1017828LL}, {718, 1732951LL}, 
+        {719, 1144576LL}, {720, 1290242LL}, {721, 1014464LL}, {722, 490843LL}, 
+        {723, 654772LL}, {724, 1787845LL}, {725, 1050518LL}, {726, 837224LL}, 
+        {727, 1303841LL}, {728, 1238618LL}, {729, 1224163LL}, {730, 1259645LL}, 
+        {731, 1704957LL}, {732, 995115LL}, {733, 254367LL}, {734, 1711551LL}, 
+        {735, 1282722LL}, {736, 1631164LL}, {737, 1676881LL}, {738, 1049017LL}, 
+        {739, 1342366LL}, {740, 1285291LL}, {741, 982190LL}, {742, 1037799LL}, 
+        {743, 1189167LL}, {744, 1424240LL}, {745, 859564LL}, {746, 1274628LL}, 
+        {747, 1571468LL}, {748, 1073698LL}, {749, 1625879LL}, {750, 786311LL}, 
+        {751, 1016593LL}, {752, 1214505LL}, {753, 1796515LL}, {754, 1851801LL}, 
+        {755, 1089333LL}, {756, 854178LL}, {757, 1274285LL}, {758, 1010720LL}, 
+        {759, 1027145LL}, {760, 941155LL}, {761, 783476LL}, {762, 1527819LL}, 
+        {763, 746056LL}, {764, 719715LL}, {765, 1530854LL}, {766, 1079945LL}, 
+        {767, 1391002LL}, {768, 2227938LL}, {769, 2273967LL}, {770, 1570287LL}, 
+        {771, 1515928LL}, {772, 1259157LL}, {773, 969606LL}, {774, 1620311LL}, 
+        {775, 501851LL}, {776, 588283LL}, {777, 727138LL}, {778, 578258LL}, 
+        {779, 744323LL}, {780, 750923LL}, {781, 429754LL}, {782, 704845LL}, 
+        {783, 1136507LL}, {784, 961438LL}, {785, 971070LL}, {786, 1791574LL}, 
+        {787, 1343245LL}, {788, 1395676LL}, {789, 1351662LL}, {790, 1285097LL}, 
+        {791, 306668LL}, {792, 787891LL}, {793, 831433LL}, {794, 498857LL}, 
+        {795, 494776LL}, {796, 389073LL}, {797, 404317LL}, {798, 607404LL}, 
+        {799, 687539LL}, {800, 1568004LL}, {801, 1504518LL}, {802, 1472336LL}, 
+        {803, 1129685LL}, {804, 1122304LL}, {805, 1106102LL}, {806, 1265664LL}, 
+        {807, 1228267LL}, {808, 943749LL}, {809, 1159231LL}, {810, 1150175LL}, 
+        {811, 2236989LL}, {812, 2294291LL}, {813, 932569LL}, {814, 1154736LL}, 
+        {815, 1126141LL}, {816, 1948632LL}, {817, 1426470LL}, {818, 2184612LL}, 
+        {819, 1323448LL}, {820, 1022625LL}, {821, 1342752LL}, {822, 1790613LL}, 
+        {823, 1104698LL}, {824, 1838615LL}, {825, 2612899LL}, {826, 1170131LL}, 
+        {827, 1955169LL}, {828, 1120262LL}, {829, 17541625LL}, {830, 17264130LL}, 
+        {831, 1965421LL}, {832, 2169937LL}, {833, 3903299LL}, {834, 2013166LL}, 
+        {835, 2018989LL}, {836, 1475568LL}, {837, 198822LL}, {838, 197748LL}, 
+        {839, 179068LL}, {840, 178935LL}, {841, 2420437LL}, {842, 2397972LL}, 
+        {843, 2300690LL}, {844, 5635637LL}, {845, 3390100LL}, {846, 3240774LL}, 
+        {847, 3207486LL}, {848, 3970860LL}, {849, 1279656LL}, {850, 1349562LL}, 
+        {851, 1322364LL}, {852, 776562LL}, {853, 2959131LL}, {854, 1137200LL}, 
+        {855, 4688660LL}, {856, 4241430LL}, {857, 5485157LL}, {858, 1532724LL}, 
+        {859, 1473465LL}, {860, 1694037LL}, {861, 5152611LL}, {862, 4898202LL}, 
+        {863, 1958824LL}, {864, 2133285LL}, {865, 2240161LL}, {866, 16888LL}, 
+        {867, 2597LL}, {868, 5510LL}, {869, 14259LL}, {870, 8077LL}, 
+        {871, 6471LL}, {872, 850627LL}, {873, 801428LL}, {874, 267892LL}, 
+        {875, 400LL}, {876, 102LL}, {877, 354059LL}, {878, 2777810LL}, 
+        {879, 2176346LL}, {880, 942578LL}, {881, 3324431LL}, {882, 173689LL}, 
+        {883, 58500LL}, {884, 3278LL}, {885, 5541LL}, {886, 2161248LL}, 
+        {887, 3224165LL}, {888, 3430500LL}, {889, 820064LL}, {890, 506791LL}, 
+        {891, 933230LL}, {892, 915010LL}, {893, 1531490LL}, {894, 1757919LL}, 
+        {895, 213LL}, {896, 511948LL}, {897, 905682LL}, {898, 375322LL}, 
+        {899, 5LL}, {900, 6192624LL}, {901, 198LL}, {902, 10929333LL}, 
+        {903, 747931LL}, {904, 7902LL}, {905, 8LL}, {906, 2118365LL}, 
+        {907, 778699LL}, {908, 2618LL}, {909, 43LL}, {910, 105LL}, 
+        {911, 896533LL}, {912, 5531LL}, {913, 132LL}, {914, 273692LL}, 
+        {915, 668LL}, {916, 2203364LL}, {917, 203LL}, {918, 92LL}, 
+        {919, 1139LL}, {920, 362393LL}, {921, 395003LL}, {922, 2379168LL}, 
+        {923, 2407406LL}, {924, 861762LL}, {925, 884282LL}, {926, 3979745LL}, 
+        {927, 1290665LL}, {928, 668249LL}, {929, 18LL}, 
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
@@ -18976,35 +21410,8 @@ int main(int argc, char **argv)
     BenchAll = 0;
     BenchSpec = NULL;
 
-    /* Reorder argv so options come before filenames (POSIX getopt stops at first non-option) */
-    /* This allows "hashpipe foo.txt -o out.txt -e err.txt" to work correctly */
-    {
-        char **sorted = malloc((argc + 1) * sizeof(char *));
-        char *used = calloc(argc, 1);
-        int dst = 1;
-        sorted[0] = argv[0];
-        used[0] = 1;
-        for (i = 1; i < argc; i++) {
-            if (argv[i][0] == '-' && argv[i][1] != '\0') {
-                sorted[dst++] = argv[i];
-                used[i] = 1;
-                if (argv[i][2] == '\0' && strchr("tiqoOeEbm", argv[i][1]) && i + 1 < argc) {
-                    i++;
-                    sorted[dst++] = argv[i];
-                    used[i] = 1;
-                }
-            }
-        }
-        for (i = 1; i < argc; i++) {
-            if (!used[i])
-                sorted[dst++] = argv[i];
-        }
-        memcpy(argv, sorted, argc * sizeof(char *));
-        free(sorted);
-        free(used);
-    }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:BGTVh")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVh")) != -1) {
         switch (opt) {
         case 't':
             Numthreads = atoi(optarg);
@@ -19042,6 +21449,9 @@ int main(int argc, char **argv)
             break;
         case 'b':
             BenchSpec = optarg;
+            break;
+        case 'L':
+            MaxVerifyLimit = atof(optarg);
             break;
         case 'B':
             BenchAll = 1;
