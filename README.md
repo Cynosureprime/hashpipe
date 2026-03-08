@@ -195,6 +195,14 @@ This achieves near-linear scaling for slow types: 1000 bcrypt cost-12 hashes run
 
 hashpipe tracks the most recently matched hash type as a "hot type" and a hot list of recent `(type, salt_length)` matches.  When processing a batch, workers try the hot list first — using the known salt length to extract the salt directly without colon parsing — before falling back to the full candidate scan.  For homogeneous input (common in potfiles), this avoids testing hundreds of types per line and eliminates ambiguity when salts or passwords contain colons.
 
+### Backward-Scanning Colon Resolution
+
+When both the salt and password may contain colons (e.g., `hash:salt:with:colons:password:with:colons`), hashpipe scans backward through colon positions in the rest-of-line to try every possible salt/password boundary, right-to-left.  This ensures correct identification even when the password itself contains colons.
+
+### Cost Limiting
+
+Iterated verify functions (bcrypt, PBKDF2, scrypt, sha256crypt, etc.) estimate their execution time before running, using the formula `(parsed_cost / bench_cost) / bench_rate`.  If the estimate exceeds the `-L` limit, the verify is skipped.  This prevents misidentified hashes with extreme iteration counts (e.g., a hex string that happens to match bcrypt format with cost 31) from causing multi-minute stalls during auto-detection.
+
 ### Verification Strategies
 
 Hash types use one of three verification strategies:
@@ -264,6 +272,8 @@ hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 | e512 | SHA256CRYPT | `$5$$` sha256crypt |
 | e513 | SHA512CRYPT | `$6$$` sha512crypt |
 | e577 | BCRYPT256 | `$2k$$` HMAC-SHA256 + bcrypt |
+| e529 | CISCO8 | `$8$` PBKDF2-SHA256 20000 rounds |
+| e917 | CISCO9 | `$9$` scrypt (hashcat 9300) |
 | e884 | SCRYPT | `$7$$` scrypt |
 
 ### PBKDF2 / KDF types
@@ -277,6 +287,9 @@ hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 | e533 | PBKDF2-SHA512 | PBKDF2-HMAC-SHA512 |
 | e534 | PKCS5S2 | `{PKCS5S2}` PBKDF2-SHA1 10000 rounds |
 | e895 | NETSCALER-PBKDF2 | Citrix NetScaler PBKDF2-HMAC-SHA256 2500 rounds |
+| e899 | LASTPASS | PBKDF2-SHA256 + AES-256-ECB (hashcat 6800) |
+| e905 | REDHAT389DS | `{PBKDF2_SHA256}` PBKDF2-SHA256 256-byte output (hashcat 10901) |
+| e918 | DCC2 | PBKDF2-HMAC-SHA1 over NTLM (hashcat 2100) |
 
 ### LDAP SSHA types
 
@@ -305,7 +318,16 @@ hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 | e861 | CISCOPIX | Cisco PIX `md5($pass)` phpitoa64 |
 | e862 | CISCOASA | Cisco ASA `md5($pass.$salt)` phpitoa64 |
 | e876 | DRUPAL7 | `$S$` SHA512 iterated |
+| e884 | SCRYPT | `SCRYPT:N:r:p:salt:hash` (hashcat 8900) |
 | e888 | ISCSI-CHAP | iSCSI CHAP authentication (hashcat 4800) |
+| e899 | LASTPASS | PBKDF2-SHA256 + AES-256-ECB (hashcat 6800) |
+| e901 | DOMINO8 | Lotus Notes/Domino 8+ PBKDF2-SHA1 (hashcat 9100) |
+| e905 | REDHAT389DS | `{PBKDF2_SHA256}` Red Hat Directory Server (hashcat 10901) |
+| e908 | SHIRO1 | Apache Shiro SHA-512 iterated (hashcat 12150) |
+| e910 | ORACLE12 | Oracle 12C PBKDF2-SHA512 (hashcat 12300) |
+| e918 | DCC2 | `$DCC2$` Domain Cached Credentials 2 (hashcat 2100) |
+| e919 | PWSAFE3 | Password Safe v3 SHA-256 iterated (hashcat 5200) |
+| e929 | RACF-KDFAES | RACF KDF/AES (hashcat 8500) |
 
 ### Note on NTLMH (e786)
 
@@ -325,7 +347,7 @@ Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces
 
 ### Additional algorithm families
 
-hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, and hundreds of composed/chained variants.
+hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, and hundreds of composed/chained variants.
 
 ## Benchmarking
 
@@ -350,6 +372,8 @@ Output format: `index  name  rate  hashlen  flags`
 Types that cannot be benchmarked (missing dependencies) show `n/a` for rate.
 
 Use `-b` to benchmark specific types: `-b e1,e8-e12,e450`.
+
+Benchmark rates are used by the `-L` cost limit to estimate verify time for iterated types.  The built-in rates were measured on an Apple M1 (8-core).
 
 ## Building
 
