@@ -184,7 +184,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 923 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 965 pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -198,6 +198,14 @@ hashpipe tracks the most recently matched hash type as a "hot type" and a hot li
 ### Backward-Scanning Colon Resolution
 
 When both the salt and password may contain colons (e.g., `hash:salt:with:colons:password:with:colons`), hashpipe scans backward through colon positions in the rest-of-line to try every possible salt/password boundary, right-to-left.  This ensures correct identification even when the password itself contains colons.
+
+### $HEX[] Literal Password Retry
+
+When a password field contains a valid `$HEX[...]` encoding (e.g., `$HEX[41]`), hashpipe first decodes it and tries all hash types with the decoded value (`A`).  If nothing matches, hashpipe retries with the literal string `$HEX[41]` as the password — because some potfiles contain passwords that are literally the text `$HEX[...]` rather than hex-encoded binary.
+
+The literal password is output using double-encoding: `$HEX[244845585b34315d]` (hex encoding of the literal bytes `$HEX[41]`), which avoids ambiguity with actual hex-encoded passwords.
+
+This retry only applies to passwords starting with `$HEX[` that contain valid hex content.  Invalid hex (e.g., `$HEX[ZZ]`) is always treated as a literal string on the first pass.
 
 ### Cost Limiting
 
@@ -213,11 +221,11 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 923 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 965 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## Supported Hash Types
 
-hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 965 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -281,10 +289,10 @@ hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 | Index | Type | Algorithm |
 |-------|------|-----------|
 | e529 | CISCO8 | `$8$` PBKDF2-SHA256 20000 rounds |
-| e530 | PBKDF2-SHA256 | PBKDF2-HMAC-SHA256 |
+| e530 | PBKDF2-SHA256 | PBKDF2-HMAC-SHA256 (incl. Python passlib `$pbkdf2-sha256$`) |
 | e531 | PBKDF2-MD5 | PBKDF2-HMAC-MD5 |
-| e532 | PBKDF2-SHA1 | PBKDF2-HMAC-SHA1 |
-| e533 | PBKDF2-SHA512 | PBKDF2-HMAC-SHA512 |
+| e532 | PBKDF2-SHA1 | PBKDF2-HMAC-SHA1 (incl. Python passlib `$pbkdf2$`) |
+| e533 | PBKDF2-SHA512 | PBKDF2-HMAC-SHA512 (incl. Python passlib `$pbkdf2-sha512$`) |
 | e534 | PKCS5S2 | `{PKCS5S2}` PBKDF2-SHA1 10000 rounds |
 | e895 | NETSCALER-PBKDF2 | Citrix NetScaler PBKDF2-HMAC-SHA256 2500 rounds |
 | e899 | LASTPASS | PBKDF2-SHA256 + AES-256-ECB (hashcat 6800) |
@@ -328,6 +336,48 @@ hashpipe supports 923 hash types.  Run `hashpipe -h` for the full list.
 | e918 | DCC2 | `$DCC2$` Domain Cached Credentials 2 (hashcat 2100) |
 | e919 | PWSAFE3 | Password Safe v3 SHA-256 iterated (hashcat 5200) |
 | e929 | RACF-KDFAES | RACF KDF/AES (hashcat 8500) |
+| e930 | TACACS+ | TACACS+ authentication (hashcat 16100) |
+| e931 | APPLE-SECURE-NOTES | Apple Secure Notes (hashcat 16200) |
+| e932 | CRAMMD5-DOVECOT | CRAM-MD5 Dovecot (hashcat 16400) |
+| e933 | JWT | JSON Web Token HMAC-SHA (hashcat 16500) |
+| e934 | QNX-MD5 | QNX `/etc/shadow` MD5 (hashcat 19000) |
+| e935 | QNX-SHA256 | QNX `/etc/shadow` SHA256 (hashcat 19100) |
+| e936 | QNX-SHA512 | QNX `/etc/shadow` SHA512 (hashcat 19200) |
+| e937 | QNX7-SHA512 | QNX 7 `/etc/shadow` SHA512 (hashcat 19210) |
+| e938 | SHA1-S1PS2 | `sha1($salt1.$pass.$salt2)` (hashcat 19300) |
+| e939 | RAILS-RESTFUL | Ruby on Rails Restful-Auth (hashcat 19500) |
+| e940 | KRB5PA-17 | Kerberos 5 etype 17 Pre-Auth (hashcat 19800) |
+| e941 | KRB5PA-18 | Kerberos 5 etype 18 Pre-Auth (hashcat 19900) |
+| e942 | WPA-PMKID | WPA-PMKID PBKDF2 (hashcat 16800/22000) |
+| e943 | WPA-EAPOL | WPA EAPOL MIC (hashcat 22000) |
+| e944 | ANSIBLE-VAULT | Ansible Vault PBKDF2-SHA256 (hashcat 16900) |
+| e945 | APFS | Apple File System (hashcat 18300) |
+| e946 | OTM-SHA256 | Oracle Transportation Mgmt SHA256 (hashcat 20600) |
+| e947 | TELEGRAM-SHA256 | Telegram Mobile Passcode SHA256 (hashcat 22301) |
+| e948 | WEB2PY-SHA512 | Web2py PBKDF2-SHA512 (hashcat 21600) |
+| e949 | SOLARWINDS | SolarWinds Orion (hashcat 21500) |
+| e950 | SOLARWINDS2 | SolarWinds Orion v2 (hashcat 21501) |
+| e951 | SIMPLACMS | Simpla CMS (hashcat 22800) |
+| e952 | APPLE-KEYCHAIN | Apple Keychain PBKDF2+3DES (hashcat 23100) |
+| e953 | APPLE-IWORK | Apple iWork PBKDF2+AES (hashcat 23300) |
+| e954 | BITWARDEN | Bitwarden double PBKDF2 (hashcat 23400) |
+| e955 | MONGODB-SHA1 | MongoDB SCRAM-SHA-1 (hashcat 24100) |
+| e956 | MONGODB-SHA256 | MongoDB SCRAM-SHA-256 (hashcat 24200) |
+| e957 | FORTIGATE256 | FortiGate SHA256 (hashcat 26300) |
+| e958 | UMBRACO | Umbraco HMAC-SHA1 (hashcat 24800) |
+| e959 | DAHUA-AUTH | Dahua Authentication MD5 (hashcat 24900) |
+| e960 | BESDER-AUTH | Besder Authentication MD5 (hashcat 24901) |
+| e961 | SQLCIPHER | SQLCipher PBKDF2+AES (hashcat 24600) |
+| e962 | RORAILS-SHA1 | Ruby on Rails SHA1 (hashcat 27200) |
+| e963 | AES128-NOKDF | AES-128-ECB no KDF (hashcat 26401) |
+| e964 | AES192-NOKDF | AES-192-ECB no KDF (hashcat 26402) |
+| e965 | AES256-NOKDF | AES-256-ECB no KDF (hashcat 26403) |
+| e966 | VMWARE-VMX | VMware VMX (hashcat 27400) |
+| e967 | BCRYPTSHA512 | bcrypt(sha512($pass)) (hashcat 28400) |
+| e968 | POSTGRESSCRAM256 | PostgreSQL SCRAM-SHA-256 (hashcat 28600) |
+| e969 | AWSSIGV4 | Amazon AWS Signature v4 (hashcat 28700) |
+| e970 | KRB5DB17 | Kerberos 5 etype 17 DB (hashcat 28800) |
+| e971 | KRB5DB18 | Kerberos 5 etype 18 DB (hashcat 28900) |
 
 ### Note on NTLMH (e786)
 
@@ -347,11 +397,11 @@ Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces
 
 ### Additional algorithm families
 
-hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, and hundreds of composed/chained variants.
+hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, QNX shadow, WPA-PMKID/EAPOL, Apple Keychain/iWork/APFS, Ansible Vault, Bitwarden, MongoDB SCRAM, SolarWinds, VMware VMX, SQLCipher, JWT, TACACS+, Kerberos 5 Pre-Auth/DB (etype 17/18), AWS Signature v4, PostgreSQL SCRAM-SHA-256, and hundreds of composed/chained variants.
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 923 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all 965 registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10

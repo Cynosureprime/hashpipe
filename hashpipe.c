@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.64 2026/03/08 19:10:31 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.68 2026/03/09 16:06:47 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +92,7 @@ static unsigned char *MDC2(const unsigned char *d, size_t n, unsigned char *md)
 #include <sph_keccak.h>
 #include <sph_luffa.h>
 #include <sph_md2.h>
+#include <sph_md5.h>
 #include <sph_panama.h>
 #include <sph_radiogatun.h>
 #include <sph_ripemd.h>
@@ -866,6 +867,13 @@ struct MapHashcat {
     {15500, 65535}, /* 15500 | JKS Java Key Store Private Keys (SHA1) */
     {15600, 65535}, /* 15600 | Ethereum Wallet, JudyJ[JOB_PKCS5S2]-HMAC-SHA256 */
     {15700, 65535}, /* 15700 | Ethereum Wallet, SCRYPT */
+    {16100, 930},  /* 16100 | TACACS+ */
+    {16200, 931},  /* 16200 | Apple Secure Notes */
+    {16400, 932},  /* 16400 | CRAM-MD5 Dovecot */
+    {16500, 933},  /* 16500 | JWT (JSON Web Token) */
+    {16700, 931},  /* 16700 | FileVault 2 (same as 16200 Apple Secure Notes) */
+    {16800, 942},  /* 16800 | WPA-PMKID-PBKDF2 */
+    {16900, 944},  /* 16900 | Ansible Vault */
     {17300, 88},   /* 17300 | SHA3-224 */
     {17400, 89},   /* 17400 | SHA3-256 */
     {17500, 90},   /* 17500 | SHA3-384 */
@@ -874,8 +882,24 @@ struct MapHashcat {
     {17800, 85},   /* 17800 | Keccak-256 */
     {17900, 86},   /* 17900 | Keccak-384 */
     {18000, 87},   /* 18000 | Keccak-512 */
+    {18300, 945},  /* 18300 | Apple File System (APFS) */
     {18500, 287},  /* 18500 | sha1(md5(md5($pass))) */
+    {19000, 934},  /* 19000 | QNX /etc/shadow (MD5) */
+    {19100, 935},  /* 19100 | QNX /etc/shadow (SHA256) */
+    {19200, 936},  /* 19200 | QNX /etc/shadow (SHA512) */
+    {19210, 937},  /* 19210 | QNX 7 /etc/shadow (SHA512) */
+    {19300, 938},  /* 19300 | sha1($salt1.$pass.$salt2) */
+    {19500, 939},  /* 19500 | Ruby on Rails Restful-Authentication */
+    {19800, 940},  /* 19800 | Kerberos 5, etype 17, Pre-Auth */
+    {19900, 941},  /* 19900 | Kerberos 5, etype 18, Pre-Auth */
+    {20200, 533},  /* 20200 | Python passlib pbkdf2-sha512 */
+    {20300, 530},  /* 20300 | Python passlib pbkdf2-sha256 */
+    {20400, 532},  /* 20400 | Python passlib pbkdf2-sha1 */
+    {20600, 946},  /* 20600 | Oracle Transportation Management (SHA256) */
     {20710, 382},  /* 20710 | sha256(sha256($pass).$salt) */
+    {21500, 949},  /* 21500 | SolarWinds Orion */
+    {21501, 950},  /* 21501 | SolarWinds Orion v2 */
+    {21600, 948},  /* 21600 | Web2py pbkdf2-sha512 */
     {20711, 891},  /* 20711 | AuthMe sha256 ($SHA$salt$hash) */
     {20712, 892},  /* 20712 | RSA NetWitness (UCHASH:BASE64SALT) */
     {20720, 523},  /* 20720 | sha256($salt.sha256($pass)) */
@@ -890,11 +914,34 @@ struct MapHashcat {
     {21400, 36},   /* 21400 | sha256(sha256_bin($pass)) */
     {21420, 826},  /* 21420 | sha256($salt.sha256_raw($pass)) */
     {21900, 821},  /* 21900 | md5(md5($pass.$salt).$pepper) */
+    {22000, 942},  /* 22000 | WPA-PBKDF2-PMKID+EAPOL */
     {22200, 893},  /* 22200 | Citrix NetScaler SHA512 */
     {22300, 825},  /* 22300 | sha256($salt.$pass.$salt) */
+    {22301, 947},  /* 22301 | Telegram Mobile App Passcode (SHA256) */
+    {22800, 951},  /* 22800 | Simpla CMS */
+    {23100, 952},  /* 23100 | Apple Keychain */
+    {23300, 953},  /* 23300 | Apple iWork */
+    {23400, 954},  /* 23400 | Bitwarden */
+    {24100, 955},  /* 24100 | MongoDB ServerKey SCRAM-SHA-1 */
+    {24200, 956},  /* 24200 | MongoDB ServerKey SCRAM-SHA-256 */
     {24300, 823},  /* 24300 | sha1($salt.sha1($pass.$salt)) */
+    {24600, 961},  /* 24600 | SQLCipher */
+    {24800, 958},  /* 24800 | Umbraco HMAC-SHA1 */
+    {24900, 959},  /* 24900 | Dahua Authentication MD5 */
+    {24901, 960},  /* 24901 | Besder Authentication MD5 */
     {25600, 451},  /* 25600 | bcrypt(md5($pass)) */
     {25800, 452},  /* 25800 | bcrypt(sha1($pass)) */
+    {26300, 957},  /* 26300 | FortiGate256 (FortiOS256) */
+    {26401, 963},  /* 26401 | AES-128-ECB NOKDF */
+    {26402, 964},  /* 26402 | AES-192-ECB NOKDF */
+    {26403, 965},  /* 26403 | AES-256-ECB NOKDF */
+    {27200, 962},  /* 27200 | Ruby on Rails Restful Auth */
+    {27400, 966},  /* 27400 | VMware VMX */
+    {28400, 967},  /* 28400 | bcrypt(sha512($pass)) */
+    {28600, 968},  /* 28600 | PostgreSQL SCRAM-SHA-256 */
+    {28700, 969},  /* 28700 | Amazon AWS Signature Version 4 */
+    {28800, 970},  /* 28800 | Kerberos 5, etype 17, DB */
+    {28900, 971},  /* 28900 | Kerberos 5, etype 18, DB */
     {29000, 824},  /* 29000 | sha1($salt.sha1(utf16le($user):utf16le($pass))) */
     {30000, 889},  /* 30000 | Python Werkzeug MD5 (HMAC-MD5 key=$salt) */
     {30120, 890},  /* 30120 | Python Werkzeug SHA256 (HMAC-SHA256 key=$salt) */
@@ -930,7 +977,7 @@ static struct hashtype *Hashtypes;      /* malloc'd [Numtypes] */
 static Pvoid_t TypenameJ = (Pvoid_t)NULL;  /* Judy: name → index+1 */
 
 /* Per-hashlen candidate cache: avoids scanning Hashtypes[] on every call */
-#define MAX_HASHLEN 65  /* 0..64 bytes (SHA-512 max) */
+#define MAX_HASHLEN 4097  /* 0..4096 bytes — room for large hash outputs */
 struct candcache {
     struct hashtype **list;  /* malloc'd array of pointers */
     int count;
@@ -1332,6 +1379,48 @@ char *Types[] = {
     "PS_TOKEN",
     "WINPHONE",
     "RACF-KDFAES",
+    "TACACS",
+    "APPLE-SECURE-NOTES",
+    "CRAMMD5-DOVECOT",
+    "JWT",
+    "QNX-MD5",
+    "QNX-SHA256",
+    "QNX-SHA512",
+    "QNX7-SHA512",
+    "SHA1-S1PS2",
+    "RAILS-RESTFUL",
+    "KRB5PA-17",
+    "KRB5PA-18",
+    "WPA-PMKID",
+    "WPA-EAPOL",
+    "ANSIBLE-VAULT",
+    "APFS",
+    "OTM-SHA256",
+    "TELEGRAM-SHA256",
+    "WEB2PY-SHA512",
+    "SOLARWINDS",
+    "SOLARWINDS2",
+    "SIMPLACMS",
+    "APPLE-KEYCHAIN",
+    "APPLE-IWORK",
+    "BITWARDEN",
+    "MONGODB-SHA1",
+    "MONGODB-SHA256",
+    "FORTIGATE256",
+    "UMBRACO",
+    "DAHUA-AUTH",
+    "BESDER-AUTH",
+    "SQLCIPHER",
+    "RORAILS-SHA1",
+    "AES128-NOKDF",
+    "AES192-NOKDF",
+    "AES256-NOKDF",
+    "VMWARE-VMX",
+    "BCRYPTSHA512",
+    "POSTGRESSCRAM256",
+    "AWSSIGV4",
+    "KRB5DB17",
+    "KRB5DB18",
 
 NULL
 
@@ -12948,19 +13037,86 @@ static int verify_pbkdf2md5(const char *hashstr, int hashlen,
     return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_md5(), 32);
 }
 
-/* PBKDF2-SHA1 (e532): "sha1:iters:salt_b64:hash_b64" */
+/* PBKDF2-SHA1 (e532): "sha1:iters:salt_b64:hash_b64" or "$pbkdf2$iter$salt_ab64$hash_ab64" */
 static int verify_pbkdf2sha1(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     if (hashlen < 10) return 0;
+    /* Python passlib format: $pbkdf2$iter$salt_ab64$hash_ab64 */
+    if (memcmp(hashstr, "$pbkdf2$", 8) == 0) {
+        char *buf = (char *)WS->gp3;
+        int i, off;
+        off = sprintf(buf, "sha1:");
+        for (i = 8; i < hashlen && off < (int)WS_GP_SIZE - 4; i++) {
+            if (hashstr[i] == '$') { buf[off++] = ':'; continue; }
+            buf[off++] = (hashstr[i] == '.') ? '+' : hashstr[i];
+        }
+        buf[off] = 0;
+        /* Add = padding to salt and hash fields */
+        { char *c2 = strchr(buf + 5, ':');
+          if (c2) { char *c3 = strchr(c2 + 1, ':');
+            if (c3) {
+              int slen = c3 - c2 - 1, hlen = off - (c3 - buf) - 1;
+              int spad = (4 - (slen % 4)) % 4, hpad = (4 - (hlen % 4)) % 4;
+              if (spad || hpad) {
+                /* Rebuild with padding */
+                char *buf2 = (char *)WS->gp4;
+                int n = c3 - buf;
+                memcpy(buf2, buf, n);
+                int o2 = n;
+                while (spad--) buf2[o2++] = '=';
+                buf2[o2++] = ':';
+                memcpy(buf2 + o2, c3 + 1, hlen); o2 += hlen;
+                while (hpad--) buf2[o2++] = '=';
+                buf2[o2] = 0;
+                return verify_pbkdf2_generic(buf2, o2, pass, passlen, EVP_sha1(), 20);
+              }
+            }
+          }
+        }
+        return verify_pbkdf2_generic(buf, off, pass, passlen, EVP_sha1(), 20);
+    }
     return verify_pbkdf2_generic(hashstr, hashlen, pass, passlen, EVP_sha1(), 20);
 }
 
-/* PBKDF2-SHA256 (e530): "sha256:iters:salt_b64:hash_b64" or "pbkdf2_sha256$iters$salt$hash" */
+/* PBKDF2-SHA256 (e530): "sha256:iters:salt_b64:hash_b64" or "pbkdf2_sha256$iters$salt$hash"
+ * or "$pbkdf2-sha256$iter$salt_ab64$hash_ab64" */
 static int verify_pbkdf2sha256(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     if (hashlen < 10) return 0;
+    /* Python passlib format: $pbkdf2-sha256$iter$salt_ab64$hash_ab64 */
+    if (memcmp(hashstr, "$pbkdf2-sha256$", 15) == 0) {
+        char *buf = (char *)WS->gp3;
+        int i, off;
+        off = sprintf(buf, "sha256:");
+        for (i = 15; i < hashlen && off < (int)WS_GP_SIZE - 4; i++) {
+            if (hashstr[i] == '$') { buf[off++] = ':'; continue; }
+            buf[off++] = (hashstr[i] == '.') ? '+' : hashstr[i];
+        }
+        buf[off] = 0;
+        { char *c2 = strchr(buf + 7, ':');
+          if (c2) { char *c3 = strchr(c2 + 1, ':');
+            if (c3) {
+              int slen = c3 - c2 - 1, hlen = off - (c3 - buf) - 1;
+              int spad = (4 - (slen % 4)) % 4, hpad = (4 - (hlen % 4)) % 4;
+              if (spad || hpad) {
+                char *buf2 = (char *)WS->gp4;
+                int n = c3 - buf;
+                memcpy(buf2, buf, n);
+                int o2 = n;
+                while (spad--) buf2[o2++] = '=';
+                buf2[o2++] = ':';
+                memcpy(buf2 + o2, c3 + 1, hlen); o2 += hlen;
+                while (hpad--) buf2[o2++] = '=';
+                buf2[o2] = 0;
+                return verify_pbkdf2_generic(buf2, o2, pass, passlen, EVP_sha256(), 32);
+              }
+            }
+          }
+        }
+        return verify_pbkdf2_generic(buf, off, pass, passlen, EVP_sha256(), 32);
+    }
     /* Django format: pbkdf2_sha256$iters$salt$hash */
     if (memcmp(hashstr, "pbkdf2_sha256$", 14) == 0) {
         char *buf = (char *)WS->gp1;
@@ -12991,11 +13147,44 @@ static int verify_pbkdf2sha256(const char *hashstr, int hashlen,
 }
 
 /* PBKDF2-SHA512 (e533): "sha512:iters:salt_b64:hash_b64" or "$ml$iters$hexsalt$hexhash"
- * or "grub.pbkdf2.sha512.iters.hexsalt.hexhash" (GRUB 2, hashcat 7200) */
+ * or "grub.pbkdf2.sha512.iters.hexsalt.hexhash" (GRUB 2, hashcat 7200)
+ * or "$pbkdf2-sha512$iter$salt_ab64$hash_ab64" (Python passlib) */
 static int verify_pbkdf2sha512(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     if (hashlen < 10) return 0;
+    /* Python passlib format: $pbkdf2-sha512$iter$salt_ab64$hash_ab64 */
+    if (memcmp(hashstr, "$pbkdf2-sha512$", 15) == 0) {
+        char *buf = (char *)WS->gp3;
+        int i, off;
+        off = sprintf(buf, "sha512:");
+        for (i = 15; i < hashlen && off < (int)WS_GP_SIZE - 4; i++) {
+            if (hashstr[i] == '$') { buf[off++] = ':'; continue; }
+            buf[off++] = (hashstr[i] == '.') ? '+' : hashstr[i];
+        }
+        buf[off] = 0;
+        { char *c2 = strchr(buf + 7, ':');
+          if (c2) { char *c3 = strchr(c2 + 1, ':');
+            if (c3) {
+              int slen = c3 - c2 - 1, hlen = off - (c3 - buf) - 1;
+              int spad = (4 - (slen % 4)) % 4, hpad = (4 - (hlen % 4)) % 4;
+              if (spad || hpad) {
+                char *buf2 = (char *)WS->gp4;
+                int n = c3 - buf;
+                memcpy(buf2, buf, n);
+                int o2 = n;
+                while (spad--) buf2[o2++] = '=';
+                buf2[o2++] = ':';
+                memcpy(buf2 + o2, c3 + 1, hlen); o2 += hlen;
+                while (hpad--) buf2[o2++] = '=';
+                buf2[o2] = 0;
+                return verify_pbkdf2_generic(buf2, o2, pass, passlen, EVP_sha512(), 64);
+              }
+            }
+          }
+        }
+        return verify_pbkdf2_generic(buf, off, pass, passlen, EVP_sha512(), 64);
+    }
     /* macOS $ml$ format or GRUB 2 grub.pbkdf2.sha512. format */
     if (memcmp(hashstr, "$ml$", 4) == 0 ||
         (hashlen > 20 && memcmp(hashstr, "grub.pbkdf2.sha512.", 19) == 0)) {
@@ -13888,6 +14077,2082 @@ static int verify_winphone(const char *hashstr, int hashlen,
 
     return memcmp(digest, expected, 32) == 0;
 }
+
+/* TACACS+ (e930, hashcat mode 16100)
+ * Format: $tacacs-plus$0$SESSION_HEX(8)$CT_HEX(12-256)$SEQ_HEX(4):password
+ * Algorithm: MD5(session+pass+version+seq) → XOR decrypt → structure check */
+static int verify_tacacs(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *session = (unsigned char *)WS->ctx1;     /* 4 bytes */
+    unsigned char *ct_data = (unsigned char *)WS->ctx1 + 16; /* up to 128 bytes */
+    unsigned char *seq = (unsigned char *)WS->ctx1 + 160;   /* 2 bytes */
+    unsigned char *md5in = (unsigned char *)WS->gp1;        /* MD5 input */
+    unsigned char *pad = (unsigned char *)WS->ctx2;         /* MD5 output 16 bytes */
+    unsigned char *pt = (unsigned char *)WS->ctx2 + 16;     /* decrypted plaintext */
+
+    /* Parse: $tacacs-plus$0$SESSION$CT$SEQ */
+    if (hashlen < 15 || memcmp(hashstr, "$tacacs-plus$0$", 15) != 0) return 0;
+    const char *f1 = hashstr + 15;
+    const char *d1 = memchr(f1, '$', hashlen - 15);
+    if (!d1 || (d1 - f1) != 8) return 0;
+    const char *f2 = d1 + 1;
+    const char *d2 = memchr(f2, '$', hashlen - (f2 - hashstr));
+    if (!d2) return 0;
+    int ct_hexlen = d2 - f2;
+    if (ct_hexlen < 12 || ct_hexlen > 256 || (ct_hexlen % 2)) return 0;
+    int ct_binlen = ct_hexlen / 2;
+    const char *f3 = d2 + 1;
+    int seqlen = hashlen - (f3 - hashstr);
+    if (seqlen != 4) return 0;
+
+    /* Decode hex fields */
+    if (hex2bin(f1, 8, session) != 4) return 0;
+    if (hex2bin(f2, ct_hexlen, ct_data) != ct_binlen) return 0;
+    if (hex2bin(f3, 4, seq) != 2) return 0;
+
+    /* MD5(session + password + version + seq_no) */
+    memcpy(md5in, session, 4);
+    memcpy(md5in + 4, pass, passlen);
+    md5in[4 + passlen] = seq[0]; /* version */
+    md5in[4 + passlen + 1] = seq[1]; /* seq_no */
+    rhash_msg(RHASH_MD5, md5in, 4 + passlen + 2, pad);
+
+    /* XOR decrypt first min(ct_binlen, 16) bytes */
+    int dec_len = ct_binlen < 16 ? ct_binlen : 16;
+    int i;
+    for (i = 0; i < dec_len; i++)
+        pt[i] = ct_data[i] ^ pad[i];
+
+    /* Structural check based on sequence number */
+    unsigned int seq_no = seq[1];
+    if (seq_no == 1 && dec_len >= 8) {
+        unsigned int action = pt[0], authen_type = pt[2], authen_service = pt[3];
+        if ((action == 1 || action == 2 || action == 4) &&
+            authen_type >= 1 && authen_type <= 6 && authen_service <= 9) {
+            unsigned int sum = pt[4] + pt[5] + pt[6] + pt[7] + 8;
+            if (sum == (unsigned int)ct_binlen) return 1;
+        }
+    } else if ((seq_no == 3 || seq_no == 5) && dec_len >= 5) {
+        unsigned int msg_len = ((unsigned int)pt[1] << 8) | pt[2];
+        if (msg_len + 5 == (unsigned int)ct_binlen && pt[3] == 0 && pt[4] == 0)
+            return 1;
+    } else if (dec_len >= 6) {
+        unsigned int status = pt[0], flags = pt[1];
+        unsigned int msg_len = ((unsigned int)pt[2] << 8) | pt[3];
+        unsigned int data_len = ((unsigned int)pt[4] << 8) | pt[5];
+        if (((status >= 1 && status <= 7) || status == 0x21) &&
+            (flags == 0 || flags == 1) &&
+            6 + msg_len + data_len == (unsigned int)ct_binlen)
+            return 1;
+    }
+    return 0;
+}
+
+/* Apple Secure Notes (e931, hashcat mode 16200)
+ * Format: $ASN$*zpk*iter*salt32hex*wrappedkey48hex:password
+ * Algorithm: PBKDF2-HMAC-SHA256 + AES-128 Key Unwrap (RFC 3394) */
+static int verify_apple_secure_notes(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->ctx1;        /* 16 bytes */
+    unsigned char *wkey = (unsigned char *)WS->ctx1 + 32;   /* 24 bytes */
+    unsigned char *dk = (unsigned char *)WS->ctx1 + 64;     /* 32 bytes PBKDF2 output */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;                  /* ~244 bytes */
+
+    /* Parse: $ASN$*zpk*iter*salt*wkey  or  $fvde$ver$saltlen$salt$iter$wkey */
+    const char *salt_hex, *wkey_hex;
+    int iter;
+    if (hashlen >= 6 && memcmp(hashstr, "$ASN$*", 6) == 0) {
+      const char *p = hashstr + 6;
+      const char *s1 = memchr(p, '*', hashlen - 6);
+      if (!s1) return 0;
+      const char *p2 = s1 + 1;
+      const char *s2 = memchr(p2, '*', hashlen - (p2 - hashstr));
+      if (!s2) return 0;
+      iter = atoi(p2);
+      if (iter < 1) return 0;
+      salt_hex = s2 + 1;
+      const char *s3 = memchr(salt_hex, '*', hashlen - (salt_hex - hashstr));
+      if (!s3 || (s3 - salt_hex) != 32) return 0;
+      wkey_hex = s3 + 1;
+      int wkey_hexlen = hashlen - (wkey_hex - hashstr);
+      if (wkey_hexlen != 48) return 0;
+    } else if (hashlen >= 6 && memcmp(hashstr, "$fvde$", 6) == 0) {
+      /* $fvde$ver$saltlen$salt$iter$wkey */
+      const char *p = hashstr + 6;
+      const char *s1 = memchr(p, '$', hashlen - 6);
+      if (!s1) return 0;
+      const char *p2 = s1 + 1; /* saltlen */
+      const char *s2 = memchr(p2, '$', hashlen - (p2 - hashstr));
+      if (!s2) return 0;
+      int saltlen_val = atoi(p2);
+      if (saltlen_val != 16) return 0;
+      salt_hex = s2 + 1;
+      const char *s3 = memchr(salt_hex, '$', hashlen - (salt_hex - hashstr));
+      if (!s3 || (s3 - salt_hex) != 32) return 0;
+      const char *p4 = s3 + 1; /* iter */
+      const char *s4 = memchr(p4, '$', hashlen - (p4 - hashstr));
+      if (!s4) return 0;
+      iter = atoi(p4);
+      if (iter < 1) return 0;
+      wkey_hex = s4 + 1;
+      int wkey_hexlen = hashlen - (wkey_hex - hashstr);
+      if (wkey_hexlen != 48) return 0;
+    } else {
+      return 0;
+    }
+
+    /* Decode salt (16 bytes) and wrapped key (24 bytes) */
+    if (hex2bin(salt_hex, 32, salt) != 16) return 0;
+    if (hex2bin(wkey_hex, 48, wkey) != 24) return 0;
+
+    /* PBKDF2-HMAC-SHA256(pass, salt16, iter, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       salt, 16, iter, EVP_sha256(), 32, dk);
+    WS->verify_iter = iter;
+
+    /* AES-128 Key Unwrap (RFC 3394) using first 16 bytes of dk */
+    AES_set_decrypt_key(dk, 128, aeskey);
+    unsigned char A[8], R[2][8];
+    memcpy(A, wkey, 8);
+    memcpy(R[0], wkey + 8, 8);
+    memcpy(R[1], wkey + 16, 8);
+    int j, ii;
+    for (j = 5; j >= 0; j--) {
+        for (ii = 1; ii >= 0; ii--) {
+            unsigned int t = 2 * j + ii + 1;
+            A[7] ^= (t & 0xff);
+            A[6] ^= ((t >> 8) & 0xff);
+            unsigned char B[16];
+            memcpy(B, A, 8);
+            memcpy(B + 8, R[ii], 8);
+            AES_ecb_encrypt(B, B, aeskey, AES_DECRYPT);
+            memcpy(A, B, 8);
+            memcpy(R[ii], B + 8, 8);
+        }
+    }
+    static const unsigned char wrap_iv[8] = {0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6};
+    return memcmp(A, wrap_iv, 8) == 0;
+}
+
+/* CRAM-MD5 Dovecot (e932, hashcat mode 16400)
+ * Format: {CRAM-MD5}32hex32zeros:password
+ * Algorithm: MD5 intermediate state of (password XOR opad) — single compression, no finalization */
+static int verify_crammd5_dovecot(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *opad = (unsigned char *)WS->gp1;          /* 64 bytes */
+    sph_md5_context *md5ctx = (sph_md5_context *)(WS->gp1 + 64); /* ~80 bytes */
+
+    /* Parse: {CRAM-MD5}32hex32zeros */
+    if (hashlen != 74 || memcmp(hashstr, "{CRAM-MD5}", 10) != 0) return 0;
+    if (hex2bin(hashstr + 10, 32, expected) != 16) return 0;
+
+    /* Build opad block: password padded to 64 XOR 0x5c */
+    int i;
+    for (i = 0; i < 64; i++)
+        opad[i] = (i < passlen ? pass[i] : 0) ^ 0x5c;
+
+    /* Single MD5 compression: init + one 64-byte block, no finalization */
+    sph_md5_init(md5ctx);
+    sph_md5(md5ctx, opad, 64);
+
+    /* Compare intermediate state with expected */
+    return memcmp(md5ctx->val, expected, 16) == 0;
+}
+
+/* JWT (e933, hashcat mode 16500)
+ * Format: header.payload.signature (base64url encoded)
+ * Algorithm: HMAC-SHA256/384/512(password, header.payload) */
+static int verify_jwt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sig_bin = (unsigned char *)WS->ctx1;      /* decoded signature, up to 64 bytes */
+    unsigned char *computed = (unsigned char *)WS->ctx1 + 64; /* computed HMAC, up to 64 bytes */
+    char *b64buf = (char *)WS->gp1;                          /* base64 conversion buffer */
+
+    /* Find last dot to split header.payload from signature */
+    int i;
+    const char *last_dot = NULL;
+    for (i = hashlen - 1; i >= 0; i--) {
+        if (hashstr[i] == '.') { last_dot = hashstr + i; break; }
+    }
+    if (!last_dot || last_dot == hashstr) return 0;
+    int msg_len = last_dot - hashstr;
+    const char *sig_b64 = last_dot + 1;
+    int sig_b64_len = hashlen - msg_len - 1;
+
+    /* Determine HMAC variant from base64url signature length */
+    const EVP_MD *evp_md = NULL;
+    int hmac_len = 0;
+    if (sig_b64_len == 43) { evp_md = EVP_sha256(); hmac_len = 32; }
+    else if (sig_b64_len == 64) { evp_md = EVP_sha384(); hmac_len = 48; }
+    else if (sig_b64_len == 86) { evp_md = EVP_sha512(); hmac_len = 64; }
+    else return 0;
+
+    /* Convert base64url to standard base64 */
+    int ji;
+    for (ji = 0; ji < sig_b64_len && ji < 120; ji++) {
+        if (sig_b64[ji] == '-') b64buf[ji] = '+';
+        else if (sig_b64[ji] == '_') b64buf[ji] = '/';
+        else b64buf[ji] = sig_b64[ji];
+    }
+    while (ji % 4) b64buf[ji++] = '=';
+    b64buf[ji] = 0;
+
+    /* Decode expected signature */
+    int decoded_len = 0;
+    { unsigned char *dp = sig_bin;
+      const char *sp = b64buf;
+      /* Simple base64 decode */
+      static const unsigned char b64d[256] = {
+        ['A']=0,['B']=1,['C']=2,['D']=3,['E']=4,['F']=5,['G']=6,['H']=7,
+        ['I']=8,['J']=9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
+        ['Q']=16,['R']=17,['S']=18,['T']=19,['U']=20,['V']=21,['W']=22,['X']=23,
+        ['Y']=24,['Z']=25,['a']=26,['b']=27,['c']=28,['d']=29,['e']=30,['f']=31,
+        ['g']=32,['h']=33,['i']=34,['j']=35,['k']=36,['l']=37,['m']=38,['n']=39,
+        ['o']=40,['p']=41,['q']=42,['r']=43,['s']=44,['t']=45,['u']=46,['v']=47,
+        ['w']=48,['x']=49,['y']=50,['z']=51,['0']=52,['1']=53,['2']=54,['3']=55,
+        ['4']=56,['5']=57,['6']=58,['7']=59,['8']=60,['9']=61,['+']=62,['/']=63
+      };
+      int slen = strlen(sp);
+      for (i = 0; i + 3 < slen; i += 4) {
+        unsigned int v = (b64d[(unsigned char)sp[i]] << 18) |
+                         (b64d[(unsigned char)sp[i+1]] << 12) |
+                         (b64d[(unsigned char)sp[i+2]] << 6) |
+                          b64d[(unsigned char)sp[i+3]];
+        *dp++ = (v >> 16) & 0xff;
+        if (sp[i+2] != '=') *dp++ = (v >> 8) & 0xff;
+        if (sp[i+3] != '=') *dp++ = v & 0xff;
+      }
+      decoded_len = dp - sig_bin;
+    }
+    if (decoded_len != hmac_len) return 0;
+
+    /* Compute HMAC(password, header.payload) */
+    unsigned int outlen = 0;
+    HMAC(evp_md, pass, passlen, (unsigned char *)hashstr, msg_len, computed, &outlen);
+
+    return memcmp(computed, sig_bin, hmac_len) == 0;
+}
+
+/* QNX /etc/shadow MD5 (e934, hashcat mode 19000)
+ * Format: @m@32hex@salt  or  @m,iter@32hex@salt
+ * Algorithm: MD5(salt + password*(iter+1)) — single streaming MD5 */
+static int verify_qnx_md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    sph_md5_context *ctx = (sph_md5_context *)WS->gp1;
+
+    if (hashlen < 6 || hashstr[0] != '@' || hashstr[1] != 'm') return 0;
+    int iter = 1000;
+    const char *at2;
+    if (hashstr[2] == ',') {
+        iter = atoi(hashstr + 3);
+        at2 = strchr(hashstr + 3, '@');
+    } else if (hashstr[2] == '@') {
+        at2 = hashstr + 2;
+    } else return 0;
+    if (!at2 || iter < 1) return 0;
+
+    const char *hash_start = at2 + 1;
+    const char *at3 = strchr(hash_start, '@');
+    if (!at3 || (at3 - hash_start) != 32) return 0;
+    const char *salt = at3 + 1;
+    int salt_len = hashlen - (salt - hashstr);
+    if (salt_len < 1) return 0;
+
+    /* Decode expected hash */
+    hex2bin(hash_start, 32, expected);
+
+    /* Compute: MD5(salt + password*(iter+1)) */
+    sph_md5_init(ctx);
+    sph_md5(ctx, salt, salt_len);
+    for (int i = 0; i <= iter; i++)
+        sph_md5(ctx, pass, passlen);
+    sph_md5_close(ctx, computed);
+
+    WS->verify_iter = iter;
+    return memcmp(computed, expected, 16) == 0;
+}
+
+/* QNX /etc/shadow SHA256 (e935, hashcat mode 19100)
+ * Format: @s@64hex@salt  or  @s,iter@64hex@salt
+ * Algorithm: SHA256(salt + password*(iter+1)) */
+static int verify_qnx_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    SHA256_CTX *ctx = (SHA256_CTX *)WS->gp1;
+
+    if (hashlen < 6 || hashstr[0] != '@' || hashstr[1] != 's') return 0;
+    int iter = 1000;
+    const char *at2;
+    if (hashstr[2] == ',') {
+        iter = atoi(hashstr + 3);
+        at2 = strchr(hashstr + 3, '@');
+    } else if (hashstr[2] == '@') {
+        at2 = hashstr + 2;
+    } else return 0;
+    if (!at2 || iter < 1) return 0;
+
+    const char *hash_start = at2 + 1;
+    const char *at3 = strchr(hash_start, '@');
+    if (!at3 || (at3 - hash_start) != 64) return 0;
+    const char *salt = at3 + 1;
+    int salt_len = hashlen - (salt - hashstr);
+    if (salt_len < 1) return 0;
+
+    hex2bin(hash_start, 64, expected);
+
+    SHA256_Init(ctx);
+    SHA256_Update(ctx, salt, salt_len);
+    for (int i = 0; i <= iter; i++)
+        SHA256_Update(ctx, pass, passlen);
+    SHA256_Final(computed, ctx);
+
+    WS->verify_iter = iter;
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* QNX /etc/shadow SHA512 (e936, hashcat mode 19200)
+ * Format: @S@128hex@salt  or  @S,iter@128hex@salt
+ * Algorithm: SHA512(salt + password*(iter+1)) */
+static int verify_qnx_sha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    SHA512_CTX *ctx = (SHA512_CTX *)WS->gp1;
+
+    if (hashlen < 6 || hashstr[0] != '@' || hashstr[1] != 'S') return 0;
+    int iter = 1000;
+    const char *at2;
+    if (hashstr[2] == ',') {
+        iter = atoi(hashstr + 3);
+        at2 = strchr(hashstr + 3, '@');
+    } else if (hashstr[2] == '@') {
+        at2 = hashstr + 2;
+    } else return 0;
+    if (!at2 || iter < 1) return 0;
+
+    const char *hash_start = at2 + 1;
+    const char *at3 = strchr(hash_start, '@');
+    if (!at3 || (at3 - hash_start) != 128) return 0;
+    const char *salt = at3 + 1;
+    int salt_len = hashlen - (salt - hashstr);
+    if (salt_len < 1) return 0;
+
+    hex2bin(hash_start, 128, expected);
+
+    SHA512_Init(ctx);
+    SHA512_Update(ctx, salt, salt_len);
+    for (int i = 0; i <= iter; i++)
+        SHA512_Update(ctx, pass, passlen);
+    SHA512_Final(computed, ctx);
+
+    WS->verify_iter = iter;
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* QNX 7 /etc/shadow SHA512 (e937, hashcat mode 19210)
+ * Format: @S@base64hash@base64salt  or  @S,iter@base64hash@base64salt
+ * Algorithm: PBKDF2-HMAC-SHA512(pass, decoded_salt, iter, 64) */
+static int verify_qnx7_sha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *saltbin = (unsigned char *)WS->gp1;
+
+    if (hashlen < 6 || hashstr[0] != '@' || hashstr[1] != 'S') return 0;
+    int iter = 4096;
+    const char *at2;
+    if (hashstr[2] == ',') {
+        iter = atoi(hashstr + 3);
+        at2 = strchr(hashstr + 3, '@');
+    } else if (hashstr[2] == '@') {
+        at2 = hashstr + 2;
+    } else return 0;
+    if (!at2 || iter < 1) return 0;
+
+    const char *hash_start = at2 + 1;
+    const char *at3 = strchr(hash_start, '@');
+    if (!at3 || at3 == hash_start) return 0;
+    const char *salt_b64 = at3 + 1;
+    int salt_b64_len = hashlen - (salt_b64 - hashstr);
+    if (salt_b64_len < 1) return 0;
+
+    /* Distinguish from 19200: 19200 uses hex (128 hex chars), 19210 uses base64 */
+    int hash_field_len = at3 - hash_start;
+    if (hash_field_len == 128) {
+        /* Could be 19200 hex — check for non-hex chars */
+        int is_hex = 1;
+        for (int i = 0; i < hash_field_len; i++) {
+            char c = hash_start[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+                { is_hex = 0; break; }
+        }
+        if (is_hex) return 0; /* This is 19200, not 19210 */
+    }
+
+    /* Decode base64 hash */
+    int hash_decoded = base64_decode(hash_start, hash_field_len, expected, 64);
+    if (hash_decoded != 64) return 0;
+
+    /* Decode base64 salt */
+    int salt_decoded = base64_decode(salt_b64, salt_b64_len, saltbin, 256);
+    if (salt_decoded < 1) return 0;
+
+    /* PBKDF2-HMAC-SHA512 */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       saltbin, salt_decoded,
+                       iter, EVP_sha512(), 64, computed);
+
+    WS->verify_iter = iter;
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* SHA1-S1PS2 (e938, hashcat mode 19300): sha1(salt1 + pass + salt2)
+ * Format: 40hex:salt1:salt2 */
+static int verify_sha1_s1ps2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+
+    if (hashlen < 43) return 0; /* 40hex + : + s1 + : + s2 */
+    if (hashstr[40] != ':') return 0;
+    /* Validate hex */
+    for (int i = 0; i < 40; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    hex2bin(hashstr, 40, expected);
+    /* Find salt1:salt2 */
+    const char *salt1 = hashstr + 41;
+    const char *colon2 = strchr(salt1, ':');
+    if (!colon2 || colon2 == salt1) return 0;
+    int s1len = colon2 - salt1;
+    const char *salt2 = colon2 + 1;
+    int s2len = hashlen - (salt2 - hashstr);
+    if (s2len < 1) return 0;
+    /* SHA1(salt1 + pass + salt2) */
+    int total = s1len + passlen + s2len;
+    if (total > 4000) return 0;
+    memcpy(buf, salt1, s1len);
+    memcpy(buf + s1len, pass, passlen);
+    memcpy(buf + s1len + passlen, salt2, s2len);
+    SHA1(buf, total, computed);
+    return memcmp(computed, expected, 20) == 0;
+}
+
+/* RAILS-RESTFUL (e939, hashcat mode 19500): Ruby on Rails Restful-Authentication
+ * 10 iterations: h = SHA1(site_key + "--" + salt + "--" + pass + "--" + site_key)
+ * then 9x: h = SHA1(hex_lc(h) + "--" + salt + "--" + pass + "--" + site_key)
+ * Format: 40hex:salt:site_key */
+static int verify_rails_restful(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    char *hexout = (char *)WS->gp2;
+
+    if (hashlen < 43) return 0;
+    if (hashstr[40] != ':') return 0;
+    for (int i = 0; i < 40; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    hex2bin(hashstr, 40, expected);
+    const char *salt = hashstr + 41;
+    const char *colon2 = strchr(salt, ':');
+    if (!colon2 || colon2 == salt) return 0;
+    int saltlen = colon2 - salt;
+    const char *site_key = colon2 + 1;
+    int sklen = hashlen - (site_key - hashstr);
+    if (sklen < 1) return 0;
+
+    /* First iteration: SHA1(site_key + "--" + salt + "--" + pass + "--" + site_key) */
+    unsigned char *p = buf;
+    memcpy(p, site_key, sklen); p += sklen;
+    *p++ = '-'; *p++ = '-';
+    memcpy(p, salt, saltlen); p += saltlen;
+    *p++ = '-'; *p++ = '-';
+    memcpy(p, pass, passlen); p += passlen;
+    *p++ = '-'; *p++ = '-';
+    memcpy(p, site_key, sklen); p += sklen;
+    SHA1(buf, p - buf, computed);
+
+    /* 9 more iterations: SHA1(hex_lc(h) + "--" + salt + "--" + pass + "--" + site_key) */
+    for (int iter = 1; iter < 10; iter++) {
+        p = buf;
+        for (int j = 0; j < 20; j++) {
+            *p++ = hextab_lc[(computed[j] >> 4) & 0xf];
+            *p++ = hextab_lc[computed[j] & 0xf];
+        }
+        *p++ = '-'; *p++ = '-';
+        memcpy(p, salt, saltlen); p += saltlen;
+        *p++ = '-'; *p++ = '-';
+        memcpy(p, pass, passlen); p += passlen;
+        *p++ = '-'; *p++ = '-';
+        memcpy(p, site_key, sklen); p += sklen;
+        SHA1(buf, p - buf, computed);
+    }
+    WS->verify_iter = 10;
+    return memcmp(computed, expected, 20) == 0;
+}
+
+/* KRB5PA-17/18 (e940/e941, hashcat modes 19800/19900): Kerberos 5 Pre-Auth etype 17/18
+ * PBKDF2-HMAC-SHA1 → nfold AES-CBC key derivation → AES-CTS decrypt → HMAC-SHA1 verify
+ * Format: $krb5pa$17$user$REALM$hexdata  or  $krb5pa$18$user$REALM$hexdata */
+static int verify_krb5pa_17(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *pbkdf_out = (unsigned char *)WS->ctx1;   /* 32 bytes */
+    unsigned char *key_bytes = (unsigned char *)WS->ctx2;   /* 32 bytes */
+    unsigned char *ke = (unsigned char *)WS->ctx3;          /* 32 bytes */
+    unsigned char *ki = (unsigned char *)WS->ctx4;          /* 32 bytes */
+    unsigned char *enc_data = (unsigned char *)WS->gp1;     /* 64 bytes max */
+    unsigned char *pt_data = (unsigned char *)WS->gp2;      /* 64 bytes max */
+    unsigned char *new_ct = (unsigned char *)WS->gp3;       /* 64 bytes max */
+    unsigned char *cksum = (unsigned char *)WS->gp4;        /* 12 bytes */
+    unsigned char iv[16], cts_tmp[16];
+    AES_KEY aeskey;
+    unsigned char hmac_out[20];
+
+    static const unsigned char nfold_kerberos[16] = {
+        0x6b,0x65,0x72,0x62,0x65,0x72,0x6f,0x73,
+        0x7b,0x9b,0x5b,0x2b,0x93,0x13,0x2b,0x93};
+    static const unsigned char nfold_ke[16] = {
+        0xae,0x2c,0x16,0x0b,0x04,0xad,0x50,0x06,
+        0xab,0x55,0xaa,0xd5,0x6a,0x80,0x35,0x5a};
+    static const unsigned char nfold_ki[16] = {
+        0x5b,0x58,0x2c,0x16,0x0a,0x5a,0xa8,0x05,
+        0x56,0xab,0x55,0xaa,0xd5,0x40,0x2a,0xb5};
+
+    if (hashlen < 60 || strncmp(hashstr, "$krb5pa$17$", 11) != 0) return 0;
+    int keylen = 16; /* AES-128 */
+
+    const char *user = hashstr + 11;
+    const char *d2 = strchr(user, '$');
+    if (!d2 || d2 == user) return 0;
+    int userlen = d2 - user;
+    const char *realm = d2 + 1;
+    const char *d3 = strchr(realm, '$');
+    if (!d3 || d3 == realm) return 0;
+    int realmlen = d3 - realm;
+    const char *hexdata = d3 + 1;
+    int hexdatalen = hashlen - (hexdata - hashstr);
+    if (hexdatalen < 104 || hexdatalen > 112 || (hexdatalen % 2)) return 0;
+
+    /* Validate hex */
+    for (int i = 0; i < hexdatalen; i++) {
+        char c = hexdata[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+
+    int datalen = hexdatalen / 2;
+    hex2bin(hexdata, hexdatalen, enc_data);
+    int enc_len = datalen - 12;
+    memcpy(cksum, enc_data + enc_len, 12);
+
+    /* PBKDF2 salt = realm + user (realm already uppercase in format) */
+    unsigned char pbkdf_salt[128];
+    if (realmlen + userlen > 127) return 0;
+    memcpy(pbkdf_salt, realm, realmlen);
+    memcpy(pbkdf_salt + realmlen, user, userlen);
+
+    PKCS5_PBKDF2_HMAC_SHA1((const char *)pass, passlen,
+        pbkdf_salt, realmlen + userlen, 4096, keylen, pbkdf_out);
+
+    /* Key derivation: seed → key_bytes */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(pbkdf_out, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_kerberos, key_bytes, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* ke = AES-CBC(nfold_ke, key=key_bytes, IV=0) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_ke, ke, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* ki = AES-CBC(nfold_ki, key=key_bytes, IV=0) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_ki, ki, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* AES-CTS decrypt */
+    AES_set_decrypt_key(ke, keylen * 8, &aeskey);
+    if (enc_len <= 16) {
+        AES_ecb_encrypt(enc_data, pt_data, &aeskey, AES_DECRYPT);
+    } else {
+        int nblocks = (enc_len + 15) / 16;
+        int partial_len = enc_len - (nblocks - 1) * 16;
+        AES_ecb_encrypt(enc_data + (nblocks - 2) * 16, cts_tmp, &aeskey, AES_DECRYPT);
+        if (nblocks > 2)
+            memcpy(new_ct, enc_data, (nblocks - 2) * 16);
+        memcpy(new_ct + (nblocks - 2) * 16, enc_data + (nblocks - 1) * 16, partial_len);
+        memcpy(new_ct + (nblocks - 2) * 16 + partial_len, cts_tmp + partial_len, 16 - partial_len);
+        memcpy(new_ct + (nblocks - 1) * 16, enc_data + (nblocks - 2) * 16, 16);
+        memset(iv, 0, 16);
+        AES_cbc_encrypt(new_ct, pt_data, nblocks * 16, &aeskey, iv, AES_DECRYPT);
+    }
+
+    /* HMAC-SHA1(ki, plaintext) truncated to 12 bytes */
+    unsigned int hmac_len = 0;
+    HMAC(EVP_sha1(), ki, keylen, pt_data, enc_len, hmac_out, &hmac_len);
+
+    WS->verify_iter = 4096;
+    return memcmp(hmac_out, cksum, 12) == 0;
+}
+
+static int verify_krb5pa_18(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *pbkdf_out = (unsigned char *)WS->ctx1;
+    unsigned char *key_bytes = (unsigned char *)WS->ctx2;
+    unsigned char *ke = (unsigned char *)WS->ctx3;
+    unsigned char *ki = (unsigned char *)WS->ctx4;
+    unsigned char *enc_data = (unsigned char *)WS->gp1;
+    unsigned char *pt_data = (unsigned char *)WS->gp2;
+    unsigned char *new_ct = (unsigned char *)WS->gp3;
+    unsigned char *cksum = (unsigned char *)WS->gp4;
+    unsigned char iv[16], cts_tmp[16];
+    AES_KEY aeskey;
+    unsigned char hmac_out[20];
+
+    static const unsigned char nfold_kerberos[16] = {
+        0x6b,0x65,0x72,0x62,0x65,0x72,0x6f,0x73,
+        0x7b,0x9b,0x5b,0x2b,0x93,0x13,0x2b,0x93};
+    static const unsigned char nfold_ke[16] = {
+        0xae,0x2c,0x16,0x0b,0x04,0xad,0x50,0x06,
+        0xab,0x55,0xaa,0xd5,0x6a,0x80,0x35,0x5a};
+    static const unsigned char nfold_ki[16] = {
+        0x5b,0x58,0x2c,0x16,0x0a,0x5a,0xa8,0x05,
+        0x56,0xab,0x55,0xaa,0xd5,0x40,0x2a,0xb5};
+
+    if (hashlen < 60 || strncmp(hashstr, "$krb5pa$18$", 11) != 0) return 0;
+    int keylen = 32; /* AES-256 */
+
+    const char *user = hashstr + 11;
+    const char *d2 = strchr(user, '$');
+    if (!d2 || d2 == user) return 0;
+    int userlen = d2 - user;
+    const char *realm = d2 + 1;
+    const char *d3 = strchr(realm, '$');
+    if (!d3 || d3 == realm) return 0;
+    int realmlen = d3 - realm;
+    const char *hexdata = d3 + 1;
+    int hexdatalen = hashlen - (hexdata - hashstr);
+    if (hexdatalen < 104 || hexdatalen > 112 || (hexdatalen % 2)) return 0;
+
+    for (int i = 0; i < hexdatalen; i++) {
+        char c = hexdata[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+
+    int datalen = hexdatalen / 2;
+    hex2bin(hexdata, hexdatalen, enc_data);
+    int enc_len = datalen - 12;
+    memcpy(cksum, enc_data + enc_len, 12);
+
+    unsigned char pbkdf_salt[128];
+    if (realmlen + userlen > 127) return 0;
+    memcpy(pbkdf_salt, realm, realmlen);
+    memcpy(pbkdf_salt + realmlen, user, userlen);
+
+    PKCS5_PBKDF2_HMAC_SHA1((const char *)pass, passlen,
+        pbkdf_salt, realmlen + userlen, 4096, keylen, pbkdf_out);
+
+    /* Key derivation: seed → key_bytes (two AES-CBC blocks for AES-256) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(pbkdf_out, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_kerberos, key_bytes, 16, &aeskey, iv, AES_ENCRYPT);
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(pbkdf_out, keylen * 8, &aeskey);
+    AES_cbc_encrypt(key_bytes, key_bytes + 16, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* ke (two blocks) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_ke, ke, 16, &aeskey, iv, AES_ENCRYPT);
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(ke, ke + 16, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* ki (two blocks) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(nfold_ki, ki, 16, &aeskey, iv, AES_ENCRYPT);
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(key_bytes, keylen * 8, &aeskey);
+    AES_cbc_encrypt(ki, ki + 16, 16, &aeskey, iv, AES_ENCRYPT);
+
+    /* AES-CTS decrypt */
+    AES_set_decrypt_key(ke, keylen * 8, &aeskey);
+    if (enc_len <= 16) {
+        AES_ecb_encrypt(enc_data, pt_data, &aeskey, AES_DECRYPT);
+    } else {
+        int nblocks = (enc_len + 15) / 16;
+        int partial_len = enc_len - (nblocks - 1) * 16;
+        AES_ecb_encrypt(enc_data + (nblocks - 2) * 16, cts_tmp, &aeskey, AES_DECRYPT);
+        if (nblocks > 2)
+            memcpy(new_ct, enc_data, (nblocks - 2) * 16);
+        memcpy(new_ct + (nblocks - 2) * 16, enc_data + (nblocks - 1) * 16, partial_len);
+        memcpy(new_ct + (nblocks - 2) * 16 + partial_len, cts_tmp + partial_len, 16 - partial_len);
+        memcpy(new_ct + (nblocks - 1) * 16, enc_data + (nblocks - 2) * 16, 16);
+        memset(iv, 0, 16);
+        AES_cbc_encrypt(new_ct, pt_data, nblocks * 16, &aeskey, iv, AES_DECRYPT);
+    }
+
+    unsigned int hmac_len = 0;
+    HMAC(EVP_sha1(), ki, keylen, pt_data, enc_len, hmac_out, &hmac_len);
+
+    WS->verify_iter = 4096;
+    return memcmp(hmac_out, cksum, 12) == 0;
+}
+
+/* WPA-PMKID (e942, hashcat mode 16800/22000 type=01)
+ * Formats:
+ *   WPA*01*PMKID32*MACAP12*MACSTA12*ESSID_hex***
+ *   PMKID32:MACAP12:MACSTA12:ESSID_hex  (old 16800 format)
+ * Algorithm: PBKDF2-HMAC-SHA1(pass, essid, 4096, 32) → PMK
+ *            HMAC-SHA1(PMK, "PMK Name" + mac_ap + mac_sta) → first 16 bytes = PMKID */
+static int verify_wpa_pmkid(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *pmk = (unsigned char *)WS->ctx1;       /* 32 bytes */
+    unsigned char *expected = (unsigned char *)WS->ctx2;   /* 16 bytes */
+    unsigned char *essid_bin = (unsigned char *)WS->gp1;   /* up to 32 bytes */
+    unsigned char *pmkid_data = (unsigned char *)WS->gp2;  /* 20 bytes */
+    unsigned char hmac_out[20];
+    unsigned int hmac_len = 20;
+    const char *pmkid_hex, *macap_hex, *macsta_hex, *essid_hex;
+    int essid_hexlen;
+
+    if (hashlen < 40) return 0;
+
+    if (strncmp(hashstr, "WPA*01*", 7) == 0) {
+        /* WPA*01*PMKID*MACAP*MACSTA*ESSID*** */
+        pmkid_hex = hashstr + 7;
+        const char *f1 = strchr(pmkid_hex, '*');
+        if (!f1 || (f1 - pmkid_hex) != 32) return 0;
+        macap_hex = f1 + 1;
+        const char *f2 = strchr(macap_hex, '*');
+        if (!f2 || (f2 - macap_hex) != 12) return 0;
+        macsta_hex = f2 + 1;
+        const char *f3 = strchr(macsta_hex, '*');
+        if (!f3 || (f3 - macsta_hex) != 12) return 0;
+        essid_hex = f3 + 1;
+        const char *f4 = strchr(essid_hex, '*');
+        if (!f4) return 0;
+        essid_hexlen = f4 - essid_hex;
+    } else {
+        /* PMKID:MACAP:MACSTA:ESSID (old format) */
+        pmkid_hex = hashstr;
+        const char *c1 = strchr(pmkid_hex, ':');
+        if (!c1 || (c1 - pmkid_hex) != 32) return 0;
+        macap_hex = c1 + 1;
+        const char *c2 = strchr(macap_hex, ':');
+        if (!c2 || (c2 - macap_hex) != 12) return 0;
+        macsta_hex = c2 + 1;
+        const char *c3 = strchr(macsta_hex, ':');
+        if (!c3 || (c3 - macsta_hex) != 12) return 0;
+        essid_hex = c3 + 1;
+        essid_hexlen = hashlen - (essid_hex - hashstr);
+    }
+
+    if (essid_hexlen < 2 || essid_hexlen > 64 || (essid_hexlen & 1)) return 0;
+    if (hex2bin(pmkid_hex, 32, expected) != 16) return 0;
+
+    int essid_binlen = hex2bin(essid_hex, essid_hexlen, essid_bin);
+    if (essid_binlen < 1) return 0;
+
+    /* PBKDF2-HMAC-SHA1(pass, essid, 4096, 32) → PMK */
+    PKCS5_PBKDF2_HMAC_SHA1((const char *)pass, passlen,
+        essid_bin, essid_binlen, 4096, 32, pmk);
+
+    /* Build pmkid_data: "PMK Name" + mac_ap + mac_sta = 20 bytes */
+    memcpy(pmkid_data, "PMK Name", 8);
+    if (hex2bin(macap_hex, 12, pmkid_data + 8) != 6) return 0;
+    if (hex2bin(macsta_hex, 12, pmkid_data + 14) != 6) return 0;
+
+    /* HMAC-SHA1(PMK, pmkid_data) → first 16 bytes = PMKID */
+    HMAC(EVP_sha1(), pmk, 32, pmkid_data, 20, hmac_out, &hmac_len);
+
+    WS->verify_iter = 4096;
+    return memcmp(hmac_out, expected, 16) == 0;
+}
+
+/* WPA-EAPOL (e943, hashcat mode 22000 type=02)
+ * Format: WPA*02*MIC32*MACAP12*MACSTA12*ESSID_hex*ANONCE64*EAPOL_hex*MP
+ * Algorithm: PBKDF2-HMAC-SHA1(pass, essid, 4096, 32) → PMK
+ *            PRF: HMAC-SHA1(PMK, PKE[100]) → KCK (first 16 bytes)
+ *            MIC: HMAC-MD5(KCK,EAPOL) [keyver=1] or HMAC-SHA1(KCK,EAPOL) [keyver=2] */
+static int verify_wpa_eapol(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *pmk = (unsigned char *)WS->ctx1;        /* 32 bytes */
+    unsigned char *expected = (unsigned char *)WS->ctx2;   /* 16 bytes */
+    unsigned char *essid_bin = (unsigned char *)WS->gp1;   /* up to 32 bytes */
+    unsigned char *eapol_bin = (unsigned char *)WS->gp2;   /* up to 512 bytes */
+    unsigned char *pke = (unsigned char *)WS->gp3;         /* 100 bytes */
+    unsigned char *mac_ap = (unsigned char *)WS->gp4;      /* 6 bytes at offset 0 */
+    unsigned char *mac_sta = (unsigned char *)WS->gp4 + 16; /* 6 bytes at offset 16 */
+    unsigned char *anonce = (unsigned char *)WS->gp4 + 32; /* 32 bytes at offset 32 */
+    unsigned char *kck = (unsigned char *)WS->gp4 + 80;    /* 20 bytes at offset 80 */
+    unsigned char hmac_out[20];
+    unsigned int hmac_len;
+
+    if (hashlen < 100 || strncmp(hashstr, "WPA*02*", 7) != 0) return 0;
+
+    /* Parse: WPA*02*MIC*MACAP*MACSTA*ESSID*ANONCE*EAPOL*MP */
+    const char *mic_hex = hashstr + 7;
+    const char *f1 = strchr(mic_hex, '*');
+    if (!f1 || (f1 - mic_hex) != 32) return 0;
+    const char *macap_hex = f1 + 1;
+    const char *f2 = strchr(macap_hex, '*');
+    if (!f2 || (f2 - macap_hex) != 12) return 0;
+    const char *macsta_hex = f2 + 1;
+    const char *f3 = strchr(macsta_hex, '*');
+    if (!f3 || (f3 - macsta_hex) != 12) return 0;
+    const char *essid_hex = f3 + 1;
+    const char *f4 = strchr(essid_hex, '*');
+    if (!f4) return 0;
+    int essid_hexlen = f4 - essid_hex;
+    const char *anonce_hex = f4 + 1;
+    const char *f5 = strchr(anonce_hex, '*');
+    if (!f5 || (f5 - anonce_hex) != 64) return 0;
+    const char *eapol_hex = f5 + 1;
+    const char *f6 = strchr(eapol_hex, '*');
+    if (!f6) return 0;
+    int eapol_hexlen = f6 - eapol_hex;
+
+    if (essid_hexlen < 2 || essid_hexlen > 64 || (essid_hexlen & 1)) return 0;
+    if (eapol_hexlen < 2 || eapol_hexlen > 1024 || (eapol_hexlen & 1)) return 0;
+    if (hex2bin(mic_hex, 32, expected) != 16) return 0;
+
+    int essid_binlen = hex2bin(essid_hex, essid_hexlen, essid_bin);
+    if (essid_binlen < 1) return 0;
+    if (hex2bin(macap_hex, 12, mac_ap) != 6) return 0;
+    if (hex2bin(macsta_hex, 12, mac_sta) != 6) return 0;
+    if (hex2bin(anonce_hex, 64, anonce) != 32) return 0;
+    int eapol_binlen = hex2bin(eapol_hex, eapol_hexlen, eapol_bin);
+    if (eapol_binlen < 99) return 0;
+
+    /* Determine keyver from EAPOL key_information (bytes 5-6, big-endian) */
+    int keyver = (((eapol_bin[5] << 8) | eapol_bin[6]) & 7);
+    if (keyver < 1 || keyver > 2) return 0;
+
+    /* PBKDF2-HMAC-SHA1(pass, essid, 4096, 32) → PMK */
+    PKCS5_PBKDF2_HMAC_SHA1((const char *)pass, passlen,
+        essid_bin, essid_binlen, 4096, 32, pmk);
+
+    /* SNonce is at EAPOL offset 17 */
+    unsigned char *snonce = eapol_bin + 17;
+
+    /* Construct PKE (100 bytes):
+     * "Pairwise key expansion\0" + min(mac) + max(mac) + min(nonce) + max(nonce) + \0 */
+    memcpy(pke, "Pairwise key expansion", 23);
+    if (memcmp(mac_ap, mac_sta, 6) < 0) {
+        memcpy(pke + 23, mac_ap, 6);
+        memcpy(pke + 29, mac_sta, 6);
+    } else {
+        memcpy(pke + 23, mac_sta, 6);
+        memcpy(pke + 29, mac_ap, 6);
+    }
+    if (memcmp(anonce, snonce, 32) < 0) {
+        memcpy(pke + 35, anonce, 32);
+        memcpy(pke + 67, snonce, 32);
+    } else {
+        memcpy(pke + 35, snonce, 32);
+        memcpy(pke + 67, anonce, 32);
+    }
+    pke[99] = 0; /* counter byte */
+
+    /* PRF: HMAC-SHA1(PMK, PKE[100]) → KCK */
+    hmac_len = 20;
+    HMAC(EVP_sha1(), pmk, 32, pke, 100, kck, &hmac_len);
+
+    /* MIC computation */
+    if (keyver == 1) {
+        hmac_len = 16;
+        HMAC(EVP_md5(), kck, 16, eapol_bin, eapol_binlen, hmac_out, &hmac_len);
+    } else {
+        hmac_len = 20;
+        HMAC(EVP_sha1(), kck, 16, eapol_bin, eapol_binlen, hmac_out, &hmac_len);
+    }
+
+    WS->verify_iter = 4096;
+    return memcmp(hmac_out, expected, 16) == 0;
+}
+
+/* Ansible Vault (e944, hashcat mode 16900)
+ * Format: $ansible$C*V*SALT64hex*CT_hex*HMAC64hex
+ * Algorithm: PBKDF2-SHA256(pass, salt32, 10000, 64) → bytes 32-63 = HMAC key
+ *            HMAC-SHA256(key, ciphertext_bytes) → compare full 32 bytes */
+static int verify_ansible_vault(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dk = (unsigned char *)WS->ctx1;          /* 64 bytes PBKDF2 output */
+    unsigned char *expected = (unsigned char *)WS->ctx2;    /* 32 bytes HMAC */
+    unsigned char *salt = (unsigned char *)WS->ctx3;        /* 32 bytes salt */
+    unsigned char *ct_bin = (unsigned char *)WS->gp1;       /* ciphertext binary */
+    unsigned char hmac_out[32];
+    unsigned int hmac_len = 32;
+
+    if (hashlen < 80 || strncmp(hashstr, "$ansible$", 9) != 0) return 0;
+
+    /* Parse: $ansible$C*V*SALT*CT*HMAC */
+    const char *p = hashstr + 9;
+    const char *s1 = memchr(p, '*', hashlen - 9);
+    if (!s1) return 0;
+    const char *s2 = memchr(s1 + 1, '*', hashlen - (s1 + 1 - hashstr));
+    if (!s2) return 0;
+    const char *salt_hex = s2 + 1;
+    const char *s3 = memchr(salt_hex, '*', hashlen - (salt_hex - hashstr));
+    if (!s3 || (s3 - salt_hex) != 64) return 0;
+    const char *ct_hex = s3 + 1;
+    const char *s4 = memchr(ct_hex, '*', hashlen - (ct_hex - hashstr));
+    if (!s4) return 0;
+    int ct_hexlen = s4 - ct_hex;
+    const char *hmac_hex = s4 + 1;
+    int hmac_hexlen = hashlen - (hmac_hex - hashstr);
+    if (hmac_hexlen != 64) return 0;
+    if (ct_hexlen < 2 || (ct_hexlen & 1) || ct_hexlen > (int)WS_GP_SIZE * 2) return 0;
+
+    if (hex2bin(salt_hex, 64, salt) != 32) return 0;
+    if (hex2bin(hmac_hex, 64, expected) != 32) return 0;
+    int ct_binlen = hex2bin(ct_hex, ct_hexlen, ct_bin);
+    if (ct_binlen < 1) return 0;
+
+    /* PBKDF2-HMAC-SHA256(pass, salt32, 10000, 64) → HMAC key at [32..63] */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       salt, 32, 10000, EVP_sha256(), 64, dk);
+
+    /* HMAC-SHA256(key=dk[32..63], msg=ciphertext) */
+    HMAC(EVP_sha256(), dk + 32, 32, ct_bin, ct_binlen, hmac_out, &hmac_len);
+
+    WS->verify_iter = 10000;
+    return memcmp(hmac_out, expected, 32) == 0;
+}
+
+/* APFS (e945, hashcat mode 18300)
+ * Format: $fvde$2$16$SALT32hex$ITER$WKEY80hex
+ * Algorithm: PBKDF2-SHA256(pass, salt16, iter, 32) → AES-256 key
+ *            RFC 3394 AES-256 Key Unwrap (n=4 blocks)
+ *            Verify A == 0xA6A6A6A6A6A6A6A6 */
+static int verify_apfs(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->ctx1;        /* 16 bytes */
+    unsigned char *wkey = (unsigned char *)WS->ctx1 + 32;   /* 40 bytes */
+    unsigned char *dk = (unsigned char *)WS->ctx1 + 80;     /* 32 bytes PBKDF2 output */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;                  /* ~244 bytes */
+
+    if (hashlen < 40 || strncmp(hashstr, "$fvde$2$", 8) != 0) return 0;
+
+    /* Parse: $fvde$2$saltlen$salt$iter$wkey */
+    const char *p = hashstr + 8;
+    const char *s1 = memchr(p, '$', hashlen - 8);
+    if (!s1) return 0;
+    int saltlen_val = atoi(p);
+    if (saltlen_val != 16) return 0;
+    const char *salt_hex = s1 + 1;
+    const char *s2 = memchr(salt_hex, '$', hashlen - (salt_hex - hashstr));
+    if (!s2 || (s2 - salt_hex) != 32) return 0;
+    const char *iter_str = s2 + 1;
+    const char *s3 = memchr(iter_str, '$', hashlen - (iter_str - hashstr));
+    if (!s3) return 0;
+    int iter = atoi(iter_str);
+    if (iter < 1) return 0;
+    const char *wkey_hex = s3 + 1;
+    int wkey_hexlen = hashlen - (wkey_hex - hashstr);
+    if (wkey_hexlen != 80) return 0;
+
+    if (hex2bin(salt_hex, 32, salt) != 16) return 0;
+    if (hex2bin(wkey_hex, 80, wkey) != 40) return 0;
+
+    /* PBKDF2-HMAC-SHA256(pass, salt16, iter, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                       salt, 16, iter, EVP_sha256(), 32, dk);
+    WS->verify_iter = iter;
+
+    /* AES-256 Key Unwrap (RFC 3394) with n=4 blocks */
+    AES_set_decrypt_key(dk, 256, aeskey);
+    unsigned char A[8], R[4][8];
+    memcpy(A, wkey, 8);
+    memcpy(R[0], wkey + 8, 8);
+    memcpy(R[1], wkey + 16, 8);
+    memcpy(R[2], wkey + 24, 8);
+    memcpy(R[3], wkey + 32, 8);
+    int j, ii;
+    for (j = 5; j >= 0; j--) {
+        for (ii = 3; ii >= 0; ii--) {
+            unsigned int t = 4 * j + ii + 1;
+            A[7] ^= (t & 0xff);
+            A[6] ^= ((t >> 8) & 0xff);
+            unsigned char B[16];
+            memcpy(B, A, 8);
+            memcpy(B + 8, R[ii], 8);
+            AES_ecb_encrypt(B, B, aeskey, AES_DECRYPT);
+            memcpy(A, B, 8);
+            memcpy(R[ii], B + 8, 8);
+        }
+    }
+    static const unsigned char wrap_iv[8] = {0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6,0xa6};
+    return memcmp(A, wrap_iv, 8) == 0;
+}
+
+/* OTM-SHA256 (e946, hashcat mode 20600)
+ * Oracle Transportation Management: SHA256(salt+pass) iterated N times
+ * Format: otm_sha256:ITER:SALT:HASH_B64 */
+static int verify_otm_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "otm_sha256:", 11) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 11;
+    char *d1 = strchr(iter_s, ':');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1000.0, (double)iter)) return 0;
+
+    char *salt = d1 + 1;
+    char *d2 = strchr(salt, ':');
+    if (!d2) return 0;
+    *d2 = 0;
+    int saltlen = d2 - salt;
+    char *hash_b64 = d2 + 1;
+
+    /* Decode expected hash */
+    int explen = b64_decode(hash_b64, expected, strlen(hash_b64));
+    if (explen < 32) return 0;
+
+    WS->verify_iter = iter;
+
+    /* SHA256(salt + pass), then iterate */
+    SHA256_CTX sha2ctx;
+    SHA256_Init(&sha2ctx);
+    SHA256_Update(&sha2ctx, salt, saltlen);
+    SHA256_Update(&sha2ctx, pass, passlen);
+    SHA256_Final(computed, &sha2ctx);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        SHA256_Init(&sha2ctx);
+        SHA256_Update(&sha2ctx, computed, 32);
+        SHA256_Final(computed, &sha2ctx);
+    }
+
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* TELEGRAM-SHA256 (e947, hashcat mode 22301)
+ * SHA256(salt16_bin + pass + salt16_bin)
+ * Format: $telegram$0*HASH64hex*SALT32hex */
+static int verify_telegram_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *salt_bin = (unsigned char *)WS->ctx3;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+
+    if (hashlen < 80 || memcmp(hashstr, "$telegram$0*", 12) != 0) return 0;
+    /* Parse hash (64 hex) and salt (32 hex) */
+    const char *hash_hex = hashstr + 12;
+    const char *sep = memchr(hash_hex, '*', hashlen - 12);
+    if (!sep || (sep - hash_hex) != 64) return 0;
+    const char *salt_hex = sep + 1;
+    int salt_hex_len = hashlen - (salt_hex - hashstr);
+    if (salt_hex_len != 32) return 0;
+
+    hex2bin(hash_hex, 64, expected);
+    hex2bin(salt_hex, 32, salt_bin);
+
+    /* SHA256(salt + pass + salt) */
+    memcpy(buf, salt_bin, 16);
+    memcpy(buf + 16, pass, passlen);
+    memcpy(buf + 16 + passlen, salt_bin, 16);
+    SHA256(buf, 16 + passlen + 16, computed);
+
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* WEB2PY-SHA512 (e948, hashcat mode 21600)
+ * PBKDF2-HMAC-SHA512(pass, salt, iter, 20)
+ * Format: pbkdf2(ITER,20,sha512)$SALT$HASH40hex */
+static int verify_web2py_sha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *derived = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 30 || memcmp(hashstr, "pbkdf2(", 7) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    int iter = atoi(buf + 7);
+    if (iter <= 0) return 0;
+    char *check = strchr(buf + 7, ',');
+    if (!check || memcmp(check, ",20,sha512)$", 12) != 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1000.0, (double)iter)) return 0;
+
+    char *salt = check + 12;
+    char *sep = strchr(salt, '$');
+    if (!sep) return 0;
+    *sep = 0;
+    int saltlen = sep - salt;
+    char *hash_hex = sep + 1;
+    if ((int)strlen(hash_hex) != 40) return 0;
+
+    hex2bin(hash_hex, 40, expected);
+
+    WS->verify_iter = iter;
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        (unsigned char *)salt, saltlen, iter, EVP_sha512(), 20, derived);
+
+    return memcmp(derived, expected, 20) == 0;
+}
+
+/* SOLARWINDS (e949, hashcat mode 21500) and SOLARWINDS2 (e950, hashcat mode 21501)
+ * PBKDF2-HMAC-SHA1(pass, salt, 1000, 1024) → SHA512
+ * Format 21500: $solarwinds$0$USERNAME$HASH_B64
+ * Format 21501: $solarwinds$1$SALT_B64$HASH_B64 */
+static int verify_solarwinds(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *salt_bin = (unsigned char *)WS->ctx3;
+    unsigned char *dk = (unsigned char *)WS->gp1;  /* 1024 bytes, gp1 is 4096 */
+    char *buf = (char *)WS->gp2;
+    static const char swpad[] = "1244352345234";
+
+    if (hashlen < 20 || memcmp(hashstr, "$solarwinds$", 12) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    int version = buf[12] - '0';
+    if (version != 0 && version != 1) return 0;
+    if (buf[13] != '$') return 0;
+
+    char *field1 = buf + 14;
+    char *sep = strchr(field1, '$');
+    if (!sep) return 0;
+    *sep = 0;
+    char *hash_b64 = sep + 1;
+
+    int explen = b64_decode(hash_b64, expected, strlen(hash_b64));
+    if (explen < 64) return 0;
+
+    int sw_saltlen;
+    if (version == 0) {
+        /* Username: lowercase, trunc/pad to 8 */
+        int ulen = sep - field1;
+        int i;
+        for (i = 0; i < 8 && i < ulen; i++)
+            salt_bin[i] = tolower(field1[i]);
+        for (; i < 8; i++)
+            salt_bin[i] = swpad[i - ulen];
+        sw_saltlen = 8;
+    } else {
+        /* v2: base64 decode salt */
+        sw_saltlen = b64_decode(field1, salt_bin, sep - field1);
+        if (sw_saltlen != 16) return 0;
+    }
+
+    if (verify_cost_exceeds(WS->cur_rate, 1000.0, 1000.0)) return 0;
+    WS->verify_iter = 1000;
+
+    /* PBKDF2-HMAC-SHA1(pass, salt, 1000, 1024) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, sw_saltlen, 1000, EVP_sha1(), 1024, dk);
+    /* SHA512 of the 1024-byte derived key */
+    SHA512(dk, 1024, computed);
+
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* SIMPLACMS (e951, hashcat mode 22800)
+ * Format: HASH32hex:SALT  (md5($salt.$pass.md5($pass)))
+ * Password is after the last colon (handled by caller) */
+static int verify_simplacms(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *inner_md5 = (unsigned char *)WS->ctx2;
+    unsigned char *outer_md5 = (unsigned char *)WS->ctx3;
+    char *buf = (char *)WS->gp1;
+
+    /* Format: 32hex:salt */
+    const char *colon = memchr(hashstr, ':', hashlen);
+    if (!colon || (colon - hashstr) != 32) return 0;
+    if (hex2bin(hashstr, 32, expected) != 16) return 0;
+
+    int saltlen = hashlen - 33;
+    const char *salt = colon + 1;
+
+    /* Step 1: md5(pass) */
+    rhash_msg(RHASH_MD5, pass, passlen, inner_md5);
+    /* hex-encode inner md5 */
+    char inner_hex[33];
+    for (int i = 0; i < 16; i++)
+        sprintf(inner_hex + i*2, "%02x", inner_md5[i]);
+
+    /* Step 2: md5(salt + pass + hex(md5(pass))) */
+    int total = saltlen + passlen + 32;
+    if (total >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, salt, saltlen);
+    memcpy(buf + saltlen, pass, passlen);
+    memcpy(buf + saltlen + passlen, inner_hex, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, total, outer_md5);
+
+    return memcmp(outer_md5, expected, 16) == 0;
+}
+
+/* APPLE-KEYCHAIN (e952, hashcat mode 23100)
+ * Format: $keychain$*SALT40hex*IV16hex*DATA96hex
+ * PBKDF2-SHA1(pass, salt20, 1000, 24) → 3DES-ECB decrypt last block → PKCS7 check */
+static int verify_apple_keychain(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dk = (unsigned char *)WS->ctx1;     /* 24 bytes PBKDF2 output */
+    unsigned char *salt_bin = (unsigned char *)WS->ctx2; /* 20 bytes salt */
+    unsigned char *ct = (unsigned char *)WS->ctx3;      /* 48 bytes ciphertext */
+
+    if (hashlen < 60 || memcmp(hashstr, "$keychain$*", 11) != 0) return 0;
+    const char *p = hashstr + 11;
+    /* Salt: 40 hex chars */
+    const char *s1 = memchr(p, '*', hashlen - 11);
+    if (!s1 || (s1 - p) != 40) return 0;
+    if (hex2bin(p, 40, salt_bin) != 20) return 0;
+    /* IV: 16 hex chars */
+    p = s1 + 1;
+    const char *s2 = memchr(p, '*', hashlen - (p - hashstr));
+    if (!s2 || (s2 - p) != 16) return 0;
+    /* We only need prev_ct block (bytes 32-39) and last_ct block (bytes 40-47) */
+    /* IV is not used for last-block check */
+    /* Data: 96 hex chars (48 bytes) */
+    p = s2 + 1;
+    int datahexlen = hashlen - (p - hashstr);
+    if (datahexlen != 96) return 0;
+    if (hex2bin(p, 96, ct) != 48) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 1000.0, 1000.0)) return 0;
+    WS->verify_iter = 1000;
+
+    /* PBKDF2-HMAC-SHA1(pass, salt20, 1000, 24) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, 20, 1000, EVP_sha1(), 24, dk);
+
+    /* 3DES-ECB decrypt last 8-byte block */
+    DES_key_schedule *ks1 = (DES_key_schedule *)WS->gp1;
+    DES_key_schedule *ks2 = (DES_key_schedule *)WS->gp2;
+    DES_key_schedule *ks3 = (DES_key_schedule *)WS->gp3;
+    DES_set_key_unchecked((DES_cblock *)dk, ks1);
+    DES_set_key_unchecked((DES_cblock *)(dk + 8), ks2);
+    DES_set_key_unchecked((DES_cblock *)(dk + 16), ks3);
+
+    unsigned char decrypted[8], destmp[8];
+    /* 3DES EDE decrypt: D(k1) <- E(k2) <- D(k3) */
+    DES_ecb_encrypt((const_DES_cblock *)(ct + 40), (DES_cblock *)destmp, ks3, DES_DECRYPT);
+    DES_ecb_encrypt((const_DES_cblock *)destmp, (DES_cblock *)destmp, ks2, DES_ENCRYPT);
+    DES_ecb_encrypt((const_DES_cblock *)destmp, (DES_cblock *)decrypted, ks1, DES_DECRYPT);
+    /* XOR with previous ciphertext block (CBC) - only last 4 bytes needed */
+    decrypted[4] ^= ct[32 + 4];
+    decrypted[5] ^= ct[32 + 5];
+    decrypted[6] ^= ct[32 + 6];
+    decrypted[7] ^= ct[32 + 7];
+    /* Check PKCS7 padding: last 4 bytes should be 0x04 */
+    return (decrypted[4] == 0x04 && decrypted[5] == 0x04 &&
+            decrypted[6] == 0x04 && decrypted[7] == 0x04);
+}
+
+/* APPLE-IWORK (e953, hashcat mode 23300)
+ * Format: $iwork$hash_ver$file_ver$1$iter$SALThex$IV32hex$DATA128hex
+ * PBKDF2-SHA1(pass, salt, iter, 16) → AES-128-CBC decrypt → SHA256 verify */
+static int verify_apple_iwork(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dk = (unsigned char *)WS->ctx1;      /* 16 bytes PBKDF2 output */
+    unsigned char *salt_bin = (unsigned char *)WS->ctx2; /* salt binary */
+    unsigned char *iv_bin = (unsigned char *)WS->ctx3;   /* 16 bytes IV */
+    unsigned char *ct = (unsigned char *)WS->ctx4;       /* 64 bytes ciphertext */
+    unsigned char *pt = (unsigned char *)WS->ctx5;       /* 48 bytes plaintext */
+    unsigned char *sha_out = (unsigned char *)WS->ctx6;  /* 32 bytes SHA256 */
+
+    if (hashlen < 40 || memcmp(hashstr, "$iwork$", 7) != 0) return 0;
+    char *buf = (char *)WS->gp2;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Parse: $iwork$hash_ver$file_ver$1$iter$salthex$iv32hex$data128hex */
+    char *f[8]; int fi = 0;
+    char *tok = buf + 7; /* skip "$iwork$" */
+    f[fi++] = tok;
+    while (fi < 8 && (tok = strchr(tok, '$')) != NULL) {
+        *tok++ = 0; f[fi++] = tok;
+    }
+    if (fi < 7) return 0; /* need hash_ver, file_ver, "1", iter, salt, iv, data */
+
+    int iter = atoi(f[3]); /* iter is field 4 (0-indexed: f[3]) */
+    if (iter < 1) return 0;
+
+    char *salthex = f[4];
+    char *ivhex = f[5];
+    char *datahex = f[6];
+
+    int salthexlen = strlen(salthex);
+    int saltlen = hex2bin(salthex, salthexlen, salt_bin);
+    if (saltlen < 4) return 0;
+    if (strlen(ivhex) != 32) return 0;
+    if (hex2bin(ivhex, 32, iv_bin) != 16) return 0;
+    if (strlen(datahex) != 128) return 0;
+    if (hex2bin(datahex, 128, ct) != 64) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 4000.0, (double)iter)) return 0;
+    WS->verify_iter = iter;
+
+    /* PBKDF2-HMAC-SHA1(pass, salt, iter, 16) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, saltlen, iter, EVP_sha1(), 16, dk);
+
+    /* AES-128-CBC decrypt first 48 bytes */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;
+    AES_set_decrypt_key(dk, 128, aeskey);
+    unsigned char xiv[16];
+    memcpy(xiv, iv_bin, 16);
+    for (int bi = 0; bi < 3; bi++) {
+        unsigned char tmp[16];
+        AES_ecb_encrypt(ct + bi * 16, tmp, aeskey, AES_DECRYPT);
+        for (int j = 0; j < 16; j++) pt[bi * 16 + j] = tmp[j] ^ xiv[j];
+        memcpy(xiv, ct + bi * 16, 16);
+    }
+    /* SHA256 of first 32 decrypted bytes, compare with pt[32:48] */
+    SHA256(pt, 32, sha_out);
+    return memcmp(sha_out, pt + 32, 16) == 0;
+}
+
+/* BITWARDEN (e954, hashcat mode 23400)
+ * Format: $bitwarden$2*iter1*iter2*salt_b64*hash_b64
+ * PBKDF2-SHA256(pass, email, iter1, 32) → PBKDF2-SHA256(master, pass, iter2, 32) */
+static int verify_bitwarden(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *master_key = (unsigned char *)WS->ctx2;
+    unsigned char *final_key = (unsigned char *)WS->ctx3;
+    unsigned char *email_salt = (unsigned char *)WS->ctx4;
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen < 30 || memcmp(hashstr, "$bitwarden$2*", 13) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Parse: $bitwarden$2*iter1*iter2*salt_b64*hash_b64 */
+    char *p = buf + 13;
+    char *s1 = strchr(p, '*'); if (!s1) return 0; *s1 = 0;
+    int iter1 = atoi(p);
+    char *s2 = strchr(s1 + 1, '*'); if (!s2) return 0; *s2 = 0;
+    int iter2 = atoi(s1 + 1);
+    char *s3 = strchr(s2 + 1, '*'); if (!s3) return 0; *s3 = 0;
+    char *salt_b64 = s2 + 1;
+    char *hash_b64 = s3 + 1;
+
+    if (iter1 < 1 || iter2 < 1) return 0;
+
+    /* Decode email salt */
+    int email_len = b64_decode(salt_b64, email_salt, strlen(salt_b64));
+    if (email_len <= 0) return 0;
+
+    /* Decode expected hash */
+    int explen = b64_decode(hash_b64, expected, strlen(hash_b64));
+    if (explen != 32) return 0;
+
+    double cost = (double)iter1 + (double)iter2;
+    if (verify_cost_exceeds(WS->cur_rate, 100002.0, cost)) return 0;
+    WS->verify_iter = iter1 + iter2;
+
+    /* Step 1: PBKDF2-SHA256(pass, email, iter1, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        email_salt, email_len, iter1, EVP_sha256(), 32, master_key);
+    /* Step 2: PBKDF2-SHA256(master_key, pass, iter2, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)master_key, 32,
+        pass, passlen, iter2, EVP_sha256(), 32, final_key);
+
+    return memcmp(final_key, expected, 32) == 0;
+}
+
+/* MONGODB-SHA1 (e955, hashcat mode 24100)
+ * Format: $mongodb-scram$*0*user_b64*iter*salt_b64*hash_b64
+ * MD5(user+":mongo:"+pass) → hex → PBKDF2-SHA1(hex, salt, iter, 20) → HMAC-SHA1("Server Key") */
+static int verify_mongodb_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *md5_out = (unsigned char *)WS->ctx2;
+    unsigned char *dk = (unsigned char *)WS->ctx3;
+    unsigned char *hmac_out = (unsigned char *)WS->ctx4;
+    unsigned char *salt_bin = (unsigned char *)WS->ctx5;
+    char *buf = (char *)WS->gp2;
+    char *user = (char *)WS->gp3;
+    char *combo = (char *)WS->gp1;
+
+    if (hashlen < 30 || memcmp(hashstr, "$mongodb-scram$*0*", 18) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Parse: $mongodb-scram$*0*user_b64*iter*salt_b64*hash_b64 */
+    char *p = buf + 18;
+    char *s1 = strchr(p, '*'); if (!s1) return 0; *s1 = 0;
+    char *user_b64 = p;
+    char *s2 = strchr(s1 + 1, '*'); if (!s2) return 0; *s2 = 0;
+    int iter = atoi(s1 + 1);
+    char *s3 = strchr(s2 + 1, '*'); if (!s3) return 0; *s3 = 0;
+    char *salt_b64 = s2 + 1;
+    char *hash_b64 = s3 + 1;
+
+    if (iter < 1) return 0;
+
+    int user_len = b64_decode(user_b64, (unsigned char *)user, strlen(user_b64));
+    if (user_len <= 0) return 0;
+    int salt_len = b64_decode(salt_b64, salt_bin, strlen(salt_b64));
+    if (salt_len <= 0) return 0;
+    int exp_len = b64_decode(hash_b64, expected, strlen(hash_b64));
+    if (exp_len != 20) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 10000.0, (double)iter)) return 0;
+    WS->verify_iter = iter;
+
+    /* MD5(user + ":mongo:" + pass) */
+    int combo_len = user_len + 7 + passlen;
+    if (combo_len >= (int)WS_GP_SIZE) return 0;
+    memcpy(combo, user, user_len);
+    memcpy(combo + user_len, ":mongo:", 7);
+    memcpy(combo + user_len + 7, pass, passlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)combo, combo_len, md5_out);
+
+    /* Hex-encode MD5 */
+    char md5hex[33];
+    for (int i = 0; i < 16; i++)
+        sprintf(md5hex + i*2, "%02x", md5_out[i]);
+
+    /* PBKDF2-HMAC-SHA1(hex(MD5), salt, iter, 20) */
+    PKCS5_PBKDF2_HMAC(md5hex, 32,
+        salt_bin, salt_len, iter, EVP_sha1(), 20, dk);
+
+    /* HMAC-SHA1(derived, "Server Key") */
+    unsigned int hmac_len = 20;
+    HMAC(EVP_sha1(), dk, 20,
+         (unsigned char *)"Server Key", 10,
+         hmac_out, &hmac_len);
+
+    return memcmp(hmac_out, expected, 20) == 0;
+}
+
+/* MONGODB-SHA256 (e956, hashcat mode 24200)
+ * Format: $mongodb-scram$*1*user_b64*iter*salt_b64*hash_b64
+ * PBKDF2-SHA256(pass, salt, iter, 32) → HMAC-SHA256("Server Key") */
+static int verify_mongodb_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *dk = (unsigned char *)WS->ctx2;
+    unsigned char *hmac_out = (unsigned char *)WS->ctx3;
+    unsigned char *salt_bin = (unsigned char *)WS->ctx4;
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen < 30 || memcmp(hashstr, "$mongodb-scram$*1*", 18) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Parse: $mongodb-scram$*1*user_b64*iter*salt_b64*hash_b64 */
+    char *p = buf + 18;
+    char *s1 = strchr(p, '*'); if (!s1) return 0; *s1 = 0;
+    /* user_b64 not needed for SHA-256 computation */
+    char *s2 = strchr(s1 + 1, '*'); if (!s2) return 0; *s2 = 0;
+    int iter = atoi(s1 + 1);
+    char *s3 = strchr(s2 + 1, '*'); if (!s3) return 0; *s3 = 0;
+    char *salt_b64 = s2 + 1;
+    char *hash_b64 = s3 + 1;
+
+    if (iter < 1) return 0;
+
+    int salt_len = b64_decode(salt_b64, salt_bin, strlen(salt_b64));
+    if (salt_len <= 0) return 0;
+    int exp_len = b64_decode(hash_b64, expected, strlen(hash_b64));
+    if (exp_len != 32) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 15000.0, (double)iter)) return 0;
+    WS->verify_iter = iter;
+
+    /* PBKDF2-HMAC-SHA256(pass, salt, iter, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, salt_len, iter, EVP_sha256(), 32, dk);
+
+    /* HMAC-SHA256(derived, "Server Key") */
+    unsigned int hmac_len = 32;
+    HMAC(EVP_sha256(), dk, 32,
+         (unsigned char *)"Server Key", 10,
+         hmac_out, &hmac_len);
+
+    return memcmp(hmac_out, expected, 32) == 0;
+}
+
+/* FORTIGATE256 (e957, hashcat mode 26300)
+ * Format: SH2 + 60 base64 chars (44 bytes: salt[12] + sha256[32])
+ * SHA256(salt + pass + magic) */
+static int verify_fortigate256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    static const unsigned char fortigate_magic[24] = {
+        0xa3,0x88,0xba,0x2e,0x42,0x4c,0xb0,0x4a,
+        0x53,0x79,0x30,0xc1,0x31,0x07,0xcc,0x3f,
+        0xa1,0x32,0x90,0x29,0xa9,0x81,0x5b,0x70
+    };
+    unsigned char *decoded = (unsigned char *)WS->gp1;
+    unsigned char *computed = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen != 63) return 0;
+    if (memcmp(hashstr, "SH2", 3) != 0) return 0;
+
+    int dlen = base64_decode(hashstr + 3, 60, decoded, 64);
+    if (dlen != 44) return 0;
+
+    /* SHA256(salt[12] + pass + magic[24]) */
+    int total = 12 + passlen + 24;
+    if (total >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, decoded, 12);
+    memcpy(buf + 12, pass, passlen);
+    memcpy(buf + 12 + passlen, fortigate_magic, 24);
+    SHA256((unsigned char *)buf, total, computed);
+
+    return memcmp(computed, decoded + 12, 32) == 0;
+}
+
+/* UMBRACO (e958, hashcat mode 24800)
+ * Format: 28-char base64 (20 bytes HMAC-SHA1, unsalted)
+ * HMAC-SHA1(key=UTF16LE(pass), msg=UTF16LE(pass)) */
+static int verify_umbraco(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *hmac_out = (unsigned char *)WS->ctx2;
+    unsigned char *u16buf = (unsigned char *)WS->u16a;
+
+    if (hashlen != 28 || hashstr[27] != '=') return 0;
+
+    int dlen = base64_decode(hashstr, 28, expected, 32);
+    if (dlen != 20) return 0;
+
+    /* Convert password to UTF-16LE */
+    int u16len = utf8_to_utf16le(pass, passlen, u16buf, MAXLINE);
+    if (u16len < 0) {
+        /* Fallback: zero-extend */
+        int i;
+        for (i = 0; i < passlen && i * 2 + 1 < MAXLINE; i++) {
+            u16buf[i*2] = pass[i];
+            u16buf[i*2+1] = 0;
+        }
+        u16len = passlen * 2;
+    }
+
+    /* HMAC-SHA1(key=utf16le, msg=utf16le) */
+    unsigned int outlen = 20;
+    HMAC(EVP_sha1(), u16buf, u16len, u16buf, u16len, hmac_out, &outlen);
+
+    return memcmp(hmac_out, expected, 20) == 0;
+}
+
+/* DAHUA-AUTH (e959, hashcat mode 24900)
+ * Format: 8 alphanumeric characters
+ * MD5(pass) → lossy compression: pairs of bytes summed mod 62 */
+static int verify_dahua_auth(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5out = (unsigned char *)WS->ctx1;
+    static const char dtable[] =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    if (hashlen != 8) return 0;
+    /* Verify all chars are alphanumeric */
+    int i;
+    for (i = 0; i < 8; i++) {
+        if (!((hashstr[i] >= '0' && hashstr[i] <= '9') ||
+              (hashstr[i] >= 'A' && hashstr[i] <= 'Z') ||
+              (hashstr[i] >= 'a' && hashstr[i] <= 'z'))) return 0;
+    }
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5out);
+
+    char encoded[9];
+    for (i = 0; i < 4; i++) {
+        int b0 = md5out[i*4], b1 = md5out[i*4+1];
+        int b2 = md5out[i*4+2], b3 = md5out[i*4+3];
+        encoded[i*2]     = dtable[(b0 + b1) % 62];
+        encoded[i*2 + 1] = dtable[(b2 + b3) % 62];
+    }
+    encoded[8] = 0;
+
+    return memcmp(encoded, hashstr, 8) == 0;
+}
+
+/* BESDER-AUTH (e960, hashcat mode 24901)
+ * Same as Dahua but: ((byte0 + byte1) & 0xff) % 62 */
+static int verify_besder_auth(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5out = (unsigned char *)WS->ctx1;
+    static const char dtable[] =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    if (hashlen != 8) return 0;
+    int i;
+    for (i = 0; i < 8; i++) {
+        if (!((hashstr[i] >= '0' && hashstr[i] <= '9') ||
+              (hashstr[i] >= 'A' && hashstr[i] <= 'Z') ||
+              (hashstr[i] >= 'a' && hashstr[i] <= 'z'))) return 0;
+    }
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5out);
+
+    char encoded[9];
+    for (i = 0; i < 4; i++) {
+        int b0 = md5out[i*4], b1 = md5out[i*4+1];
+        int b2 = md5out[i*4+2], b3 = md5out[i*4+3];
+        encoded[i*2]     = dtable[((b0 + b1) & 0xff) % 62];
+        encoded[i*2 + 1] = dtable[((b2 + b3) & 0xff) % 62];
+    }
+    encoded[8] = 0;
+
+    return memcmp(encoded, hashstr, 8) == 0;
+}
+
+/* SQLCIPHER (e961, hashcat mode 24600)
+ * Format: SQLCIPHER*type*iter*salt32hex*iv32hex*data32hex
+ * PBKDF2-HMAC-SHAx → AES-256-CBC decrypt → check first 12 bytes == 0 */
+static int verify_sqlcipher(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dk = (unsigned char *)WS->ctx1;      /* 32 bytes */
+    unsigned char *salt_bin = (unsigned char *)WS->ctx2; /* 16 bytes */
+    unsigned char *iv_bin = (unsigned char *)WS->ctx3;   /* 16 bytes */
+    unsigned char *ct = (unsigned char *)WS->ctx4;       /* 16 bytes */
+    unsigned char *pt = (unsigned char *)WS->ctx5;       /* 16 bytes */
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen < 50 || memcmp(hashstr, "SQLCIPHER*", 10) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Parse: SQLCIPHER*type*iter*salt32hex*iv32hex*data32hex */
+    char *p = buf + 10;
+    char *s1 = strchr(p, '*'); if (!s1 || (s1 - p) != 1) return 0; *s1 = 0;
+    int sc_type = atoi(p);
+    if (sc_type < 1 || sc_type > 3) return 0;
+
+    char *s2 = strchr(s1 + 1, '*'); if (!s2) return 0; *s2 = 0;
+    int iter = atoi(s1 + 1);
+    if (iter < 1) return 0;
+
+    char *s3 = strchr(s2 + 1, '*'); if (!s3 || (s3 - s2 - 1) != 32) return 0; *s3 = 0;
+    if (hex2bin(s2 + 1, 32, salt_bin) != 16) return 0;
+
+    char *s4 = strchr(s3 + 1, '*'); if (!s4 || (s4 - s3 - 1) != 32) return 0; *s4 = 0;
+    if (hex2bin(s3 + 1, 32, iv_bin) != 16) return 0;
+
+    char *data_hex = s4 + 1;
+    int data_hexlen = hashlen - (data_hex - buf);
+    if (data_hexlen != 32) return 0;
+    if (hex2bin(data_hex, 32, ct) != 16) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 64000.0, (double)iter)) return 0;
+    WS->verify_iter = iter;
+
+    const EVP_MD *md;
+    switch (sc_type) {
+        case 1: md = EVP_sha1(); break;
+        case 2: md = EVP_sha256(); break;
+        case 3: md = EVP_sha512(); break;
+        default: return 0;
+    }
+
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, 16, iter, md, 32, dk);
+
+    /* AES-256-CBC decrypt */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;
+    AES_set_decrypt_key(dk, 256, aeskey);
+    AES_ecb_encrypt(ct, pt, aeskey, AES_DECRYPT);
+    /* XOR with IV for CBC */
+    int i;
+    for (i = 0; i < 16; i++) pt[i] ^= iv_bin[i];
+
+    /* First 12 bytes must be zero */
+    return (pt[0] == 0 && pt[1] == 0 && pt[2] == 0 && pt[3] == 0 &&
+            pt[4] == 0 && pt[5] == 0 && pt[6] == 0 && pt[7] == 0 &&
+            pt[8] == 0 && pt[9] == 0 && pt[10] == 0 && pt[11] == 0);
+}
+
+/* RORAILS-SHA1 (e962, hashcat mode 27200)
+ * Ruby on Rails Restful Auth: SHA1("--" + salt + "--" + pass + "--")
+ * Format: 40hex:40hex (hash:salt) */
+static int verify_rorails_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    char *buf = WS->gp1;
+
+    /* Format: 40hex_hash:40hex_salt */
+    if (hashlen != 81) return 0;
+    if (hashstr[40] != ':') return 0;
+    hex2bin(hashstr, 40, expected);
+    const char *salt = hashstr + 41;
+    /* Build: "--" + salt + "--" + pass + "--" */
+    int pos = 0;
+    buf[pos++] = '-'; buf[pos++] = '-';
+    memcpy(buf + pos, salt, 40); pos += 40;
+    buf[pos++] = '-'; buf[pos++] = '-';
+    memcpy(buf + pos, pass, passlen); pos += passlen;
+    buf[pos++] = '-'; buf[pos++] = '-';
+    SHA1((unsigned char *)buf, pos, computed);
+    return memcmp(computed, expected, 20) == 0;
+}
+
+/* AES-ECB NOKDF (e963/964/965, hashcat modes 26401/26402/26403)
+ * Password IS the AES key (zero-padded), salt IS the plaintext, hash IS the ciphertext
+ * Format: 32hex:32hex (ct:pt) */
+static int verify_aes_nokdf(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int keybits)
+{
+    unsigned char *ct_expected = (unsigned char *)WS->ctx1;
+    unsigned char *ct_computed = (unsigned char *)WS->ctx2;
+    unsigned char *pt = (unsigned char *)WS->ctx3;
+    unsigned char *key = (unsigned char *)WS->ctx4;
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;
+
+    /* Format: 32hex_ct:32hex_pt */
+    if (hashlen != 65) return 0;
+    if (hashstr[32] != ':') return 0;
+    int keylen_bytes = keybits / 8;
+    if (passlen > keylen_bytes) return 0;
+    hex2bin(hashstr, 32, ct_expected);
+    hex2bin(hashstr + 33, 32, pt);
+    /* Zero-pad password to key size */
+    memset(key, 0, keylen_bytes);
+    memcpy(key, pass, passlen);
+    AES_set_encrypt_key(key, keybits, aeskey);
+    AES_ecb_encrypt(pt, ct_computed, aeskey, AES_ENCRYPT);
+    return memcmp(ct_computed, ct_expected, 16) == 0;
+}
+
+static int verify_aes128_nokdf(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_aes_nokdf(hashstr, hashlen, pass, passlen, 128); }
+
+static int verify_aes192_nokdf(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_aes_nokdf(hashstr, hashlen, pass, passlen, 192); }
+
+static int verify_aes256_nokdf(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_aes_nokdf(hashstr, hashlen, pass, passlen, 256); }
+
+/* VMWARE-VMX (e966, hashcat mode 27400)
+ * PBKDF2-SHA1(pass, salt16, iter, 32) → AES-256-CBC decrypt → "type=key:cipher="
+ * Format: $vmx$0$iter$salt32hex$iv32hex+ct32hex */
+static int verify_vmware_vmx(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dk = (unsigned char *)WS->ctx1;         /* 32 bytes */
+    unsigned char *salt_bin = (unsigned char *)WS->ctx2;   /* 16 bytes */
+    unsigned char *iv_bin = (unsigned char *)WS->ctx3;     /* 16 bytes */
+    unsigned char *ct_bin = (unsigned char *)WS->ctx4;     /* 32 bytes */
+    unsigned char *pt = (unsigned char *)WS->ctx5;         /* 32 bytes */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;
+
+    /* Must start with $vmx$0$ */
+    if (hashlen < 40 || memcmp(hashstr, "$vmx$0$", 7) != 0) return 0;
+    const char *p = hashstr + 7;
+    /* Parse iteration count */
+    const char *d = strchr(p, '$');
+    if (!d) return 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    p = d + 1;
+    /* Parse salt (32 hex) */
+    d = strchr(p, '$');
+    if (!d || (d - p) != 32) return 0;
+    hex2bin(p, 32, salt_bin);
+    p = d + 1;
+    /* Remaining is iv(32hex) + ct(32hex) = 64 hex chars */
+    int remain = hashlen - (p - hashstr);
+    if (remain != 64) return 0;
+    hex2bin(p, 32, iv_bin);
+    hex2bin(p + 32, 32, ct_bin);
+
+    WS->verify_iter = iter;
+
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, 16, iter, EVP_sha1(), 32, dk);
+    AES_set_decrypt_key(dk, 256, aeskey);
+    /* CBC decrypt: block 0 */
+    AES_ecb_encrypt(ct_bin, pt, aeskey, AES_DECRYPT);
+    int i;
+    for (i = 0; i < 16; i++) pt[i] ^= iv_bin[i];
+    /* CBC decrypt: block 1 */
+    AES_ecb_encrypt(ct_bin + 16, pt + 16, aeskey, AES_DECRYPT);
+    for (i = 0; i < 16; i++) pt[i + 16] ^= ct_bin[i];
+    /* Verify: starts with "type=key:cipher=" (16 chars) */
+    return memcmp(pt, "type=key:cipher=", 16) == 0;
+}
+
+/* BCRYPTSHA512 (e967, hashcat mode 28400)
+ * bcrypt(hex(SHA512(pass)))
+ * Format: $2a$NN$... (standard bcrypt format) */
+static int verify_bcryptsha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha512 = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    char *result = (char *)WS->gp2;
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+    if (hashlen < 29 || hashstr[0] != '$') return 0;
+
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
+
+    SHA512(pass, passlen, sha512);
+    prmd5(sha512, hex, 128);
+    hex[128] = 0;
+
+    if (!crypt_rn(hex, hashstr, result, WS_GP_SIZE))
+        return 0;
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* POSTGRESSCRAM256 (e968, hashcat mode 28600)
+ * PostgreSQL SCRAM-SHA-256:
+ * PBKDF2-SHA256(pass, salt, iter) → HMAC-SHA256("Client Key") → SHA256 = StoredKey
+ * Format: SCRAM-SHA-256$iter:b64salt$b64StoredKey:b64ServerKey */
+static int verify_postgresscram256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salted_pass = (unsigned char *)WS->ctx1;  /* 32 bytes */
+    unsigned char *client_key = (unsigned char *)WS->ctx2;   /* 32 bytes */
+    unsigned char *stored_key = (unsigned char *)WS->ctx3;   /* 32 bytes */
+    unsigned char *expected   = (unsigned char *)WS->ctx4;   /* 32 bytes */
+    unsigned char *salt_bin   = (unsigned char *)WS->gp1;    /* up to 64 bytes */
+
+    if (hashlen < 30 || memcmp(hashstr, "SCRAM-SHA-256$", 14) != 0) return 0;
+    const char *p = hashstr + 14;
+    /* Parse iter:b64salt$b64StoredKey:b64ServerKey */
+    const char *colon1 = strchr(p, ':');
+    if (!colon1) return 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    const char *b64salt = colon1 + 1;
+    const char *dollar = strchr(b64salt, '$');
+    if (!dollar) return 0;
+    int b64salt_len = dollar - b64salt;
+    const char *b64stored = dollar + 1;
+    const char *colon2 = strchr(b64stored, ':');
+    if (!colon2) return 0;
+    int b64stored_len = colon2 - b64stored;
+
+    WS->verify_iter = iter;
+
+    /* Decode salt */
+    int slen = base64_decode(b64salt, b64salt_len, salt_bin, 64);
+    if (slen < 1) return 0;
+    /* Decode expected StoredKey */
+    int hlen = base64_decode(b64stored, b64stored_len, expected, 32);
+    if (hlen != 32) return 0;
+
+    /* PBKDF2-SHA256 */
+    PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+        salt_bin, slen, iter, EVP_sha256(), 32, salted_pass);
+    /* ClientKey = HMAC-SHA256(SaltedPassword, "Client Key") */
+    unsigned int hmac_len = 0;
+    HMAC(EVP_sha256(), salted_pass, 32,
+         (unsigned char *)"Client Key", 10, client_key, &hmac_len);
+    /* StoredKey = SHA256(ClientKey) */
+    SHA256(client_key, 32, stored_key);
+
+    return memcmp(stored_key, expected, 32) == 0;
+}
+
+/* AWSSIGV4 (e969, hashcat mode 28700)
+ * AWS Signature Version 4: HMAC chain → signature
+ * Format: $AWS-Sig-v4$0$longdate$region$service$canonical$digest */
+static int verify_awssigv4(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *hbuf1 = (unsigned char *)WS->ctx1;   /* 32 bytes */
+    unsigned char *hbuf2 = (unsigned char *)WS->ctx2;   /* 32 bytes */
+    unsigned char *sig   = (unsigned char *)WS->ctx3;   /* 32 bytes */
+    unsigned char *expected = (unsigned char *)WS->ctx4; /* 32 bytes */
+    char *sts_buf = WS->gp1;                            /* StringToSign */
+    unsigned char *kSecret = (unsigned char *)WS->gp2;   /* "AWS4" + pass */
+
+    if (hashlen < 50 || memcmp(hashstr, "$AWS-Sig-v4$0$", 14) != 0) return 0;
+    const char *p = hashstr + 14;
+    /* Parse: longdate$region$service$canonical$digest */
+    const char *d1 = strchr(p, '$');
+    if (!d1) return 0;
+    int longdate_len = d1 - p;
+    if (longdate_len < 8) return 0;
+    const char *region = d1 + 1;
+    const char *d2 = strchr(region, '$');
+    if (!d2) return 0;
+    int region_len = d2 - region;
+    const char *service = d2 + 1;
+    const char *d3 = strchr(service, '$');
+    if (!d3) return 0;
+    int service_len = d3 - service;
+    const char *canonical = d3 + 1;
+    const char *d4 = strchr(canonical, '$');
+    if (!d4 || (d4 - canonical) != 64) return 0;
+    const char *digest = d4 + 1;
+    int digest_len = hashlen - (digest - hashstr);
+    if (digest_len != 64) return 0;
+
+    /* Decode expected digest */
+    hex2bin(digest, 64, expected);
+
+    /* kSecret = "AWS4" + password */
+    memcpy(kSecret, "AWS4", 4);
+    memcpy(kSecret + 4, pass, passlen);
+    int kSecretLen = 4 + passlen;
+
+    unsigned int hmac_len = 0;
+    /* kDate = HMAC-SHA256(kSecret, date[0:8]) */
+    HMAC(EVP_sha256(), kSecret, kSecretLen,
+         (unsigned char *)p, 8, hbuf1, &hmac_len);
+    /* kRegion = HMAC-SHA256(kDate, region) */
+    HMAC(EVP_sha256(), hbuf1, 32,
+         (unsigned char *)region, region_len, hbuf2, &hmac_len);
+    /* kService = HMAC-SHA256(kRegion, service) */
+    HMAC(EVP_sha256(), hbuf2, 32,
+         (unsigned char *)service, service_len, hbuf1, &hmac_len);
+    /* kSigning = HMAC-SHA256(kService, "aws4_request") */
+    HMAC(EVP_sha256(), hbuf1, 32,
+         (unsigned char *)"aws4_request", 12, hbuf2, &hmac_len);
+
+    /* Build StringToSign */
+    int sts_len = snprintf(sts_buf, WS_GP_SIZE,
+        "AWS4-HMAC-SHA256\n%.*s\n%.8s/%.*s/%.*s/aws4_request\n%.*s",
+        longdate_len, p, p, region_len, region,
+        service_len, service, 64, canonical);
+
+    /* signature = HMAC-SHA256(kSigning, StringToSign) */
+    HMAC(EVP_sha256(), hbuf2, 32,
+         (unsigned char *)sts_buf, sts_len, sig, &hmac_len);
+
+    return memcmp(sig, expected, 32) == 0;
+}
+
+/* KRB5DB17/18 (e970/971, hashcat modes 28800/28900)
+ * Kerberos 5 DB: PBKDF2-SHA1 → AES-CBC(nfold_kerberos) → key
+ * Format: $krb5db$17$user$realm$hash or $krb5db$18$user$realm$hash */
+static int verify_krb5db(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int etype)
+{
+    unsigned char *pbkdf_out = (unsigned char *)WS->ctx1;    /* 32 bytes */
+    unsigned char *key_bytes = (unsigned char *)WS->ctx2;    /* 32 bytes */
+    unsigned char *expected  = (unsigned char *)WS->ctx3;    /* 32 bytes */
+    unsigned char *pbkdf_salt = (unsigned char *)WS->gp1;    /* realm+user */
+    AES_KEY *aeskey = (AES_KEY *)WS->gp2;
+    unsigned char iv[16];
+
+    static const unsigned char nfold_kerberos[16] = {
+        0x6b,0x65,0x72,0x62,0x65,0x72,0x6f,0x73,
+        0x7b,0x9b,0x5b,0x2b,0x93,0x13,0x2b,0x93};
+
+    int keylen = (etype == 17) ? 16 : 32;
+    int expected_hexlen = keylen * 2;
+    char prefix[16];
+    snprintf(prefix, sizeof(prefix), "$krb5db$%d$", etype);
+    int prefix_len = strlen(prefix);
+
+    if (hashlen < prefix_len + 10 || memcmp(hashstr, prefix, prefix_len) != 0) return 0;
+
+    const char *user = hashstr + prefix_len;
+    const char *d1 = strchr(user, '$');
+    if (!d1 || d1 == user) return 0;
+    int userlen = d1 - user;
+    const char *realm = d1 + 1;
+    const char *d2 = strchr(realm, '$');
+    if (!d2 || d2 == realm) return 0;
+    int realmlen = d2 - realm;
+    const char *hash = d2 + 1;
+    /* Skip optional *SPN* field */
+    if (*hash == '*') {
+        const char *d3 = strchr(hash + 1, '*');
+        if (d3 && *(d3+1) == '$') hash = d3 + 2;
+        else return 0;
+    }
+    int hash_hexlen = hashlen - (hash - hashstr);
+    if (hash_hexlen != expected_hexlen) return 0;
+
+    hex2bin(hash, hash_hexlen, expected);
+
+    /* PBKDF2 salt = realm + user */
+    if (realmlen + userlen > WS_GP_SIZE - 1) return 0;
+    memcpy(pbkdf_salt, realm, realmlen);
+    memcpy(pbkdf_salt + realmlen, user, userlen);
+
+    PKCS5_PBKDF2_HMAC_SHA1((const char *)pass, passlen,
+        pbkdf_salt, realmlen + userlen, 4096, keylen, pbkdf_out);
+
+    /* Key derivation: AES-CBC-encrypt(pbkdf_out, nfold_kerberos) */
+    memset(iv, 0, 16);
+    AES_set_encrypt_key(pbkdf_out, keylen * 8, aeskey);
+    AES_cbc_encrypt(nfold_kerberos, key_bytes, 16, aeskey, iv, AES_ENCRYPT);
+    if (etype == 18) {
+        memset(iv, 0, 16);
+        AES_set_encrypt_key(pbkdf_out, keylen * 8, aeskey);
+        AES_cbc_encrypt(key_bytes, key_bytes + 16, 16, aeskey, iv, AES_ENCRYPT);
+    }
+
+    return memcmp(key_bytes, expected, keylen) == 0;
+}
+
+static int verify_krb5db17(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_krb5db(hashstr, hashlen, pass, passlen, 17); }
+
+static int verify_krb5db18(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_krb5db(hashstr, hashlen, pass, passlen, 18); }
 
 /* BLAKE2B512 with $BLAKE2$ prefix (e841, hashcat mode 600)
  * Format: $BLAKE2$128hex  or  bare 128hex */
@@ -17718,14 +19983,57 @@ static void init_hashtypes(void)
     HTV("PWSAFE3",      0, verify_pwsafe3, "50575333e4e2a590a5e5c8269f57ec04a8a1c0c03da55b311c51236dab8c6b96b0afca0200080000a146c17e011363b180b2a121713dc6ea94accb57a2751a99e67528a5872622bd:password123");
     HTV("IKEPSK_MD5",   0, verify_ikepsk_md5, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:37b806b82e7cd215df7283dc417e61a1:password123");
     HTV("IKEPSK_SHA1",  0, verify_ikepsk_sha1, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:8bcc01c0e06096876785012e8ddb071e7b629917:password123");
-    HTV("SAP-BCODE",          0, verify_sap_bcode_full, "027642760180$77EC38630C08DF8D:HASHCAT");
-    HTV("SAP-BCODE4",         0, verify_sap_bcode4, "027642760180$77EC386300000000:HASHCAT");
+    HTV("SAP-BCODE",          0, verify_sap_bcode_full, "ABCDEFGH$9512E367C5A82CC2:pass1234");
+    HTV("SAP-BCODE4",         0, verify_sap_bcode4, "ABCDEFGH$9512E36700000000:pass1234");
     HTV("SAP-PASSCODE",       0, verify_sap_passcode_full, "ABCDEFGH$66251d3727a1d78eac92fe616a5174aa8a8f6632:password123");
     HTV("SAP-PASSCODE5",      0, verify_sap_passcode5, "ABCDEFGH$66251d3727000000000000000000000000000000:password123");
     HTV("AS400-DES",          0, verify_as400des, "$as400$des$*OPEN3*EC76FC0DEF5B0A83:SYS1");
     HTV("RACF-KDFAES",       0, verify_racf_kdfaes, "$racf-kdfaes$*USER*E7D7E66D000180000008003200100010*00112233445566778899AABBCCDDEEFF*57558AFDA9513B926E3E2BE86DFAF72D:pass1234");
     HTV("PS_TOKEN",           0, verify_ps_token, "d7ace0616a3ae62d2c271e3bb3fa4204099cfea0:deadbeef01020304:password123");
     HTV("WINPHONE",           0, verify_winphone, "d032042e65aea887f5d3a8b9a18dfd66fb4c7df6bd45721f5f3a18dda8f01f0f:4141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141:password123");
+    HTV("TACACS",             0, verify_tacacs, "$tacacs-plus$0$5fde8e68$2c388f382ca4$c006:password123");
+    HTV("APPLE-SECURE-NOTES", 0, verify_apple_secure_notes, "$ASN$*1*20000*80771171105233481004850004085037*ead1884ed4297f1087be86ae90ab696018ef07cc96fefe57:password123");
+    HTV("APPLE-SECURE-NOTES", 0, verify_apple_secure_notes, "$fvde$1$16$80771171105233481004850004085037$20000$ead1884ed4297f1087be86ae90ab696018ef07cc96fefe57:password123");
+    HTV("CRAMMD5-DOVECOT",    0, verify_crammd5_dovecot, "{CRAM-MD5}947d35b03647a7dbeb55e59aa5bee3a100000000000000000000000000000000:password123");
+    HTV("JWT",                0, verify_jwt, "eyJhbGciOiJIUzI1NiJ9.eyIzNDM2MzQyMCI6NTc2ODc1NDd9.YVWX_3IWKC7NpoDVtyr4Qzm6FQVA62aeHiTqj4U5ojI:password123");
+    HTV("QNX-MD5",           0, verify_qnx_md5, "@m,1000@88d84096c0656f7013e9c03af8c6f158@8741857532330050:password123");
+    HTV("QNX-SHA256",        0, verify_qnx_sha256, "@s,1000@0f907e0c5ae79e486c0979f31b2d2ed20eaa38d6a04a720749530f12bd5bfb94@5498317092471604:password123");
+    HTV("QNX-SHA512",        0, verify_qnx_sha512, "@S,1000@a16f7fee0d37b2e3bad06ba26f0caff09095e19face700ecdd8d78d626d358da4408951f714c609122444757af7376555d4733e445ca0b5ecc65b4fa4209fae5@2257314490293159:password123");
+    HTV("QNX7-SHA512",       0, verify_qnx7_sha512, "@S,4096@GSsZxLYkRND57XdXo2rfNQ0DtKdME1c7SWdrjyFvq4RgFuTWj2NlkVJHIslAY1lIQh7j9VhN8BVVTu7jDKKqXA==@NDY2MDEwNjk3YjBjYzM2MzliMzc3Mzc0ZTNiMTAzNzE=:password123");
+    HTV("SHA1-S1PS2",        0, verify_sha1_s1ps2, "2c4b7771baf3ee5ea6576c528582db4f937db71b:18463812876898603420835420139870031762867:4449516425193605979760642927684590668549584534278112685644182848763890902699756869283142014018311837025441092624864168514500447147373198033271040848851687108629922695275682773136540885737874252666804716579965812709728589952868736177317883550827482248620334:password123");
+    HTV("RAILS-RESTFUL",     0, verify_rails_restful, "738a19a9439ffbd44a5b44eb9c84843b571f4644:238769868762:8962783556527653675:password123");
+    HTV("KRB5PA-17",         0, verify_krb5pa_17, "$krb5pa$17$hashcat$HASHCATDOMAIN.COM$9f385572cb6efe977d37c5c4f285347be798771ab0555249fd1aa280b629cb584c6908bace807c143f1c9bcc718859e42cf505567399d3d1:password123");
+    HTV("KRB5PA-18",         0, verify_krb5pa_18, "$krb5pa$18$hashcat$HASHCATDOMAIN.COM$b991fe5d29b5fcf6b35a2cf8e053ae450597ec25972cdf1b2b86033025ab2773036d8cdbd2d35549081e0ed111926cc733f5c5c65dd97b38:password123");
+    HTV("WPA-PMKID",         0, verify_wpa_pmkid, "WPA*01*73e1a080000ac80417aa784bec8627fa*fc690c158264*f4747f87f9f4*686173686361742d6573736964***:password123");
+    HTV("WPA-EAPOL",         0, verify_wpa_eapol, "WPA*02*7703121020ac20025ce3347aba2ccf55*fc690c158264*f4747f87f9f4*686173686361742d6573736964*10e3be3b005a629e89de088d6a2fdc489db83ad4764f2d186b9cde15446e972e*0103007502010a0000000000000000000148ce2ccba9c1fda130ff2fbbfb4fd3b063d1a93920b0f7df54a5cbf787b16171000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001630140100000fac040100000fac040100000fac028000*00:password123");
+    HTV("ANSIBLE-VAULT",     0, verify_ansible_vault, "$ansible$0*0*6b761adc6faeb0cc0bf197d3d4a4a7d3f1682e4b169cae8fa6b459b3214ed41e*426d313c5809d4a80a4b9bc7d4823070*5c9c6a909aae4c1eb624a6ae99b952586a9ed57eb938cbe089a950d9213a98aa:password123");
+    HTV("APFS",              0, verify_apfs, "$fvde$2$16$58778104701476542047675521040224$20000$c75ba59230e2d14c19eb26a75176d853c88dce8ec8996f745fff5050073987391ac0092d7009b131:password123");
+    HTV("OTM-SHA256",        0, verify_otm_sha256, "otm_sha256:1000:1234567890:VXxvkQcU+34QHlMrdScpmdbKTHi8oA41M4VBfy1z3zc=:password123");
+    HTV("TELEGRAM-SHA256",   0, verify_telegram_sha256, "$telegram$0*3f5ac7633b523d99d01ea3f99950be1d783d55e377e06f3bff98ccb9a3b20122*25184098058621950709328221838128:password123");
+    HTV("WEB2PY-SHA512",     0, verify_web2py_sha512, "pbkdf2(1000,20,sha512)$744943$ab14362b46e20205dbab6fa947da10c05ee34027:password123");
+    HTV("SOLARWINDS",        0, verify_solarwinds, "$solarwinds$0$admin$M+blDF6m56Y24YMVrjDDGUEbGVsviTpp5JYS+pHfym1Z9+UDDw6iHfZRUknm89UUa/EnuH5t7x8MREolxvf7jA==:password123");
+    HTV("SOLARWINDS2",       0, verify_solarwinds, "$solarwinds$1$3pHkk55NTYpAeV3EJjcAww==$G/b0s7BdfWnW4288yY55lK3McRo2dP9BdjInZtv7oo6V+JVh8wUHd1K13pfwc6E2X/YEZJ63kz3GMXKrH/v27A==:password123");
+    HTV("SIMPLACMS",         0, verify_simplacms, "441221148454752d603b223d12977320:8e86a279d6e182b3c811c559e6b15484:password123");
+    HTV("APPLE-KEYCHAIN",    0, verify_apple_keychain, "$keychain$*74cd1efd49e54a8fdc8750288801e09fa26a33b1*66001ad4e0498dc7*cfc13fbe9043b537f82101e5ff7c1dcda68e546fa1d225004969db9aaa8ffa0a09391a6ea5acc434da322198378f3cd0:password123");
+    HTV("APPLE-IWORK",       0, verify_apple_iwork, "$iwork$2$1$1$4000$b31b7320d1e7a5ee$01f54d6f9e5090eb16fef2b05f8242bc$be7d23232a5fc51d875ef4343586aff0603cf9df10f24e33c34edd813eb5e770ba0b6251af83186a097820a8fabc4d1effa198a5d4556e21a8a32d3ea60781db:password123");
+    HTV("BITWARDEN",          0, verify_bitwarden, "$bitwarden$2*100000*2*bm9yZXBseUBoYXNoY2F0Lm5ldA==*7DPaaAl24R+4E1ehI4S1N2kiIBY9H3W0qS2C8o5v4nE=:password123");
+    HTV("MONGODB-SHA1",       0, verify_mongodb_sha1, "$mongodb-scram$*0*dXNlcg==*10000*4p+f1tKpK18hQqrVr0UGOw==*+TqMh0BgBUxzv36wfXoRiKwfw34=:password123");
+    HTV("MONGODB-SHA256",     0, verify_mongodb_sha256, "$mongodb-scram$*1**15000*qYaA1K1ZZSSpWfY+yqShlcTn0XVcrNipxiYCLQ==*B3T1SAp4Rlryqmm5sdJdGUzAM7lzQyH7h/XPSN71mFA=:password123");
+    HTV("FORTIGATE256",      0, verify_fortigate256, "SH2FCIhM0IUIQVFJgcDRi8y4h+RPUoet9Ij4x2A2r8N+kp3ClVyJltoBYACm5M=:password123");
+    HTV("UMBRACO",            0, verify_umbraco, "tq6LWqKjIla9vxhahealHJxJY8s=:password123");
+    HTV("DAHUA-AUTH",         0, verify_dahua_auth, "sY6ww5dO:password123");
+    HTV("BESDER-AUTH",        0, verify_besder_auth, "sYyowxdO:password123");
+    HTV("SQLCIPHER",          0, verify_sqlcipher, "SQLCIPHER*1*64000*25548249195677404156261816261456*85b5e156e1cf1e0be5e9f4217186817b*33265289beab040faf0d638861cba205:password123");
+    HTV("RORAILS-SHA1",      0, verify_rorails_sha1, "9363ba0339ef7beb13b59f3b8dbcf3b8b5fbe6bf:5dcc47b04c49d3c8e1b9e4ec367fddeed21b7b85:password123");
+    HTV("AES128-NOKDF",      0, verify_aes128_nokdf, "0458fc918468d9cca6e8e7e8bdb85801:86046627772965328523223752173724:password123");
+    HTV("AES192-NOKDF",      0, verify_aes192_nokdf, "68045bbdee1c8d7c9d167d76177be05c:49869364034411376791729962721320:password123");
+    HTV("AES256-NOKDF",      0, verify_aes256_nokdf, "6f7f3aaf0e36cd496fa9d704584afb42:61270210011294880287232432636227:password123");
+    HTV("VMWARE-VMX",        0, verify_vmware_vmx, "$vmx$0$10000$264bbab02fdf7c1a793651120bec3723$cbb368564d8dfb99f509d4922f469341a6e18a778759e00378c50087feaf1552:password123");
+    HTV("BCRYPTSHA512",      0, verify_bcryptsha512, "$2a$05$RndSa1tRndSa1tRndSa1tuGAL47xENrIOe1cL89GFQH/bc4mp64Hy:password123");
+    HTV("POSTGRESSCRAM256",  0, verify_postgresscram256, "SCRAM-SHA-256$4096:IKfxyYOHyqPkoSUM8TgKkA==$v6UrTg19oAlY0aDMyijgZwTq9fEGNIRE650DWrsqIXQ=:*:password123");
+    HTV("AWSSIGV4",          0, verify_awssigv4, "$AWS-Sig-v4$0$20220221T000000Z$us-east-1$s3$421ab6e4af9f49fa30fa9c253fcfeb2ce91668e139e6b23303c5f75b04f8a3c4$ef3a8acaee907d0810ebed5fc7fd33072c5fd787f42e17187b9a08aefdb0bcdf:password123");
+    HTV("KRB5DB17",          0, verify_krb5db17, "$krb5db$17$test$TEST.LOCAL$ea35f3bdc1c4fdb75c708405d8273e51:password123");
+    HTV("KRB5DB18",          0, verify_krb5db18, "$krb5db$18$test$TEST.LOCAL$d7fbc0329154eda6b067f57d206199173dfb0b5b3fea74d0ddda2127981d62f1:password123");
     HTV("BLAKE2B512",        0, verify_blake2b512, "$BLAKE2$fbdba996cade3bae2d948c2f03f8149ffa7068584731ac6efbef1688e64609b6969a52dcc203b74aa87d6d9d1b0cd93bea724cddd12443f2b808bc03776b81cc:password123");
     HTV("BLAKE2B512PASSSALT", 0, verify_blake2b512passsalt, "$BLAKE2$74e4702fac1576179c957877cb8b4f1f5a8a5bfa3c2fd8a572ede80c6aec857152384db229489b0b89db69c62e9597637516d68a9bda2ce661464eb9d7b6f11c:testsalt:password123");
     HTV("BLAKE2B512SALTPASS", 0, verify_blake2b512saltpass, "$BLAKE2$b0c082a1f1e2a385668619b450897546ed0f382598c0e355198a493479f0c9915ebe750092c34f844de701ab3f77ea5d3e966016036122ce4eeeee509444388a:testsalt:password123");
@@ -19911,6 +22219,40 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     *outlen = pos;
 }
 
+/* ---- $HEX[] literal retry helper ---- */
+
+/* When a password field is literally "$HEX[41]" (8 bytes), decode_hex_password
+ * converts it to "A" (1 byte).  If that fails verification, re-encode the
+ * literal bytes as $HEX[244845585b34315d] so verify_item decodes it back to
+ * the 8-byte literal string "$HEX[41]".  Allocates from batch buffer.
+ * Returns encoded length, or -1 if not applicable / no room. */
+static int hex_literal_reencode(const char *pass, int passlen,
+    struct batch *b, char **out)
+{
+    int enclen, pos, j;
+    char *enc;
+
+    if (passlen < 6 || strncmp(pass, "$HEX[", 5) != 0)
+        return -1;
+    enclen = 5 + passlen * 2 + 1;  /* $HEX[ + hex(pass) + ] */
+    if (b->bufused + enclen + 1 > BATCH_BUFSIZE)
+        return -1;
+
+    enc = b->buf + b->bufused;
+    memcpy(enc, "$HEX[", 5);
+    pos = 5;
+    for (j = 0; j < passlen; j++) {
+        unsigned char c = (unsigned char)pass[j];
+        enc[pos++] = hextab_lc[(c >> 4) & 0xf];
+        enc[pos++] = hextab_lc[c & 0xf];
+    }
+    enc[pos++] = ']';
+    enc[pos] = 0;
+    b->bufused += pos + 1;
+    *out = enc;
+    return pos;
+}
+
 /* ---- Adaptive batch sizing ---- */
 
 static long long bench_one_type_timed(int idx, double max_seconds);
@@ -19998,6 +22340,41 @@ static void worker(void *dummy)
                 /* Has alternate split or fullpass with unsalted/unknown hot type */
                 hard[nhard++] = i;
             } else {
+                /* $HEX[] literal retry: password was decoded from $HEX[...]
+                 * but failed; retry with the literal string as the password */
+                if (b->items[i].passlen >= 6 &&
+                    strncmp(b->items[i].password, "$HEX[", 5) == 0) {
+                    char *reenc;
+                    int relen = hex_literal_reencode(b->items[i].password,
+                        b->items[i].passlen, b, &reenc);
+                    if (relen > 0) {
+                        char *orig_pass = b->items[i].password;
+                        int orig_plen = b->items[i].passlen;
+                        b->items[i].password = reenc;
+                        b->items[i].passlen = relen;
+                        verify_item(&b->items[i], &hot_type, &hot_iter,
+                                    hot_list, &nhot);
+                        if (b->items[i].verified) {
+                            atomic_fetch_add(&StatSolved[b->items[i].match_type - Hashtypes], 1);
+                            hot_list_add(hot_list, &nhot,
+                                         b->items[i].match_type - Hashtypes,
+                                         (b->items[i].match_type->flags & HTF_SALTED)
+                                             ? b->items[i].saltlen : -1);
+                            format_output(&b->items[i], WS->fmtbuf, &olen);
+                            if (outpos + olen > (int)(MAXLINE * 2) - 1) {
+                                possess(OutLock);
+                                fwrite(WS->outbuf, 1, outpos, Outfp);
+                                release(OutLock);
+                                outpos = 0;
+                            }
+                            memcpy((char *)WS->outbuf + outpos, WS->fmtbuf, olen);
+                            outpos += olen;
+                            continue;
+                        }
+                        b->items[i].password = orig_pass;
+                        b->items[i].passlen = orig_plen;
+                    }
+                }
                 /* Unresolved → stderr */
                 int elen = b->items[i].linelen;
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
@@ -20069,6 +22446,66 @@ static void worker(void *dummy)
                 item->alt_password = NULL; item->alt_passlen = 0;
                 verify_item(item, &hot_type, &hot_iter, hot_list, &nhot);
                 if (item->verified) goto hard_ok;
+            }
+
+            /* $HEX[] literal retry: re-run splits with literal password */
+            if (item->rest && item->restlen >= 6) {
+                const char *_rp = item->rest;
+                int _rlen = item->restlen;
+                int _hex_found = 0;
+
+                /* Re-scan colon positions for splits with $HEX[ passwords */
+                const char *_colpos[256];
+                int _nrc = 0;
+                { int _j;
+                  for (_j = _rlen - 1; _j >= 0 && _nrc < 256; _j--)
+                    if (_rp[_j] == ':') _colpos[_nrc++] = _rp + _j;
+                }
+
+                /* Splits at each colon, right to left */
+                { int _ci;
+                  for (_ci = 0; _ci < _nrc && !_hex_found; _ci++) {
+                    const char *_cp = _colpos[_ci];
+                    char *_pw = (char *)_cp + 1;
+                    int _pwlen = _rlen - (int)(_cp + 1 - _rp);
+                    if (_pwlen >= 6 && strncmp(_pw, "$HEX[", 5) == 0) {
+                        char *_reenc;
+                        int _relen = hex_literal_reencode(_pw, _pwlen,
+                                                          b, &_reenc);
+                        if (_relen > 0) {
+                            item->salt = (char *)_rp;
+                            item->saltlen = _cp - _rp;
+                            item->password = _reenc;
+                            item->passlen = _relen;
+                            item->alt_salt = NULL; item->alt_saltlen = 0;
+                            item->alt_password = NULL; item->alt_passlen = 0;
+                            verify_item(item, &hot_type, &hot_iter,
+                                        hot_list, &nhot);
+                            if (item->verified) { _hex_found = 1; break; }
+                        }
+                    }
+                  }
+                }
+
+                /* No salt: entire rest as literal password */
+                if (!_hex_found && _rlen >= 6 &&
+                    strncmp(_rp, "$HEX[", 5) == 0) {
+                    char *_reenc;
+                    int _relen = hex_literal_reencode(_rp, _rlen, b, &_reenc);
+                    if (_relen > 0) {
+                        item->salt = NULL;
+                        item->saltlen = 0;
+                        item->password = _reenc;
+                        item->passlen = _relen;
+                        item->alt_salt = NULL; item->alt_saltlen = 0;
+                        item->alt_password = NULL; item->alt_passlen = 0;
+                        verify_item(item, &hot_type, &hot_iter,
+                                    hot_list, &nhot);
+                        if (item->verified) _hex_found = 1;
+                    }
+                }
+
+                if (_hex_found) goto hard_ok;
             }
 
             /* Unresolved → stderr (original line) */
@@ -21377,7 +23814,16 @@ static void init_rates(void)
         {915, 668LL}, {916, 2203364LL}, {917, 203LL}, {918, 92LL}, 
         {919, 1139LL}, {920, 362393LL}, {921, 395003LL}, {922, 2379168LL}, 
         {923, 2407406LL}, {924, 861762LL}, {925, 884282LL}, {926, 3979745LL}, 
-        {927, 1290665LL}, {928, 668249LL}, {929, 18LL}, 
+        {927, 1290665LL}, {928, 668249LL}, {929, 18LL}, {938, 1937987LL}, 
+        {939, 399672LL}, {940, 372LL}, {941, 187LL}, {942, 123LL}, 
+        {943, 123LL}, {944, 39LL}, {945, 39LL},
+        {946, 3393LL}, {947, 1668796LL}, {948, 406LL}, {949, 16LL},
+        {950, 16LL}, {951, 678628LL}, {952, 434LL}, {953, 216LL},
+        {954, 5LL}, {955, 88LL}, {956, 36LL}, {957, 2027359LL},
+        {958, 633150LL}, {959, 5716099LL}, {960, 5602196LL}, {961, 7LL},
+        {962, 2522995LL}, {963, 4101724LL}, {964, 4076481LL}, {965, 3550762LL},
+        {966, 46LL}, {967, 416LL}, {968, 158LL}, {969, 104212LL},
+        {970, 248LL}, {971, 156LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {
