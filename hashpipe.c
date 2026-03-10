@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.68 2026/03/09 16:06:47 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.73 2026/03/10 15:14:54 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +78,7 @@ static unsigned char *MDC2(const unsigned char *d, size_t n, unsigned char *md)
 }
 #endif
 #include "yescrypt/yescrypt.h"
+#include "argon2/argon2.h"
 
 /* SPH library (SHA-3 competition candidates + classic hashes) */
 #include <sph_blake.h>
@@ -915,6 +916,7 @@ struct MapHashcat {
     {21420, 826},  /* 21420 | sha256($salt.sha256_raw($pass)) */
     {21900, 821},  /* 21900 | md5(md5($pass.$salt).$pepper) */
     {22000, 942},  /* 22000 | WPA-PBKDF2-PMKID+EAPOL */
+    {22001, 990},  /* 22001 | WPA-PMK-PMKID+EAPOL (raw PMK) */
     {22200, 893},  /* 22200 | Citrix NetScaler SHA512 */
     {22300, 825},  /* 22300 | sha256($salt.$pass.$salt) */
     {22301, 947},  /* 22301 | Telegram Mobile App Passcode (SHA256) */
@@ -937,6 +939,7 @@ struct MapHashcat {
     {26403, 965},  /* 26403 | AES-256-ECB NOKDF */
     {27200, 962},  /* 27200 | Ruby on Rails Restful Auth */
     {27400, 966},  /* 27400 | VMware VMX */
+    {27800, 972},  /* 27800 | MurmurHash3 */
     {28400, 967},  /* 28400 | bcrypt(sha512($pass)) */
     {28600, 968},  /* 28600 | PostgreSQL SCRAM-SHA-256 */
     {28700, 969},  /* 28700 | Amazon AWS Signature Version 4 */
@@ -948,16 +951,32 @@ struct MapHashcat {
     {30420, 36},   /* 30420 | DANE RFC7929/RFC8162 SHA2-256 (truncated SHA256RAW) */
     {30500, 820},  /* 30500 | md5(md5($salt).md5(md5($pass))) */
     {30600, 577},  /* 30600 | bcrypt(sha256($pass)) */
+    {30601, 989},  /* 30601 | bcrypt(HMAC-SHA256($pass)) */
     {30700, 65535}, /* Anope IRC Services — not PBKDF2 */
     {31000, 844},  /* 31000 | BLAKE2s-256 */
+    {31100, 988},  /* 31100 | ShangMi 3 (SM3) */
+    {31200, 973},  /* 31200 | Veeam VBK */
+    {31300, 974},  /* 31300 | MS SNTP */
     {31700, 819},  /* 31700 | md5(md5(md5($pass).$salt).$pepper) */
+    {32000, 975},  /* 32000 | NetIQ SSPR (MD5) */
+    {32010, 976},  /* 32010 | NetIQ SSPR (SHA1) */
+    {32020, 977},  /* 32020 | NetIQ SSPR (SHA-1 with Salt) */
+    {32030, 978},  /* 32030 | NetIQ SSPR (SHA-256 with Salt) */
+    {32031, 978},  /* 32031 | Adobe AEM (SSPR, SHA-256 with Salt) */
+    {32040, 979},  /* 32040 | NetIQ SSPR (SHA-512 with Salt) */
+    {32041, 979},  /* 32041 | Adobe AEM (SSPR, SHA-512 with Salt) */
+    {32050, 532},  /* 32050 | NetIQ SSPR (PBKDF2WithHmacSHA1) → PBKDF2_SHA1 */
+    {32300, 980},  /* 32300 | Empire CMS (Admin password) */
     {32410, 387},  /* 32410 | sha512(sha512($pass).$salt) */
     {32420, 510},  /* 32420 | sha512(sha512_bin($pass).$salt) */
     {32600, 827},  /* 32600 | whirlpool($salt.$pass.$salt) */
     {32800, 188},  /* 32800 | md5(sha1(md5($pass))) */
+    {32900, 981},  /* 32900 | PBKDF1-SHA1 */
     {33100, 818},  /* 33100 | md5($salt.md5($pass).$salt) — note: different from 515 which is md5($salt.md5($pass.$salt)) */
     {33300, 828},  /* 33300 | HMAC-BLAKE2S */
     {33600, 816},  /* 33600 | ripemd320($pass) */
+    {33700, 982},  /* 33700 | Microsoft Online Account */
+    {33800, 983},  /* 33800 | WBB4 bcrypt(bcrypt($pass)) */
     {33650, 799},  /* 33650 | HMAC-RIPEMD320 (key = $pass) */
     {33660, 213},  /* 33660 | HMAC-RIPEMD320 (key = $salt) */
     {33900, 895},  /* 33900 | Citrix NetScaler (PBKDF2-HMAC-SHA256) */
@@ -969,6 +988,14 @@ struct MapHashcat {
     {34800, 845},  /* 34800 | BLAKE2b-256 */
     {34810, 846},  /* 34810 | BLAKE2b-256($pass.$salt) */
     {34820, 847},  /* 34820 | BLAKE2b-256($salt.$pass) */
+    {34000, 987},  /* 34000 | Argon2 */
+    {35000, 984},  /* 35000 | SAP CODVN H (PWDSALTEDHASH) isSHA512 */
+    {35100, 985},  /* 35100 | sm3crypt $sm3$ */
+    {35200, 986},  /* 35200 | AS/400 SSHA1 */
+    {33000, 991},  /* 33000 | md5($salt1.$pass.$salt2) */
+    {35500, 993},  /* 35500 | WordPress bcrypt(hmac-sha384($pass)) */
+    {35600, 994},  /* 35600 | gost12512crypt */
+    {35800, 992},  /* 35800 | Symfony Legacy SHA256 */
     {65535, 65535}  /* EOF */
 };
 
@@ -1421,6 +1448,29 @@ char *Types[] = {
     "AWSSIGV4",
     "KRB5DB17",
     "KRB5DB18",
+    "MURMUR3",
+    "VEEAM-VBK",
+    "MSSNTP",
+    "SSPR-MD5",
+    "SSPR-SHA1",
+    "SSPR-SHA1S",
+    "SSPR-SHA256",
+    "SSPR-SHA512",
+    "EMPIRECMS",
+    "PBKDF1-SHA1",
+    "MSONLINE",
+    "WBB4",
+    "SAPCODVNH512",
+    "SM3CRYPT",
+    "AS400SSHA1",
+    "ARGON2",
+    "SM3",
+    "BCRYPTHMACSHA256",
+    "WPA_PMK",
+    "MD5SALT1SALT2",
+    "SYMFONY256",
+    "WPBCRYPT",
+    "GOST12512CRYPT",
 
 NULL
 
@@ -9200,6 +9250,131 @@ static int verify_bcryptsha1(const char *hashstr, int hashlen,
     return strncmp(result, hashstr, hashlen) == 0;
 }
 
+/* bcrypt(sha256($pass)) — mode 30600: SHA256 → hex → bcrypt */
+static int verify_bcryptsha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sha = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    char *result = (char *)WS->gp2;
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+    if (hashlen < 29 || hashstr[0] != '$') return 0;
+
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
+
+    SHA256(pass, passlen, sha);
+    prmd5(sha, hex, 64);
+    hex[64] = 0;
+
+    if (!crypt_rn(hex, hashstr, result, WS_GP_SIZE))
+        return 0;
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* bcrypt(HMAC-SHA256($pass)) — mode 30601
+ * Format: $bcrypt-sha256$v=2,t=2b,r=NN$SALT22$HASH31
+ * Algorithm: HMAC-SHA256(key=salt_b64_string, data=pass) → standard base64 → bcrypt */
+static int verify_bcrypthmacsha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;
+    char *setting = (char *)WS->gp1;
+    char *result = (char *)WS->gp2;
+    char *b64 = (char *)WS->gp3;
+    unsigned int hmac_len = 32;
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+
+    /* $bcrypt-sha256$v=2,t=2b,r=NN$SALT22$HASH31 */
+    if (hashlen < 40 || memcmp(hashstr, "$bcrypt-sha256$v=2,t=2b,r=", 26) != 0)
+        return 0;
+
+    /* Parse rounds */
+    const char *rp = hashstr + 26;
+    const char *d1 = strchr(rp, '$');
+    if (!d1 || d1 - rp > 2) return 0;
+    int rounds = atoi(rp);
+    if (rounds < 1 || rounds > 31) return 0;
+
+    { int cost = rounds;
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
+          return 0;
+    }
+
+    /* Salt is 22 chars of bcrypt base64 */
+    const char *salt22 = d1 + 1;
+    if (strlen(salt22) < 22 + 1 + 31) return 0;  /* salt22$hash31 */
+    if (salt22[22] != '$') return 0;
+
+    /* HMAC-SHA256(key=salt_b64_string_22chars, data=password) */
+    HMAC(EVP_sha256(), salt22, 22, pass, passlen, hmac_out, &hmac_len);
+
+    /* Standard base64 encode (RFC 4648), keep padding */
+    b64_encode(hmac_out, 32, b64);
+    /* 32 bytes → 44 chars including trailing '=' */
+
+    /* Build bcrypt setting: $2b$NN$salt22 */
+    sprintf(setting, "$2b$%02d$%.22s", rounds, salt22);
+
+    if (!crypt_rn(b64, setting, result, WS_GP_SIZE))
+        return 0;
+
+    /* Compare: rebuild full format string and compare
+     * result has $2b$NN$salt22+hash31
+     * We need to compare the hash31 part */
+    const char *expected_hash = salt22 + 23;  /* skip salt22$ */
+    int setting_len = strlen(setting);  /* $2b$NN$salt22 */
+    const char *computed_hash = result + setting_len;
+    return strncmp(computed_hash, expected_hash, 31) == 0;
+}
+
+/* Django SHA-1 (mode 124): sha1$SALT$HEXHASH40 → SHA1(salt + pass)
+ * Also handles plain HEXHASH40:SALT format for self-test compatibility */
+static int verify_django_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *computed = (unsigned char *)WS->ctx1;
+    unsigned char *expected = (unsigned char *)WS->ctx2;
+    const char *salt;
+    int saltlen;
+
+    if (hashlen >= 50 && memcmp(hashstr, "sha1$", 5) == 0) {
+        /* Django format: sha1$SALT$HEXHASH40 */
+        salt = hashstr + 5;
+        const char *d1 = memchr(salt, '$', hashlen - 5);
+        if (!d1) return 0;
+        saltlen = d1 - salt;
+        if (saltlen < 1 || saltlen > 32) return 0;
+        const char *hashpart = d1 + 1;
+        int hashpartlen = hashlen - (hashpart - hashstr);
+        if (hashpartlen != 40) return 0;
+        if (hex2bin(hashpart, 40, expected) != 20) return 0;
+    } else if (hashlen >= 41 && hashstr[40] == ':') {
+        /* Plain format: HEXHASH40:SALT */
+        if (hex2bin(hashstr, 40, expected) != 20) return 0;
+        salt = hashstr + 41;
+        saltlen = hashlen - 41;
+        if (saltlen < 1 || saltlen > 255) return 0;
+    } else {
+        return 0;
+    }
+
+    /* SHA1(salt + pass) */
+    rhash ctx = rhash_init(RHASH_SHA1);
+    rhash_update(ctx, salt, saltlen);
+    rhash_update(ctx, pass, passlen);
+    rhash_final(ctx, computed);
+    rhash_free(ctx);
+
+    return memcmp(computed, expected, 20) == 0;
+}
+
 /* PHPBB3 ($H$): phpass-style iterated MD5 */
 static int verify_phpbb3(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -9212,8 +9387,8 @@ static int verify_phpbb3(const char *hashstr, int hashlen,
     const char *salt;
     char *p;
 
-    /* Format: $H$NSALT(8)HASH(22) = 34 chars total */
-    if (hashlen < 34 || memcmp(hashstr, "$H$", 3) != 0)
+    /* Format: $H$NSALT(8)HASH(22) or $P$NSALT(8)HASH(22) = 34 chars total */
+    if (hashlen < 34 || (memcmp(hashstr, "$H$", 3) != 0 && memcmp(hashstr, "$P$", 3) != 0))
         return 0;
 
     /* Count = 2^(index of hashstr[3] in itoa64) */
@@ -10253,13 +10428,23 @@ static int verify_racf(const char *hashstr, int hashlen,
     const char *colon, *username;
     int hpart, ulen, x;
 
-    colon = memchr(hashstr, ':', hashlen);
-    if (!colon) return 0;
-    hpart = colon - hashstr;
-    if (hpart != 16) return 0;
-    if (hex2bin(hashstr, 16, expected) != 8) return 0;
-    username = colon + 1;
-    ulen = hashlen - hpart - 1;
+    /* Handle $racf$*USER*HASH format */
+    if (hashlen > 8 && memcmp(hashstr, "$racf$*", 7) == 0) {
+        const char *u = hashstr + 7;
+        const char *star = memchr(u, '*', hashlen - 7);
+        if (!star || (hashlen - (star + 1 - hashstr)) != 16) return 0;
+        username = u;
+        ulen = star - u;
+        if (hex2bin(star + 1, 16, expected) != 8) return 0;
+    } else {
+        colon = memchr(hashstr, ':', hashlen);
+        if (!colon) return 0;
+        hpart = colon - hashstr;
+        if (hpart != 16) return 0;
+        if (hex2bin(hashstr, 16, expected) != 8) return 0;
+        username = colon + 1;
+        ulen = hashlen - hpart - 1;
+    }
 
     /* Password to DES key: EBCDIC, XOR 0x55, shift left 1, odd parity */
     { int plen = passlen > 8 ? 8 : passlen;
@@ -12634,6 +12819,7 @@ static int verify_md5crypt(const char *hashstr, int hashlen,
 }
 
 static int b64_decode(const char *src, unsigned char *dst, int srclen);
+static int b64_decode_nopad(const char *src, unsigned char *dst, int srclen);
 
 /* JUNIPERIVE: AES-128-CBC encrypted base64 blob containing $1$ md5crypt hash.
  * Also accepts pre-decrypted $1$salt$hash format. */
@@ -12935,9 +13121,12 @@ static int verify_bcrypt256(const char *hashstr, int hashlen,
 
     if (hashlen < 29 || hashstr[0] != '$') return 0;
 
-    /* Standard bcrypt ($2a$, $2b$, $2y$): just verify normally */
-    if (hashstr[2] != 'k')
-        return verify_bcrypt(hashstr, hashlen, pass, passlen);
+    /* Standard bcrypt ($2a$, $2b$, $2y$): try plain, then sha256(pass) */
+    if (hashstr[2] != 'k') {
+        if (verify_bcrypt(hashstr, hashlen, pass, passlen))
+            return 1;
+        return verify_bcryptsha256(hashstr, hashlen, pass, passlen);
+    }
 
     /* $2k$ variant */
     { static const char extrasalt[] = ".euO";
@@ -13042,6 +13231,33 @@ static int verify_pbkdf2sha1(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     if (hashlen < 10) return 0;
+    /* NetIQ SSPR format: $pbkdf2-hmac-sha1$iter$hexsalt$hexhash */
+    if (memcmp(hashstr, "$pbkdf2-hmac-sha1$", 18) == 0) {
+        char *buf = (char *)WS->gp3;
+        unsigned char *saltbin = (unsigned char *)WS->ctx1;
+        unsigned char *expected = (unsigned char *)WS->ctx2;
+        unsigned char *computed = (unsigned char *)WS->ctx3;
+        memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+        char *p = buf + 18;
+        char *d1 = strchr(p, '$');
+        if (!d1) return 0;
+        *d1 = 0;
+        int iter = atoi(p);
+        if (iter < 1) return 0;
+        char *salthex = d1 + 1;
+        char *d2 = strchr(salthex, '$');
+        if (!d2) return 0;
+        *d2 = 0;
+        char *hashhex = d2 + 1;
+        int saltlen = hex2bin(salthex, strlen(salthex), saltbin);
+        int hashbinlen = hex2bin(hashhex, strlen(hashhex), expected);
+        if (saltlen < 1 || hashbinlen < 1) return 0;
+        PKCS5_PBKDF2_HMAC((const char *)pass, passlen,
+                          saltbin, saltlen, iter, EVP_sha1(),
+                          hashbinlen, computed);
+        WS->verify_iter = iter;
+        return memcmp(computed, expected, hashbinlen) == 0;
+    }
     /* Python passlib format: $pbkdf2$iter$salt_ab64$hash_ab64 */
     if (memcmp(hashstr, "$pbkdf2$", 8) == 0) {
         char *buf = (char *)WS->gp3;
@@ -14998,6 +15214,125 @@ static int verify_wpa_eapol(const char *hashstr, int hashlen,
     return memcmp(hmac_out, expected, 16) == 0;
 }
 
+/* WPA-PMK (e990, hashcat mode 22001)
+ * Same as WPA-PMKID/EAPOL but password IS the raw PMK (64 hex chars).
+ * Supports both type=01 (PMKID) and type=02 (EAPOL). */
+static int verify_wpa_pmk(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *pmk = (unsigned char *)WS->ctx1;
+    unsigned char *expected = (unsigned char *)WS->ctx2;
+    unsigned char *essid_bin = (unsigned char *)WS->gp1;
+    unsigned char *eapol_bin = (unsigned char *)WS->gp2;
+    unsigned char *pke = (unsigned char *)WS->gp3;
+    unsigned char *mac_ap = (unsigned char *)WS->gp4;
+    unsigned char *mac_sta = (unsigned char *)WS->gp4 + 16;
+    unsigned char *anonce = (unsigned char *)WS->gp4 + 32;
+    unsigned char *kck = (unsigned char *)WS->gp4 + 80;
+    unsigned char hmac_out[20];
+    unsigned int hmac_len;
+
+    if (hashlen < 40 || strncmp(hashstr, "WPA*0", 5) != 0) return 0;
+
+    /* Password must be 64 hex chars (32-byte PMK) */
+    if (passlen != 64) return 0;
+    if (hex2bin((const char *)pass, 64, pmk) != 32) return 0;
+
+    int wpa_type = hashstr[5] - '0';  /* 1=PMKID, 2=EAPOL */
+    if (wpa_type != 1 && wpa_type != 2) return 0;
+    if (hashstr[6] != '*') return 0;
+
+    if (wpa_type == 1) {
+        /* WPA*01*PMKID*MACAP*MACSTA*ESSID*** */
+        const char *pmkid_hex = hashstr + 7;
+        const char *f1 = strchr(pmkid_hex, '*');
+        if (!f1 || (f1 - pmkid_hex) != 32) return 0;
+        const char *macap_hex = f1 + 1;
+        const char *f2 = strchr(macap_hex, '*');
+        if (!f2 || (f2 - macap_hex) != 12) return 0;
+        const char *macsta_hex = f2 + 1;
+        const char *f3 = strchr(macsta_hex, '*');
+        if (!f3 || (f3 - macsta_hex) != 12) return 0;
+
+        if (hex2bin(pmkid_hex, 32, expected) != 16) return 0;
+
+        /* Build pmkid_data: "PMK Name" + mac_ap + mac_sta */
+        unsigned char pmkid_data[20];
+        memcpy(pmkid_data, "PMK Name", 8);
+        if (hex2bin(macap_hex, 12, pmkid_data + 8) != 6) return 0;
+        if (hex2bin(macsta_hex, 12, pmkid_data + 14) != 6) return 0;
+
+        hmac_len = 20;
+        HMAC(EVP_sha1(), pmk, 32, pmkid_data, 20, hmac_out, &hmac_len);
+        return memcmp(hmac_out, expected, 16) == 0;
+    } else {
+        /* WPA*02*MIC*MACAP*MACSTA*ESSID*ANONCE*EAPOL*MP */
+        const char *mic_hex = hashstr + 7;
+        const char *f1 = strchr(mic_hex, '*');
+        if (!f1 || (f1 - mic_hex) != 32) return 0;
+        const char *macap_hex = f1 + 1;
+        const char *f2 = strchr(macap_hex, '*');
+        if (!f2 || (f2 - macap_hex) != 12) return 0;
+        const char *macsta_hex = f2 + 1;
+        const char *f3 = strchr(macsta_hex, '*');
+        if (!f3 || (f3 - macsta_hex) != 12) return 0;
+        const char *essid_hex = f3 + 1;
+        const char *f4 = strchr(essid_hex, '*');
+        if (!f4) return 0;
+        int essid_hexlen = f4 - essid_hex;
+        const char *anonce_hex = f4 + 1;
+        const char *f5 = strchr(anonce_hex, '*');
+        if (!f5 || (f5 - anonce_hex) != 64) return 0;
+        const char *eapol_hex = f5 + 1;
+        const char *f6 = strchr(eapol_hex, '*');
+        if (!f6) return 0;
+        int eapol_hexlen = f6 - eapol_hex;
+
+        if (essid_hexlen < 2 || essid_hexlen > 64 || (essid_hexlen & 1)) return 0;
+        if (eapol_hexlen < 2 || eapol_hexlen > 1024 || (eapol_hexlen & 1)) return 0;
+        if (hex2bin(mic_hex, 32, expected) != 16) return 0;
+        if (hex2bin(macap_hex, 12, mac_ap) != 6) return 0;
+        if (hex2bin(macsta_hex, 12, mac_sta) != 6) return 0;
+        if (hex2bin(anonce_hex, 64, anonce) != 32) return 0;
+        int eapol_binlen = hex2bin(eapol_hex, eapol_hexlen, eapol_bin);
+        if (eapol_binlen < 99) return 0;
+
+        int keyver = (((eapol_bin[5] << 8) | eapol_bin[6]) & 7);
+        if (keyver < 1 || keyver > 2) return 0;
+
+        unsigned char *snonce = eapol_bin + 17;
+
+        memcpy(pke, "Pairwise key expansion", 23);
+        if (memcmp(mac_ap, mac_sta, 6) < 0) {
+            memcpy(pke + 23, mac_ap, 6);
+            memcpy(pke + 29, mac_sta, 6);
+        } else {
+            memcpy(pke + 23, mac_sta, 6);
+            memcpy(pke + 29, mac_ap, 6);
+        }
+        if (memcmp(anonce, snonce, 32) < 0) {
+            memcpy(pke + 35, anonce, 32);
+            memcpy(pke + 67, snonce, 32);
+        } else {
+            memcpy(pke + 35, snonce, 32);
+            memcpy(pke + 67, anonce, 32);
+        }
+        pke[99] = 0;
+
+        hmac_len = 20;
+        HMAC(EVP_sha1(), pmk, 32, pke, 100, kck, &hmac_len);
+
+        if (keyver == 1) {
+            hmac_len = 16;
+            HMAC(EVP_md5(), kck, 16, eapol_bin, eapol_binlen, hmac_out, &hmac_len);
+        } else {
+            hmac_len = 20;
+            HMAC(EVP_sha1(), kck, 16, eapol_bin, eapol_binlen, hmac_out, &hmac_len);
+        }
+        return memcmp(hmac_out, expected, 16) == 0;
+    }
+}
+
 /* Ansible Vault (e944, hashcat mode 16900)
  * Format: $ansible$C*V*SALT64hex*CT_hex*HMAC64hex
  * Algorithm: PBKDF2-SHA256(pass, salt32, 10000, 64) → bytes 32-63 = HMAC key
@@ -16310,6 +16645,154 @@ static int verify_blake2b256saltpass(const char *hashstr, int hashlen,
     memcpy(buf + saltlen, pass, passlen);
     blake2b_hash(computed, 32, buf, total);
     return memcmp(computed, expected, 32) == 0;
+}
+
+/* BLAKE2S256 (e844, hashcat mode 31000)
+ * Format: $BLAKE2$64hex  or  bare 64hex */
+static int verify_blake2s256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    const char *hex; int hexlen;
+
+    if (hashlen == 72 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
+        hex = hashstr + 8; hexlen = 64;
+    } else if (hashlen == 64) {
+        hex = hashstr; hexlen = 64;
+    } else return 0;
+    if (hex2bin(hex, hexlen, expected) != 32) return 0;
+    blake2s(computed, 32, pass, passlen, NULL, 0);
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* MURMUR3 (e972, hashcat mode 27800)
+ * Format: 8hex_hash:8hex_seed — MurmurHash3_x86_32, big-endian output */
+static int verify_murmur3(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    if (hashlen != 17 || hashstr[8] != ':') return 0;
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    if (hex2bin(hashstr, 8, expected) != 4) return 0;
+    /* Parse 32-bit seed from hex */
+    unsigned char seedbin[4];
+    if (hex2bin(hashstr + 9, 8, seedbin) != 4) return 0;
+    uint32_t seed = ((uint32_t)seedbin[0] << 24) | ((uint32_t)seedbin[1] << 16) |
+                    ((uint32_t)seedbin[2] << 8) | seedbin[3];
+    /* MurmurHash3_x86_32 */
+    const uint32_t c1 = 0xcc9e2d51, c2 = 0x1b873593;
+    uint32_t h1 = seed;
+    int nblocks = passlen / 4;
+    int i;
+    for (i = 0; i < nblocks; i++) {
+        uint32_t k1;
+        memcpy(&k1, pass + i * 4, 4);
+        k1 *= c1; k1 = (k1 << 15) | (k1 >> 17); k1 *= c2;
+        h1 ^= k1; h1 = (h1 << 13) | (h1 >> 19); h1 = h1 * 5 + 0xe6546b64;
+    }
+    { const uint8_t *tail = pass + nblocks * 4;
+      uint32_t k1 = 0;
+      switch (passlen & 3) {
+        case 3: k1 ^= (uint32_t)tail[2] << 16; /* fall through */
+        case 2: k1 ^= (uint32_t)tail[1] << 8;  /* fall through */
+        case 1: k1 ^= tail[0];
+                k1 *= c1; k1 = (k1 << 15) | (k1 >> 17); k1 *= c2;
+                h1 ^= k1;
+      }
+    }
+    h1 ^= (uint32_t)passlen;
+    h1 ^= h1 >> 16; h1 *= 0x85ebca6b;
+    h1 ^= h1 >> 13; h1 *= 0xc2b2ae35;
+    h1 ^= h1 >> 16;
+    /* Big-endian output */
+    unsigned char computed[4];
+    computed[0] = (h1 >> 24) & 0xff; computed[1] = (h1 >> 16) & 0xff;
+    computed[2] = (h1 >> 8) & 0xff;  computed[3] = h1 & 0xff;
+    return memcmp(computed, expected, 4) == 0;
+}
+
+/* VEEAM_VBK (e973, hashcat mode 31200)
+ * Format: $vbk$*128hex_salt*iter*32hex_ct
+ * PBKDF2-SHA1(UTF16LE(pass), salt64, iter, 48) → AES-256-CBC → PKCS7 check */
+static int verify_veeam_vbk(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt_bin = (unsigned char *)WS->ctx1;  /* 64 bytes */
+    unsigned char *dk = (unsigned char *)WS->ctx2;        /* 48 bytes */
+    unsigned char *ct = (unsigned char *)WS->ctx3;        /* 16 bytes */
+    unsigned char *u16 = (unsigned char *)WS->u16a;       /* UTF-16LE password */
+
+    if (hashlen < 30 || memcmp(hashstr, "$vbk$*", 6) != 0) return 0;
+    const char *p = hashstr + 6;
+    const char *s1 = memchr(p, '*', hashlen - 6);
+    if (!s1 || (s1 - p) != 128) return 0;
+    if (hex2bin(p, 128, salt_bin) != 64) return 0;
+    p = s1 + 1;
+    int iter = 0;
+    while (*p >= '0' && *p <= '9') iter = iter * 10 + (*p++ - '0');
+    if (*p != '*' || iter <= 0) return 0;
+    p++;
+    int cthexlen = hashlen - (int)(p - hashstr);
+    if (cthexlen != 32) return 0;
+    if (hex2bin(p, 32, ct) != 16) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 10000.0, (double)iter)) return 0;
+    WS->verify_iter = iter;
+
+    /* UTF-16LE encode password */
+    int u16len = 0, ci;
+    for (ci = 0; ci < passlen && u16len < (int)WS_U16_SIZE - 2; ci++) {
+        u16[u16len++] = pass[ci];
+        u16[u16len++] = 0;
+    }
+
+    PKCS5_PBKDF2_HMAC((const char *)u16, u16len,
+        salt_bin, 64, iter, EVP_sha1(), 48, dk);
+
+    /* AES-256-CBC decrypt: key=dk[0..31], IV=dk[32..47] */
+    unsigned char iv[16];
+    memcpy(iv, dk + 32, 16);
+    AES_KEY *aeskey = (AES_KEY *)WS->gp1;
+    AES_set_decrypt_key(dk, 256, aeskey);
+    unsigned char pt[16];
+    AES_cbc_encrypt(ct, pt, 16, aeskey, iv, AES_DECRYPT);
+    /* PKCS7: bytes 4-15 must be 0x0c */
+    return (pt[4] == 0x0c && pt[5] == 0x0c && pt[6] == 0x0c && pt[7] == 0x0c &&
+            pt[8] == 0x0c && pt[9] == 0x0c && pt[10] == 0x0c && pt[11] == 0x0c &&
+            pt[12] == 0x0c && pt[13] == 0x0c && pt[14] == 0x0c && pt[15] == 0x0c);
+}
+
+/* MSSNTP (e974, hashcat mode 31300)
+ * Format: $sntp-ms$32hex_hash$96hex_salt
+ * MD5(MD4(UTF16LE(pass)) || salt48) */
+static int verify_mssntp(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;  /* 16 bytes */
+    unsigned char *ntlm = (unsigned char *)WS->ctx2;      /* 16 bytes MD4 */
+    unsigned char *salt_bin = (unsigned char *)WS->ctx3;   /* 48 bytes */
+    unsigned char *u16 = (unsigned char *)WS->u16a;
+
+    if (hashlen != 138 || memcmp(hashstr, "$sntp-ms$", 9) != 0) return 0;
+    if (hashstr[41] != '$') return 0;
+    if (hex2bin(hashstr + 9, 32, expected) != 16) return 0;
+    if (hex2bin(hashstr + 42, 96, salt_bin) != 48) return 0;
+
+    /* UTF-16LE encode password, compute MD4 (NTLM) */
+    int u16len = 0, ci;
+    for (ci = 0; ci < passlen && u16len < (int)WS_U16_SIZE - 2; ci++) {
+        u16[u16len++] = pass[ci];
+        u16[u16len++] = 0;
+    }
+    ws_rhash_msg(RHASH_MD4, u16, u16len, ntlm);
+
+    /* MD5(ntlm16 || salt48) = one 64-byte MD5 block */
+    unsigned char block[64];
+    memcpy(block, ntlm, 16);
+    memcpy(block + 16, salt_bin, 48);
+    unsigned char computed[16];
+    ws_rhash_msg(RHASH_MD5, block, 64, computed);
+    return memcmp(computed, expected, 16) == 0;
 }
 
 /* ================================================================= */
@@ -18773,6 +19256,1174 @@ static int verify_md5_salt_sha1peppass(const char *hashstr, int hashlen,
     return strncasecmp(computed, hashstr, 32) == 0;
 }
 
+/* ================================================================= */
+/* SSPR verify functions (modes 32000-32041)                          */
+/* $sspr$N$ITER$SALT$HEXHASH — iterated H(salt+pass), then H(digest) */
+/* ================================================================= */
+
+/* verify_sspr_md5: $sspr$0$ITER$NONE$32hex — iterated MD5, unsalted */
+static int verify_sspr_md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *h0 = (unsigned char *)WS->ctx2;
+    unsigned char *h1 = (unsigned char *)WS->ctx3;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "$sspr$0$", 8) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 8;
+    char *d1 = strchr(iter_s, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100000.0, (double)iter)) return 0;
+
+    /* skip NONE salt field */
+    char *d2 = strchr(d1 + 1, '$');
+    if (!d2) return 0;
+    char *hash_hex = d2 + 1;
+    if (strlen(hash_hex) != 32) return 0;
+    hex2bin(hash_hex, 32, expected);
+
+    WS->verify_iter = iter;
+
+    /* MD5(pass), then iterate MD5(digest) using pre-allocated rhash ctx */
+    rhash md5ctx = WS->rctx_md5;
+    rhash_reset(md5ctx);
+    rhash_update(md5ctx, pass, passlen);
+    rhash_final(md5ctx, h0);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        unsigned char *in = (i & 1) ? h0 : h1;
+        unsigned char *out = (i & 1) ? h1 : h0;
+        rhash_reset(md5ctx);
+        rhash_update(md5ctx, in, 16);
+        rhash_final(md5ctx, out);
+    }
+    unsigned char *final = ((iter - 1) & 1) ? h1 : h0;
+
+    return memcmp(final, expected, 16) == 0;
+}
+
+/* verify_sspr_sha1: $sspr$1$ITER$NONE$40hex — iterated SHA1, unsalted */
+static int verify_sspr_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *h0 = (unsigned char *)WS->ctx2;
+    unsigned char *h1 = (unsigned char *)WS->ctx3;
+    SHA_CTX *sha1ctx = (SHA_CTX *)WS->ctx4;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "$sspr$1$", 8) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 8;
+    char *d1 = strchr(iter_s, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100000.0, (double)iter)) return 0;
+
+    char *d2 = strchr(d1 + 1, '$');
+    if (!d2) return 0;
+    char *hash_hex = d2 + 1;
+    if (strlen(hash_hex) != 40) return 0;
+    hex2bin(hash_hex, 40, expected);
+
+    WS->verify_iter = iter;
+
+    /* SHA1(pass), then iterate */
+    SHA1_Init(sha1ctx);
+    SHA1_Update(sha1ctx, pass, passlen);
+    SHA1_Final(h0, sha1ctx);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        unsigned char *in = (i & 1) ? h0 : h1;
+        unsigned char *out = (i & 1) ? h1 : h0;
+        SHA1_Init(sha1ctx);
+        SHA1_Update(sha1ctx, in, 20);
+        SHA1_Final(out, sha1ctx);
+    }
+    unsigned char *final = ((iter - 1) & 1) ? h1 : h0;
+
+    return memcmp(final, expected, 20) == 0;
+}
+
+/* verify_sspr_sha1s: $sspr$2$ITER$SALT$40hex — iterated SHA1, salted */
+static int verify_sspr_sha1s(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *h0 = (unsigned char *)WS->ctx2;
+    unsigned char *h1 = (unsigned char *)WS->ctx3;
+    SHA_CTX *sha1ctx = (SHA_CTX *)WS->ctx4;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "$sspr$2$", 8) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 8;
+    char *d1 = strchr(iter_s, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100000.0, (double)iter)) return 0;
+
+    char *salt = d1 + 1;
+    char *d2 = strchr(salt, '$');
+    if (!d2) return 0;
+    *d2 = 0;
+    int saltlen = d2 - salt;
+    char *hash_hex = d2 + 1;
+    if (strlen(hash_hex) != 40) return 0;
+    hex2bin(hash_hex, 40, expected);
+
+    WS->verify_iter = iter;
+
+    /* SHA1(salt_string + pass), then iterate SHA1(digest) */
+    SHA1_Init(sha1ctx);
+    SHA1_Update(sha1ctx, salt, saltlen);
+    SHA1_Update(sha1ctx, pass, passlen);
+    SHA1_Final(h0, sha1ctx);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        unsigned char *in = (i & 1) ? h0 : h1;
+        unsigned char *out = (i & 1) ? h1 : h0;
+        SHA1_Init(sha1ctx);
+        SHA1_Update(sha1ctx, in, 20);
+        SHA1_Final(out, sha1ctx);
+    }
+    unsigned char *final = ((iter - 1) & 1) ? h1 : h0;
+
+    return memcmp(final, expected, 20) == 0;
+}
+
+/* verify_sspr_sha256: $sspr$3$ITER$SALT$64hex — iterated SHA256, salted */
+static int verify_sspr_sha256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    SHA256_CTX *sha2ctx = (SHA256_CTX *)WS->ctx3;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "$sspr$3$", 8) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 8;
+    char *d1 = strchr(iter_s, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100000.0, (double)iter)) return 0;
+
+    char *salt = d1 + 1;
+    char *d2 = strchr(salt, '$');
+    if (!d2) return 0;
+    *d2 = 0;
+    int saltlen = d2 - salt;
+    char *hash_hex = d2 + 1;
+    if (strlen(hash_hex) != 64) return 0;
+    hex2bin(hash_hex, 64, expected);
+
+    WS->verify_iter = iter;
+
+    /* SHA256(salt_string + pass), then iterate in-place */
+    SHA256_Init(sha2ctx);
+    SHA256_Update(sha2ctx, salt, saltlen);
+    SHA256_Update(sha2ctx, pass, passlen);
+    SHA256_Final(computed, sha2ctx);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        SHA256_Init(sha2ctx);
+        SHA256_Update(sha2ctx, computed, 32);
+        SHA256_Final(computed, sha2ctx);
+    }
+
+    return memcmp(computed, expected, 32) == 0;
+}
+
+/* verify_sspr_sha512: $sspr$4$ITER$SALT$128hex — iterated SHA512, salted */
+static int verify_sspr_sha512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    SHA512_CTX *sha5ctx = (SHA512_CTX *)WS->ctx3;
+    char *buf = (char *)WS->gp1;
+
+    if (hashlen < 20 || memcmp(hashstr, "$sspr$4$", 8) != 0) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    char *iter_s = buf + 8;
+    char *d1 = strchr(iter_s, '$');
+    if (!d1) return 0;
+    *d1 = 0;
+    int iter = atoi(iter_s);
+    if (iter <= 0) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 100000.0, (double)iter)) return 0;
+
+    char *salt = d1 + 1;
+    char *d2 = strchr(salt, '$');
+    if (!d2) return 0;
+    *d2 = 0;
+    int saltlen = d2 - salt;
+    char *hash_hex = d2 + 1;
+    if (strlen(hash_hex) != 128) return 0;
+    hex2bin(hash_hex, 128, expected);
+
+    WS->verify_iter = iter;
+
+    /* SHA512(salt_string + pass), then iterate in-place */
+    SHA512_Init(sha5ctx);
+    SHA512_Update(sha5ctx, salt, saltlen);
+    SHA512_Update(sha5ctx, pass, passlen);
+    SHA512_Final(computed, sha5ctx);
+
+    int i;
+    for (i = 1; i < iter; i++) {
+        SHA512_Init(sha5ctx);
+        SHA512_Update(sha5ctx, computed, 64);
+        SHA512_Final(computed, sha5ctx);
+    }
+
+    return memcmp(computed, expected, 64) == 0;
+}
+
+/* verify_empirecms: 32hex:salt1:salt2 — Empire CMS admin password
+ * md5(salt2 + "E!m^p-i(r#e.C:M?S" + md5hex(md5(md5hex(pass) + salt1)) + "d)i.g^o-d" + salt1) */
+static int verify_empirecms(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *md = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+    char *hexbuf = (char *)WS->gp2;
+
+    /* Format: 32hex:salt1:salt2 — find the colons */
+    if (hashlen < 36) return 0;
+    if (hashlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(buf, hashstr, hashlen); buf[hashlen] = 0;
+
+    /* Find first colon after 32-char hex hash */
+    if (buf[32] != ':') return 0;
+    hex2bin(buf, 32, expected);
+
+    char *salt1 = buf + 33;
+    char *c2 = strchr(salt1, ':');
+    if (!c2) return 0;
+    *c2 = 0;
+    int salt1len = c2 - salt1;
+    char *salt2 = c2 + 1;
+    int salt2len = strlen(salt2);
+
+    /* Step 1: md5hex(pass) */
+    rhash md5ctx = WS->rctx_md5;
+    rhash_reset(md5ctx);
+    rhash_update(md5ctx, pass, passlen);
+    rhash_final(md5ctx, md);
+    prmd5(md, hexbuf, 32);
+
+    /* Step 2: md5(md5hex(pass) + salt1) */
+    rhash_reset(md5ctx);
+    rhash_update(md5ctx, hexbuf, 32);
+    rhash_update(md5ctx, salt1, salt1len);
+    rhash_final(md5ctx, md);
+
+    /* Step 3: md5hex of step 2 */
+    prmd5(md, hexbuf, 32);
+
+    /* Step 4: md5(salt2 + "E!m^p-i(r#e.C:M?S" + hexbuf + "d)i.g^o-d" + salt1) */
+    rhash_reset(md5ctx);
+    rhash_update(md5ctx, salt2, salt2len);
+    rhash_update(md5ctx, "E!m^p-i(r#e.C:M?S", 17);
+    rhash_update(md5ctx, hexbuf, 32);
+    rhash_update(md5ctx, "d)i.g^o-d", 9);
+    rhash_update(md5ctx, salt1, salt1len);
+    rhash_final(md5ctx, md);
+
+    return memcmp(md, expected, 16) == 0;
+}
+
+/* PBKDF1-SHA1 (e981, mode 32900):
+ * Format: PBKDF1:sha1:ITER:BASE64SALT:BASE64HASH
+ * Algorithm: SHA1(pass + salt), then iterate SHA1(digest) ITER-1 more times */
+static int verify_pbkdf1_sha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->gp1;
+    unsigned char *expected = (unsigned char *)WS->gp2;
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    SHA_CTX *sha_ctx = (SHA_CTX *)WS->ctx2;
+    char *buf = (char *)WS->gp3;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "PBKDF1:sha1:", 12) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Extract iteration count */
+    char *p = buf + 12;
+    char *colon1 = strchr(p, ':');
+    if (!colon1) return 0;
+    *colon1 = 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1024.0, (double)iter)) return 0;
+
+    /* Decode base64 salt */
+    char *saltb64 = colon1 + 1;
+    char *colon2 = strchr(saltb64, ':');
+    if (!colon2) return 0;
+    *colon2 = 0;
+    int saltlen = base64_decode(saltb64, (int)(colon2 - saltb64), salt, WS_GP_SIZE);
+    if (saltlen < 1) return 0;
+
+    /* Decode base64 hash */
+    char *hashb64 = colon2 + 1;
+    int hashb64len = (int)(buf + hashlen - hashb64);
+    int hlen = base64_decode(hashb64, hashb64len, expected, WS_GP_SIZE);
+    if (hlen != 20) return 0;
+
+    /* Round 0: h = SHA1(pass + salt) */
+    SHA1_Init(sha_ctx);
+    SHA1_Update(sha_ctx, pass, passlen);
+    SHA1_Update(sha_ctx, salt, saltlen);
+    SHA1_Final(h, sha_ctx);
+
+    /* Rounds 1..iter-1: h = SHA1(h) */
+    for (int i = 1; i < iter; i++) {
+        SHA1_Init(sha_ctx);
+        SHA1_Update(sha_ctx, h, 20);
+        SHA1_Final(h, sha_ctx);
+    }
+
+    WS->verify_iter = iter;
+    return memcmp(h, expected, 20) == 0;
+}
+
+/* MSONLINE (e982, mode 33700):
+ * Format: $MSONLINEACCOUNT$0$ITER$64HEX
+ * Algorithm: PBKDF2-HMAC-SHA256(UTF16LE(pass), "", iter, 32) ->
+ *   AES-256-ECB decrypt first 16 bytes -> check dec[0..7] == {0,0,0,0,1,0,0,0} */
+static int verify_msonline(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *derived = (unsigned char *)WS->ctx1;    /* 32-byte PBKDF2 output */
+    unsigned char *expected = (unsigned char *)WS->ctx2;   /* 32-byte hash */
+    unsigned char *computed = (unsigned char *)WS->ctx3;   /* 16-byte AES output */
+    AES_KEY *aeskey = (AES_KEY *)WS->ctx4;
+    unsigned char *u16pass = (unsigned char *)WS->gp1;     /* UTF-16LE password */
+    char *buf = (char *)WS->gp2;
+
+    static const unsigned char msonline_magic[8] = {0,0,0,0,1,0,0,0};
+
+    if (hashlen < 30 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$MSONLINEACCOUNT$0$", 19) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Extract iteration count */
+    char *p = buf + 19;
+    char *dollar = strchr(p, '$');
+    if (!dollar) return 0;
+    *dollar = 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 10000.0, (double)iter)) return 0;
+
+    /* Decode 64-char hex hash */
+    char *hexhash = dollar + 1;
+    int hexlen = (int)(buf + hashlen - hexhash);
+    if (hexlen != 64) return 0;
+    if (hex2bin(hexhash, 64, expected) != 32) return 0;
+
+    /* Encode password as UTF-16LE (simple ASCII->UTF16LE) */
+    int u16len = passlen * 2;
+    if (u16len > (int)WS_GP_SIZE - 2) return 0;
+    for (int i = 0; i < passlen; i++) {
+        u16pass[i * 2] = pass[i];
+        u16pass[i * 2 + 1] = 0;
+    }
+
+    /* PBKDF2-HMAC-SHA256(UTF16LE(pass), "", iter, 32) */
+    PKCS5_PBKDF2_HMAC((const char *)u16pass, u16len,
+                       (const unsigned char *)"", 0, iter,
+                       EVP_sha256(), 32, derived);
+
+    /* AES-256-ECB decrypt first 16 bytes */
+    AES_set_decrypt_key(derived, 256, aeskey);
+    AES_ecb_encrypt(expected, computed, aeskey, AES_DECRYPT);
+
+    WS->verify_iter = iter;
+    return memcmp(computed, msonline_magic, 8) == 0;
+}
+
+/* WBB4 (e983, mode 33800):
+ * Format: $2a$CC$53chars (standard bcrypt format)
+ * Algorithm: bcrypt(bcrypt(pass)) — run crypt_rn twice with same salt setting */
+static int verify_wbb4(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+
+    char *passbuf = (char *)WS->gp2;
+    char *result1 = (char *)WS->gp3;
+    char *result2 = (char *)WS->gp4;
+    char *setting = (char *)WS->gp5;
+    void *data = WS->gp1;  /* crypt_rn needs at least 128 bytes */
+
+    if (hashlen < 29 || hashstr[0] != '$') return 0;
+    if (passlen >= (int)WS_GP_SIZE) return 0;
+
+    /* Cost check */
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << (cost * 2))))
+          return 0;
+    }
+
+    /* Extract setting (first 29 chars: $2a$CC$22chars) */
+    if (hashlen < 60) return 0;
+    memcpy(setting, hashstr, 29);
+    setting[29] = 0;
+
+    /* Null-terminate password */
+    memcpy(passbuf, pass, passlen);
+    passbuf[passlen] = 0;
+
+    /* First bcrypt: bcrypt(pass) */
+    { char *r = crypt_rn(passbuf, setting, data, WS_GP_SIZE);
+      if (!r) return 0;
+      int rlen = strlen(r);
+      if (rlen < 29) return 0;
+      memcpy(result1, r, rlen + 1);
+    }
+
+    /* Second bcrypt: bcrypt(result_of_first_bcrypt) with same setting */
+    { char *r = crypt_rn(result1, setting, data, WS_GP_SIZE);
+      if (!r) return 0;
+      int rlen = strlen(r);
+      memcpy(result2, r, rlen + 1);
+    }
+
+    return strncmp(result2, hashstr, hashlen) == 0;
+}
+
+/* SAPCODVNH512 (e984, mode 35000):
+ * Format: {x-isSHA512, ITER}BASE64(hash64+salt)
+ * Algorithm: SHA512(pass+salt) iterated ITER times. Password max 40 bytes. */
+static int verify_sapcodvnh512(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *decoded = (unsigned char *)WS->gp2;
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    SHA512_CTX *sha_ctx = (SHA512_CTX *)WS->ctx2;
+
+    /* Format: {x-isSHA512, ITER}BASE64... */
+    if (hashlen < 25 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "{x-isSHA512, ", 13) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Extract iteration count */
+    char *p = buf + 13;
+    char *brace = strchr(p, '}');
+    if (!brace) return 0;
+    int iter = atoi(p);
+    if (iter < 1) return 0;
+    if (verify_cost_exceeds(WS->cur_rate, 1024.0, (double)iter)) return 0;
+
+    /* Decode base64 payload: 64-byte hash + salt */
+    int b64len = (int)(buf + hashlen - brace - 1);
+    int dlen = base64_decode(brace + 1, b64len, decoded, WS_GP_SIZE);
+    if (dlen < 65) return 0; /* need at least 64 hash + 1 salt */
+
+    unsigned char *expected = decoded;
+    unsigned char *salt = decoded + 64;
+    int saltlen = dlen - 64;
+
+    /* Password max 40 bytes */
+    int plen = passlen > 40 ? 40 : passlen;
+
+    /* Round 0: h = SHA512(pass + salt) */
+    SHA512_Init(sha_ctx);
+    SHA512_Update(sha_ctx, pass, plen);
+    SHA512_Update(sha_ctx, salt, saltlen);
+    SHA512_Final(h, sha_ctx);
+
+    /* Rounds 1..iter-1: h = SHA512(pass + h) */
+    for (int i = 1; i < iter; i++) {
+        SHA512_Init(sha_ctx);
+        SHA512_Update(sha_ctx, pass, plen);
+        SHA512_Update(sha_ctx, h, 64);
+        SHA512_Final(h, sha_ctx);
+    }
+
+    WS->verify_iter = iter;
+    return memcmp(h, expected, 64) == 0;
+}
+
+/* SM3 hash implementation for sm3crypt */
+typedef struct { uint32_t h[8]; uint8_t buf[64]; uint64_t total; } hp_sm3_ctx;
+
+static const uint32_t hp_sm3_T[64] = {
+    0x79CC4519, 0xF3988A32, 0xE7311465, 0xCE6228CB,
+    0x9CC45197, 0x3988A32F, 0x7311465E, 0xE6228CBC,
+    0xCC451979, 0x988A32F3, 0x311465E7, 0x6228CBCE,
+    0xC451979C, 0x88A32F39, 0x11465E73, 0x228CBCE6,
+    0x9D8A7A87, 0x3B14F50F, 0x7629EA1E, 0xEC53D43C,
+    0xD8A7A879, 0xB14F50F3, 0x629EA1E7, 0xC53D43CE,
+    0x8A7A879D, 0x14F50F3B, 0x29EA1E76, 0x53D43CEC,
+    0xA7A879D8, 0x4F50F3B1, 0x9EA1E762, 0x3D43CEC5,
+    0x7A879D8A, 0xF50F3B14, 0xEA1E7629, 0xD43CEC53,
+    0xA879D8A7, 0x50F3B14F, 0xA1E7629E, 0x43CEC53D,
+    0x879D8A7A, 0x0F3B14F5, 0x1E7629EA, 0x3CEC53D4,
+    0x79D8A7A8, 0xF3B14F50, 0xE7629EA1, 0xCEC53D43,
+    0x9D8A7A87, 0x3B14F50F, 0x7629EA1E, 0xEC53D43C,
+    0xD8A7A879, 0xB14F50F3, 0x629EA1E7, 0xC53D43CE,
+    0x8A7A879D, 0x14F50F3B, 0x29EA1E76, 0x53D43CEC,
+    0xA7A879D8, 0x4F50F3B1, 0x9EA1E762, 0x3D43CEC5
+};
+
+static inline uint32_t hp_sm3_rotl(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+
+static inline uint32_t hp_sm3_FF(uint32_t x, uint32_t y, uint32_t z, int j)
+{
+    return (j < 16) ? (x ^ y ^ z) : ((x & y) | (x & z) | (y & z));
+}
+
+static inline uint32_t hp_sm3_GG(uint32_t x, uint32_t y, uint32_t z, int j)
+{
+    return (j < 16) ? (x ^ y ^ z) : ((x & y) | (~x & z));
+}
+
+static inline uint32_t hp_sm3_P0(uint32_t x) { return x ^ hp_sm3_rotl(x, 9) ^ hp_sm3_rotl(x, 17); }
+static inline uint32_t hp_sm3_P1(uint32_t x) { return x ^ hp_sm3_rotl(x, 15) ^ hp_sm3_rotl(x, 23); }
+
+static void hp_sm3_transform(hp_sm3_ctx *ctx, const uint8_t *data)
+{
+    uint32_t W[68], W1[64];
+    uint32_t A, B, C, D, E, F, G, H, SS1, SS2, TT1, TT2;
+    int j;
+
+    for (j = 0; j < 16; j++)
+        W[j] = ((uint32_t)data[j*4] << 24) | ((uint32_t)data[j*4+1] << 16) |
+               ((uint32_t)data[j*4+2] << 8) | data[j*4+3];
+    for (j = 16; j < 68; j++)
+        W[j] = hp_sm3_P1(W[j-16] ^ W[j-9] ^ hp_sm3_rotl(W[j-3], 15)) ^
+               hp_sm3_rotl(W[j-13], 7) ^ W[j-6];
+    for (j = 0; j < 64; j++)
+        W1[j] = W[j] ^ W[j+4];
+
+    A = ctx->h[0]; B = ctx->h[1]; C = ctx->h[2]; D = ctx->h[3];
+    E = ctx->h[4]; F = ctx->h[5]; G = ctx->h[6]; H = ctx->h[7];
+
+    for (j = 0; j < 64; j++) {
+        SS1 = hp_sm3_rotl(hp_sm3_rotl(A, 12) + E + hp_sm3_T[j], 7);
+        SS2 = SS1 ^ hp_sm3_rotl(A, 12);
+        TT1 = hp_sm3_FF(A, B, C, j) + D + SS2 + W1[j];
+        TT2 = hp_sm3_GG(E, F, G, j) + H + SS1 + W[j];
+        D = C; C = hp_sm3_rotl(B, 9); B = A; A = TT1;
+        H = G; G = hp_sm3_rotl(F, 19); F = E; E = hp_sm3_P0(TT2);
+    }
+
+    ctx->h[0] ^= A; ctx->h[1] ^= B; ctx->h[2] ^= C; ctx->h[3] ^= D;
+    ctx->h[4] ^= E; ctx->h[5] ^= F; ctx->h[6] ^= G; ctx->h[7] ^= H;
+}
+
+static void hp_sm3_init(hp_sm3_ctx *ctx)
+{
+    ctx->h[0] = 0x7380166f; ctx->h[1] = 0x4914b2b9;
+    ctx->h[2] = 0x172442d7; ctx->h[3] = 0xda8a0600;
+    ctx->h[4] = 0xa96f30bc; ctx->h[5] = 0x163138aa;
+    ctx->h[6] = 0xe38dee4d; ctx->h[7] = 0xb0fb0e4e;
+    ctx->total = 0;
+    memset(ctx->buf, 0, 64);
+}
+
+static void hp_sm3_update(hp_sm3_ctx *ctx, const uint8_t *data, size_t len)
+{
+    size_t off = ctx->total % 64;
+    ctx->total += len;
+    if (off) {
+        size_t fill = 64 - off;
+        if (len < fill) { memcpy(ctx->buf + off, data, len); return; }
+        memcpy(ctx->buf + off, data, fill);
+        hp_sm3_transform(ctx, ctx->buf);
+        data += fill; len -= fill;
+    }
+    while (len >= 64) { hp_sm3_transform(ctx, data); data += 64; len -= 64; }
+    if (len) memcpy(ctx->buf, data, len);
+}
+
+static void hp_sm3_final(hp_sm3_ctx *ctx, uint8_t *out)
+{
+    uint64_t bits = ctx->total * 8;
+    size_t off = ctx->total % 64;
+    ctx->buf[off++] = 0x80;
+    if (off > 56) {
+        memset(ctx->buf + off, 0, 64 - off);
+        hp_sm3_transform(ctx, ctx->buf);
+        off = 0;
+    }
+    memset(ctx->buf + off, 0, 56 - off);
+    for (int i = 0; i < 8; i++)
+        ctx->buf[56 + i] = (uint8_t)(bits >> (56 - 8*i));
+    hp_sm3_transform(ctx, ctx->buf);
+    for (int i = 0; i < 8; i++) {
+        out[i*4]   = (uint8_t)(ctx->h[i] >> 24);
+        out[i*4+1] = (uint8_t)(ctx->h[i] >> 16);
+        out[i*4+2] = (uint8_t)(ctx->h[i] >> 8);
+        out[i*4+3] = (uint8_t)(ctx->h[i]);
+    }
+}
+
+/* SM3 compute function for bare hex hash (e988, mode 31100) */
+static void compute_sm3(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    hp_sm3_ctx ctx;
+    (void)salt; (void)saltlen;
+    hp_sm3_init(&ctx);
+    hp_sm3_update(&ctx, pass, passlen);
+    hp_sm3_final(&ctx, dest);
+}
+
+/* SM3CRYPT (e985, mode 35100):
+ * Format: $sm3$[rounds=N$]salt$hash43
+ * Drepper crypt algorithm using SM3 instead of SHA-256 */
+static int verify_sm3crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *digest = (unsigned char *)WS->ctx1;   /* 32 bytes */
+    unsigned char *P = (unsigned char *)WS->gp2;         /* p_bytes */
+    unsigned char *S = (unsigned char *)WS->ctx5;        /* s_bytes */
+    unsigned char *alt = (unsigned char *)WS->ctx6;      /* alternating digest */
+    hp_sm3_ctx *ctx = (hp_sm3_ctx *)WS->ctx3;           /* SM3 context (104 bytes) */
+    hp_sm3_ctx *ctx2 = (hp_sm3_ctx *)WS->ctx4;          /* temp SM3 context */
+    char *result = (char *)WS->gp1;
+
+    const char *p, *salt;
+    int saltlen, rounds = 5000;
+    int x, rnd;
+
+    if (hashlen < 10 || memcmp(hashstr, "$sm3$", 5) != 0) return 0;
+    p = hashstr + 5;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        p = strchr(p, '$');
+        if (!p) return 0;
+        p++;
+    }
+    if (rounds < 1000) rounds = 1000;
+    if (rounds > 999999999) rounds = 999999999;
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
+
+    salt = p;
+    for (saltlen = 0; saltlen < 16 && salt[saltlen] && salt[saltlen] != '$'; saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;
+
+    /* B = SM3(pass + salt + pass) */
+    hp_sm3_init(ctx);
+    hp_sm3_update(ctx, pass, passlen);
+    hp_sm3_update(ctx, (const uint8_t *)salt, saltlen);
+    hp_sm3_update(ctx, pass, passlen);
+    hp_sm3_final(ctx, alt);
+
+    /* A = SM3(pass + salt + alt[0..passlen-1]) */
+    hp_sm3_init(ctx);
+    hp_sm3_update(ctx, pass, passlen);
+    hp_sm3_update(ctx, (const uint8_t *)salt, saltlen);
+    for (x = passlen; x > 32; x -= 32)
+        hp_sm3_update(ctx, alt, 32);
+    hp_sm3_update(ctx, alt, x);
+    for (x = passlen; x != 0; x >>= 1) {
+        if (x & 1) hp_sm3_update(ctx, alt, 32);
+        else hp_sm3_update(ctx, pass, passlen);
+    }
+    hp_sm3_final(ctx, digest);
+
+    /* DP = SM3(pass * passlen) */
+    hp_sm3_init(ctx);
+    for (x = 0; x < passlen; x++)
+        hp_sm3_update(ctx, pass, passlen);
+    hp_sm3_final(ctx, alt);
+    memset(P, 0, WS_GP_SIZE);
+    for (x = 0; x < passlen; x += 32)
+        memcpy(P + x, alt, (passlen - x > 32) ? 32 : (passlen - x));
+
+    /* DS = SM3(salt * (16+digest[0])) */
+    hp_sm3_init(ctx);
+    for (x = 0; x < (int)(16 + digest[0]); x++)
+        hp_sm3_update(ctx, (const uint8_t *)salt, saltlen);
+    hp_sm3_final(ctx, alt);
+    for (x = 0; x < saltlen; x += 32)
+        memcpy(S + x, alt, (saltlen - x > 32) ? 32 : (saltlen - x));
+
+    for (rnd = 0; rnd < rounds; rnd++) {
+        hp_sm3_init(ctx);
+        if (rnd & 1) hp_sm3_update(ctx, P, passlen);
+        else hp_sm3_update(ctx, digest, 32);
+        if (rnd % 3) hp_sm3_update(ctx, S, saltlen);
+        if (rnd % 7) hp_sm3_update(ctx, P, passlen);
+        if (rnd & 1) hp_sm3_update(ctx, digest, 32);
+        else hp_sm3_update(ctx, P, passlen);
+        hp_sm3_final(ctx, digest);
+    }
+
+    /* sha256crypt byte permutation encoding (32-byte digest, 43 chars) */
+    { static const int t[][3] = {
+          {0,10,20},{21,1,11},{12,22,2},{3,13,23},{24,4,14},
+          {15,25,5},{6,16,26},{27,7,17},{18,28,8},{9,19,29},{-1,30,31}
+      };
+      char *enc = (char *)WS->gp3;
+      int ei = 0, ti;
+      unsigned int v;
+      for (ti = 0; ti < 10; ti++) {
+          v = ((unsigned int)digest[t[ti][0]] << 16) |
+              ((unsigned int)digest[t[ti][1]] << 8) | digest[t[ti][2]];
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+          enc[ei++] = phpitoa64[v & 0x3f];
+      }
+      v = ((unsigned int)digest[31] << 8) | digest[30];
+      enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+      enc[ei++] = phpitoa64[v & 0x3f]; v >>= 6;
+      enc[ei++] = phpitoa64[v & 0x3f];
+      enc[ei] = 0;
+      if (rounds == 5000)
+          snprintf(result, WS_GP_SIZE, "$sm3$%.*s$%s", saltlen, salt, enc);
+      else
+          snprintf(result, WS_GP_SIZE, "$sm3$rounds=%d$%.*s$%s", rounds, saltlen, salt, enc);
+    }
+
+    WS->verify_iter = rounds;
+    return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* AS400SSHA1 (e986, mode 35200):
+ * Format: $as400$ssha1$*USER*40HEX
+ * Algorithm: SHA1(UTF16BE(UC(username padded to 10)) + UTF16BE(pass)) */
+static int verify_as400ssha1(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *h = (unsigned char *)WS->ctx2;
+    SHA_CTX *sha_ctx = (SHA_CTX *)WS->ctx3;
+    unsigned char *u16buf = (unsigned char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$as400$ssha1$*", 14) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Extract username between * delimiters */
+    char *ustart = buf + 14;
+    char *uend = strchr(ustart, '*');
+    if (!uend) return 0;
+    *uend = 0;
+    int ulen = (int)(uend - ustart);
+    if (ulen < 1 || ulen > 10) return 0;
+
+    /* Hex hash follows */
+    char *hexhash = uend + 1;
+    int hexlen = (int)(buf + hashlen - hexhash);
+    if (hexlen != 40) return 0;
+    if (hex2bin(hexhash, 40, expected) != 20) return 0;
+
+    /* Build UTF-16BE buffer: uppercase username padded to 10 chars + password */
+    int pos = 0;
+    /* Username: uppercase, pad to 10 with spaces, UTF-16BE */
+    for (int i = 0; i < 10; i++) {
+        u16buf[pos++] = 0;
+        if (i < ulen) {
+            unsigned char c = (unsigned char)ustart[i];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            u16buf[pos++] = c;
+        } else {
+            u16buf[pos++] = ' ';
+        }
+    }
+    /* Password: UTF-16BE */
+    for (int i = 0; i < passlen; i++) {
+        u16buf[pos++] = 0;
+        u16buf[pos++] = pass[i];
+    }
+
+    SHA1_Init(sha_ctx);
+    SHA1_Update(sha_ctx, u16buf, pos);
+    SHA1_Final(h, sha_ctx);
+
+    return memcmp(h, expected, 20) == 0;
+}
+
+/* ARGON2 (e987, mode 34000):
+ * Format: $argon2{d|i|id}$v=VER$m=MEM,t=ITER,p=PARA$B64SALT$B64HASH
+ * Algorithm: argon2{d|i|id}(pass, salt, t_cost, m_cost, parallelism, hashlen) */
+static int verify_argon2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt = (unsigned char *)WS->gp1;   /* decoded salt, up to 256 bytes */
+    unsigned char *expected = (unsigned char *)WS->gp2; /* decoded expected hash */
+    unsigned char *computed = (unsigned char *)WS->gp3; /* computed hash output */
+    char *buf = (char *)WS->gp4;                       /* copy of hashstr for parsing */
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$argon2", 7) != 0) return 0;
+
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    /* Parse type: d/i/id */
+    int a2type = -1;
+    char *p = buf + 7;
+    if (*p == 'd' && p[1] == '$') { a2type = 0; p += 2; }
+    else if (*p == 'i' && p[1] == '$') { a2type = 1; p += 2; }
+    else if (*p == 'i' && p[1] == 'd' && p[2] == '$') { a2type = 2; p += 3; }
+    if (a2type < 0) return 0;
+
+    /* Parse v=VER */
+    if (memcmp(p, "v=", 2) != 0) return 0;
+    int ver = atoi(p + 2);
+    if (ver != 19 && ver != 16) return 0;
+    char *d1 = strchr(p, '$');
+    if (!d1) return 0;
+    d1++;
+
+    /* Parse m=MEM,t=ITER,p=PARA */
+    int m_cost = 0, t_cost = 0, parallelism = 0;
+    if (sscanf(d1, "m=%d,t=%d,p=%d", &m_cost, &t_cost, &parallelism) != 3) return 0;
+    if (m_cost < 1 || t_cost < 1 || parallelism < 1 || parallelism > 32) return 0;
+
+    char *d2 = strchr(d1, '$');
+    if (!d2) return 0;
+    d2++;
+
+    char *d3 = strchr(d2, '$');
+    if (!d3) return 0;
+    *d3 = 0;
+    d3++;
+
+    /* Decode salt (base64, no padding) */
+    int b64saltlen = strlen(d2);
+    int saltlen = b64_decode_nopad(d2, salt, b64saltlen);
+    if (saltlen < 1 || saltlen > 255) return 0;
+
+    /* Decode expected hash */
+    int b64hashlen = strlen(d3);
+    int exp_hashlen = b64_decode_nopad(d3, expected, b64hashlen);
+    if (exp_hashlen < 1 || exp_hashlen > 128) return 0;
+
+    /* Compute argon2 — malloc/free workspace inside (variable size) */
+    argon2_context ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.out = computed;
+    ctx.outlen = exp_hashlen;
+    ctx.pwd = (uint8_t *)pass;
+    ctx.pwdlen = passlen;
+    ctx.salt = salt;
+    ctx.saltlen = saltlen;
+    ctx.t_cost = t_cost;
+    ctx.m_cost = m_cost;
+    ctx.lanes = parallelism;
+    ctx.threads = 1;
+    ctx.version = ver;
+    ctx.allocate_cbk = NULL;  /* let argon2 malloc internally */
+    ctx.free_cbk = NULL;      /* let argon2 free internally */
+    ctx.flags = 0;
+
+    int rc = argon2_ctx(&ctx, (argon2_type)a2type);
+    if (rc != ARGON2_OK) return 0;
+
+    WS->verify_iter = t_cost;
+    return memcmp(computed, expected, exp_hashlen) == 0;
+}
+
+/* MD5SALT1SALT2 (e991, hashcat mode 33000): md5($salt1.$pass.$salt2)
+ * Format: 32hex:salt1:salt2 */
+static int verify_md5salt1salt2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+
+    if (hashlen < 36) return 0; /* 32hex + : + s1 + : + s2 */
+    if (hashstr[32] != ':') return 0;
+    for (int i = 0; i < 32; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    hex2bin(hashstr, 32, expected);
+    const char *salt1 = hashstr + 33;
+    const char *colon2 = strchr(salt1, ':');
+    if (!colon2 || colon2 == salt1) return 0;
+    int s1len = colon2 - salt1;
+    const char *salt2 = colon2 + 1;
+    int s2len = hashlen - (salt2 - hashstr);
+    if (s2len < 1) return 0;
+    int total = s1len + passlen + s2len;
+    if (total > 4000) return 0;
+    memcpy(buf, salt1, s1len);
+    memcpy(buf + s1len, pass, passlen);
+    memcpy(buf + s1len + passlen, salt2, s2len);
+    rhash_msg(RHASH_MD5, buf, total, computed);
+    return memcmp(computed, expected, 16) == 0;
+}
+
+/* SYMFONY256 (e992, hashcat mode 35800): Symfony Legacy SHA256
+ * Format: 64hex:salt
+ * Algorithm: SHA512(pass) → hex128 → 10000x SHA512(hex[+salt if iter>4999]) → SHA256(hex) */
+static int verify_symfony256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;  /* 32 bytes */
+    unsigned char *sha_out = (unsigned char *)WS->ctx2;   /* 64 bytes SHA512 output */
+    unsigned char *sha256_out = (unsigned char *)WS->ctx3; /* 32 bytes SHA256 output */
+    char *hexbuf = (char *)WS->gp1;   /* 128 + 256 bytes for hex + salt */
+
+    if (hashlen < 66) return 0; /* 64hex + : + salt */
+    if (hashstr[64] != ':') return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    hex2bin(hashstr, 64, expected);
+    const char *salt = hashstr + 65;
+    int saltlen = hashlen - 65;
+
+    /* SHA512(password) → hex128 */
+    SHA512(pass, passlen, sha_out);
+    for (int i = 0; i < 64; i++) {
+        hexbuf[i*2]   = hextab_lc[sha_out[i] >> 4];
+        hexbuf[i*2+1] = hextab_lc[sha_out[i] & 0xf];
+    }
+    /* 10000 iterations */
+    for (int iter = 0; iter < 10000; iter++) {
+        if (iter > 4999) {
+            memcpy(hexbuf + 128, salt, saltlen);
+            SHA512((unsigned char *)hexbuf, 128 + saltlen, sha_out);
+        } else {
+            SHA512((unsigned char *)hexbuf, 128, sha_out);
+        }
+        for (int i = 0; i < 64; i++) {
+            hexbuf[i*2]   = hextab_lc[sha_out[i] >> 4];
+            hexbuf[i*2+1] = hextab_lc[sha_out[i] & 0xf];
+        }
+    }
+    /* Final SHA256(hex128) */
+    SHA256((unsigned char *)hexbuf, 128, sha256_out);
+    WS->verify_iter = 10000;
+    return memcmp(sha256_out, expected, 32) == 0;
+}
+
+/* WPBCRYPT (e993, hashcat mode 35500): WordPress bcrypt(hmac-sha384($pass))
+ * Format: $wp$2y$NN$SALT22HASH31 (63 chars total)
+ * Algorithm: HMAC-SHA384(key="wp-sha384", msg=pass) → base64(48 bytes) → bcrypt */
+static int verify_wpbcrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *hmac_out = (unsigned char *)WS->ctx1;  /* 48 bytes */
+    char *b64buf = (char *)WS->ctx2;   /* 68 bytes for base64 */
+    char *setting = (char *)WS->ctx3;  /* 30 bytes for bcrypt setting */
+    char *bcrypt_out = (char *)WS->gp1; /* BCRYPT_HASHSIZE */
+
+    if (hashlen != 63) return 0;
+    if (memcmp(hashstr, "$wp$", 4) != 0) return 0;
+    const char *bchash = hashstr + 4; /* "2y$NN$salt22hash31" (59 chars) */
+    if (bchash[2] != '$' || bchash[5] != '$') return 0;
+
+    /* Reconstruct standard bcrypt setting: "$2y$NN$salt22" (29 chars) */
+    setting[0] = '$';
+    memcpy(setting + 1, bchash, 28);
+    setting[29] = 0;
+
+    /* Reconstruct expected bcrypt output: "$2y$NN$salt22hash31" (60 chars) */
+    char expected[61];
+    expected[0] = '$';
+    memcpy(expected + 1, bchash, 59);
+    expected[60] = 0;
+
+    /* HMAC-SHA384(key="wp-sha384", msg=password) */
+    unsigned int hmac_len = 48;
+    HMAC(EVP_sha384(), "wp-sha384", 9, pass, passlen, hmac_out, &hmac_len);
+
+    /* Base64 encode → 64 chars */
+    b64_encode(hmac_out, 48, b64buf);
+
+    /* bcrypt(b64_result, setting) */
+    extern char *crypt_rn(const char *key, const char *setting,
+        void *data, int size);
+    if (!crypt_rn(b64buf, setting, bcrypt_out, WS_GP_SIZE))
+        return 0;
+
+    return strcmp(bcrypt_out, expected) == 0;
+}
+
+/* GOST12512CRYPT (e994, hashcat mode 35600): gost12512crypt
+ * Format: $gost12512hash$[rounds=N$]SALT$HASH86
+ * Algorithm: sha512crypt with GOST-2012 Streebog-512 replacing SHA-512 */
+static int verify_gost12512crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *digest = (unsigned char *)WS->ctx1;    /* 64 bytes Streebog output */
+    unsigned char *altdigest = (unsigned char *)WS->ctx2; /* 64 bytes alt digest */
+    unsigned char *pbytes = (unsigned char *)WS->gp1;     /* P-bytes, up to passlen */
+    unsigned char *sbytes = (unsigned char *)WS->gp2;     /* S-bytes, up to saltlen */
+    unsigned char *tmpbuf = (unsigned char *)WS->gp3;     /* work buffer */
+    streebog_t *ctx = (streebog_t *)WS->gp4;              /* Streebog context */
+
+    static const char itoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    if (hashlen < 17) return 0;
+    if (memcmp(hashstr, "$gost12512hash$", 15) != 0) return 0;
+
+    const char *p = hashstr + 15;
+    int rounds = 5000;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        if (rounds < 1000 || rounds > 999999999) return 0;
+        p = strchr(p + 7, '$');
+        if (!p) return 0;
+        p++;
+    }
+    const char *saltp = p;
+    const char *hashsep = strchr(saltp, '$');
+    if (!hashsep) return 0;
+    int saltlen = hashsep - saltp;
+    if (saltlen < 1 || saltlen > 16) return 0;
+    const char *expected_b64 = hashsep + 1;
+    int b64len = hashlen - (expected_b64 - hashstr);
+    if (b64len != 86) return 0;
+
+    /* Drepper algorithm with Streebog-512 */
+    int len = passlen;
+    /* Step 1: alt = GOST512(pass + salt + pass) */
+    streebog_init(ctx, 64);
+    streebog_update(ctx, pass, len);
+    streebog_update(ctx, saltp, saltlen);
+    streebog_update(ctx, pass, len);
+    streebog_final(tmpbuf, ctx);
+    /* Saarinen streebog.c outputs bytes in reverse order vs GOST standard */
+    { int i; for (i = 0; i < 64; i++) altdigest[i] = tmpbuf[63 - i]; }
+
+    /* Step 2: digest = GOST512(pass + salt + alt_bytes[0..len-1]) */
+    streebog_init(ctx, 64);
+    streebog_update(ctx, pass, len);
+    streebog_update(ctx, saltp, saltlen);
+    { int x;
+      for (x = len; x > 64; x -= 64)
+        streebog_update(ctx, altdigest, 64);
+      streebog_update(ctx, altdigest, x);
+    }
+    { int x;
+      for (x = len; x != 0; x >>= 1) {
+        if (x & 1) streebog_update(ctx, altdigest, 64);
+        else streebog_update(ctx, pass, len);
+      }
+    }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 64; i++) digest[i] = tmpbuf[63 - i]; }
+
+    /* Step 3: P-bytes = GOST512(pass repeated len times) */
+    streebog_init(ctx, 64);
+    { int x;
+      for (x = 0; x < len; x++)
+        streebog_update(ctx, pass, len);
+    }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 64; i++) pbytes[i] = tmpbuf[63 - i]; }
+    /* Expand P-bytes to len bytes by repeating */
+    { int x;
+      for (x = 64; x < len; x += 64)
+        memcpy(pbytes + x, pbytes, 64);
+    }
+
+    /* Step 4: S-bytes = GOST512(salt repeated 16+digest[0] times) */
+    streebog_init(ctx, 64);
+    { int x;
+      for (x = 0; x < 16 + (unsigned)digest[0]; x++)
+        streebog_update(ctx, saltp, saltlen);
+    }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 64; i++) sbytes[i] = tmpbuf[63 - i]; }
+
+    /* Step 5: rounds loop */
+    { int x;
+      for (x = 0; x < rounds; x++) {
+        streebog_init(ctx, 64);
+        if (x & 1) streebog_update(ctx, pbytes, len);
+        else       streebog_update(ctx, digest, 64);
+        if (x % 3) streebog_update(ctx, sbytes, saltlen);
+        if (x % 7) streebog_update(ctx, pbytes, len);
+        if (x & 1) streebog_update(ctx, digest, 64);
+        else       streebog_update(ctx, pbytes, len);
+        streebog_final(tmpbuf, ctx);
+        { int i; for (i = 0; i < 64; i++) digest[i] = tmpbuf[63 - i]; }
+      }
+    }
+
+    /* Encode digest with sha512crypt itoa64 transposition */
+    /* Byte triplets: [0,21,42] [22,43,1] [44,2,23] [3,24,45] ... [62,20,41] then [63] */
+    static const int s512_trip[][3] = {
+        { 0,21,42}, {22,43, 1}, {44, 2,23}, { 3,24,45}, {25,46, 4},
+        {47, 5,26}, { 6,27,48}, {28,49, 7}, {50, 8,29}, { 9,30,51},
+        {31,52,10}, {53,11,32}, {12,33,54}, {34,55,13}, {56,14,35},
+        {15,36,57}, {37,58,16}, {59,17,38}, {18,39,60}, {40,61,19},
+        {62,20,41}
+    };
+    char computed_b64[87];
+    int pos = 0;
+    { int t;
+      for (t = 0; t < 21; t++) {
+        unsigned int v = ((unsigned int)digest[s512_trip[t][0]] << 16) |
+                         ((unsigned int)digest[s512_trip[t][1]] << 8) |
+                          (unsigned int)digest[s512_trip[t][2]];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+      /* Last byte: digest[63] → 2 chars */
+      { unsigned int v = (unsigned int)digest[63];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+    }
+    computed_b64[pos] = 0;
+
+    WS->verify_iter = rounds;
+    return memcmp(computed_b64, expected_b64, 86) == 0;
+}
+
 /* ---- Chain arrays for types needing HTC registration ---- */
 static struct chain_step chain_md5sha1ucmd5uc[] = { SU_MD5, SU_SHA1, S_MD5 };
 /* chain_md5md5ucsha1md5md5 defined earlier */
@@ -19050,6 +20701,7 @@ static void init_hashtypes(void)
     HT("BLAKE2B512",    64, 0, compute_blake2b512, "fbdba996cade3bae2d948c2f03f8149ffa7068584731ac6efbef1688e64609b6969a52dcc203b74aa87d6d9d1b0cd93bea724cddd12443f2b808bc03776b81cc:password123");
     HT("BLAKE2S256",    32, 0, compute_blake2s256, "02027c0e103001c546eaf0688c8270aa97dcdf867964d0049cdd021936768667:password123");
     HT("BLAKE2B256",    32, 0, compute_blake2b256, "4482542d0cdfeb679f2e0c4d5780af2c33dc57892390c9d5a17e8fa8be01100f:password123");
+    HT("SM3",           32, 0, compute_sm3, "2d31559bd1c4a05661c984d1c50a22ae2df2323d64756569e40b3e2f8e24884a:password123");
     /* Murmur */
     HT("MURMUR64AZERO", 8,  HTF_ITER_X0, compute_murmur64a_zero, "4d8874c6a15a35f4:password123");
     /* UC variants */
@@ -19063,6 +20715,13 @@ static void init_hashtypes(void)
     HT("MD5PASSSALT",   16, HTF_SALTED | HTF_SALT_AFTER, compute_md5passsalt, "3bafc2e8611d1e4e84338b552539ce28:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123");
     HT("MD5SALTPASS",   16, HTF_SALTED, compute_md5saltpass, "e0355b9d1bd81d48a0a84ee98733ba48:00:password123");
     HT("SHA1SALTPASS",  20, HTF_SALTED, compute_sha1saltpass, "dc4615802e2920538ead6d2cfab8a16c15a62fac:administrator:password123");
+    /* Django SHA-1: also accept sha1$SALT$HASH format via verify */
+    { int _i = find_type_index("SHA1SALTPASS");
+      if (_i >= 0) {
+        Hashtypes[_i].verify = verify_django_sha1;
+        Hashtypes[_i].vclass |= HCLASS_OTHER;
+      }
+    }
     HT("SHA1PASSSALT",  20, HTF_SALTED | HTF_SALT_AFTER, compute_sha1passsalt, "a292f2a7bc98439aff04d639beb90ce2765e6bad:administrator:password123");
     HT("SHA256SALTPASS",32, HTF_SALTED, compute_sha256saltpass, "5ac28834ed8be26198bde055d77ba012ef5207441d415de9ea8e55b504d07afa:Salt:password123");
     HT("SHA256PASSSALT",32, HTF_SALTED | HTF_SALT_AFTER, compute_sha256passsalt, "71d8762cd430373cd73ed65f1d8c054da5e70918ae23051ea0e638e444fe1767:Salt:password123");
@@ -19908,6 +21567,8 @@ static void init_hashtypes(void)
     HTV("BCRYPT",     0, verify_bcrypt, "$2a$12$DG3Vk1qDyvwkh96yaCuf6.HqWPKac6Ur7nOitGIbrN05iqtnveM7C:password123");
     HTV("BCRYPTMD5",  0, verify_bcryptmd5, "$2b$12$M708MGo3FgbZp6Fy83zKTOP3oqrEjAJam0PrYYkHr8mHEvnPqJsru:password123");
     HTV("BCRYPTSHA1", 0, verify_bcryptsha1, "$2b$12$0gky1pAf50ToA0A9tqo8P.JCO.x82x3oKv7QflLyP/ZuuDVWFs43m:password123");
+    HTV("BCRYPTSHA256", 0, verify_bcryptsha256, "$2b$05$jrDCJDU1FinZhcjIQ343Gedf.eY3OEUtP3uAvu7CuaYAAYgeWo0Hm:password123");
+    HTV("BCRYPTHMACSHA256", 0, verify_bcrypthmacsha256, "$bcrypt-sha256$v=2,t=2b,r=5$RndSa1tRndSa1tRndSa1tu$wLxHrJMAHPX7Br7IB1EkHSpfXdnxnTC:password123");
     HTV("PHPBB3",     0, verify_phpbb3, "$H$997LdNzHMtxNZ26WousH1K.At2SnCs0:password123");
     HTV("APR1",       0, verify_apr1, "$apr1$rndSa1t$UuNY2EWlcn4SkHJxQh1G3/:password123");
     HTV("SCRYPT",     0, verify_scrypt, "SCRYPT:1024:1:1:AA==:m3hB8eGi24+6bsMZkTf+If0G0liOTm26E7zsUzY/SRg=:password123");
@@ -19932,6 +21593,10 @@ static void init_hashtypes(void)
     HTV("DESENCRYPT",  0, verify_desencrypt, "efb32954aec338ca:1172075784504605:password123");
     HTV("DES3ENCRYPT", 0, verify_des3encrypt, "c74ec0f283bb3efb:8152001061460743:password123");
     HTV("RACF",        0, verify_racf, "6A182040F07213B8:USER:password123");
+    /* RACF also needs HCLASS_PREFIX for $racf$* format */
+    { int _i = find_type_index("RACF");
+      if (_i >= 0) Hashtypes[_i].vclass |= HCLASS_PREFIX;
+    }
 
     /* Wave 4: Cisco + Juniper */
     HTV("JUNIPERSSG",  0, verify_juniperssg, "nKLFAKrpHSNHcHMMnsaMoCDtGrPj0n:user:password123");
@@ -20002,10 +21667,15 @@ static void init_hashtypes(void)
     HTV("QNX7-SHA512",       0, verify_qnx7_sha512, "@S,4096@GSsZxLYkRND57XdXo2rfNQ0DtKdME1c7SWdrjyFvq4RgFuTWj2NlkVJHIslAY1lIQh7j9VhN8BVVTu7jDKKqXA==@NDY2MDEwNjk3YjBjYzM2MzliMzc3Mzc0ZTNiMTAzNzE=:password123");
     HTV("SHA1-S1PS2",        0, verify_sha1_s1ps2, "2c4b7771baf3ee5ea6576c528582db4f937db71b:18463812876898603420835420139870031762867:4449516425193605979760642927684590668549584534278112685644182848763890902699756869283142014018311837025441092624864168514500447147373198033271040848851687108629922695275682773136540885737874252666804716579965812709728589952868736177317883550827482248620334:password123");
     HTV("RAILS-RESTFUL",     0, verify_rails_restful, "738a19a9439ffbd44a5b44eb9c84843b571f4644:238769868762:8962783556527653675:password123");
-    HTV("KRB5PA-17",         0, verify_krb5pa_17, "$krb5pa$17$hashcat$HASHCATDOMAIN.COM$9f385572cb6efe977d37c5c4f285347be798771ab0555249fd1aa280b629cb584c6908bace807c143f1c9bcc718859e42cf505567399d3d1:password123");
-    HTV("KRB5PA-18",         0, verify_krb5pa_18, "$krb5pa$18$hashcat$HASHCATDOMAIN.COM$b991fe5d29b5fcf6b35a2cf8e053ae450597ec25972cdf1b2b86033025ab2773036d8cdbd2d35549081e0ed111926cc733f5c5c65dd97b38:password123");
+    HTV("KRB5PA-17",         0, verify_krb5pa_17, "$krb5pa$17$hashpipe$HASHPIPEDOMAIN.FAKE$87d690b66ff46a8b55bb9eb4152848c595d6c33837954d627dc9ce19bbc32768e9a1dad8c63c27edbbd4e6f361534a48b8d7fe055b61f9cf:password123");
+    HTV("KRB5PA-18",         0, verify_krb5pa_18, "$krb5pa$18$hashpipe$HASHPIPEDOMAIN.FAKE$ce165afbd18b9b6f50ed9cb9954cd77c0c7a6054a26dbe5607206ed459156b27df4a6db33cc1e39aa1263ddfd6c45540af2b316e109da4ca:password123");
     HTV("WPA-PMKID",         0, verify_wpa_pmkid, "WPA*01*73e1a080000ac80417aa784bec8627fa*fc690c158264*f4747f87f9f4*686173686361742d6573736964***:password123");
     HTV("WPA-EAPOL",         0, verify_wpa_eapol, "WPA*02*7703121020ac20025ce3347aba2ccf55*fc690c158264*f4747f87f9f4*686173686361742d6573736964*10e3be3b005a629e89de088d6a2fdc489db83ad4764f2d186b9cde15446e972e*0103007502010a0000000000000000000148ce2ccba9c1fda130ff2fbbfb4fd3b063d1a93920b0f7df54a5cbf787b16171000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001630140100000fac040100000fac040100000fac028000*00:password123");
+    HTV("WPA_PMK",           0, verify_wpa_pmk, "WPA*01*5ce7ebe97a1bbfeb2822ae627b726d5b*27462da350ac*accd10fb464e*686173686361742d6573736964***:88f43854ae7b1624fc2ab7724859e795130f4843c7535729e819cf92f39535dc");
+    HTV("MD5SALT1SALT2",     0, verify_md5salt1salt2, "7af9397a334889154d305e3bea6e251b:salt1:salt2:password123");
+    HTV("SYMFONY256",        0, verify_symfony256, "b131e8c370fcafef01c2a7604b5fe9646e2db46df559b05237d3e45e1afb7650:salt1234salt5678:password123");
+    HTV("WPBCRYPT",          0, verify_wpbcrypt, "$wp$2b$05$RndSa1tRndSa1tRndSa1tugwc9wduHyReZB0wwYpf/1LAbf.pn.Fa:password123");
+    HTV("GOST12512CRYPT",   0, verify_gost12512crypt, "$gost12512hash$defaultS$NF.9WTf1BfkSz8fQjCsT9zm6REXDO8/yr50P2tYsFyrOuQJdbqeNdz6qSBaqyWCFciwEpcVIeCY1ZPRYshNd1.:password123");
     HTV("ANSIBLE-VAULT",     0, verify_ansible_vault, "$ansible$0*0*6b761adc6faeb0cc0bf197d3d4a4a7d3f1682e4b169cae8fa6b459b3214ed41e*426d313c5809d4a80a4b9bc7d4823070*5c9c6a909aae4c1eb624a6ae99b952586a9ed57eb938cbe089a950d9213a98aa:password123");
     HTV("APFS",              0, verify_apfs, "$fvde$2$16$58778104701476542047675521040224$20000$c75ba59230e2d14c19eb26a75176d853c88dce8ec8996f745fff5050073987391ac0092d7009b131:password123");
     HTV("OTM-SHA256",        0, verify_otm_sha256, "otm_sha256:1000:1234567890:VXxvkQcU+34QHlMrdScpmdbKTHi8oA41M4VBfy1z3zc=:password123");
@@ -20040,6 +21710,23 @@ static void init_hashtypes(void)
     HTV("BLAKE2B256",        0, verify_blake2b256, "$BLAKE2$4482542d0cdfeb679f2e0c4d5780af2c33dc57892390c9d5a17e8fa8be01100f:password123");
     HTV("BLAKE2B256PASSSALT", 0, verify_blake2b256passsalt, "$BLAKE2$eee9fc18ca12f18c0a700b07c464d58a7e6f624800d7e5b13170f4e4cd5eb1e9:testsalt:password123");
     HTV("BLAKE2B256SALTPASS", 0, verify_blake2b256saltpass, "$BLAKE2$f4fdf6b1cda2872527244ff036f1670af39c39decbd9aab4765a7aaa2b1d41d0:testsalt:password123");
+    HTV("BLAKE2S256",        0, verify_blake2s256, "$BLAKE2$02027c0e103001c546eaf0688c8270aa97dcdf867964d0049cdd021936768667:password123");
+    HTV("MURMUR3",           0, verify_murmur3, "43d88d27:00000000:password123");
+    HTV("VEEAM-VBK",         0, verify_veeam_vbk, "$vbk$*54731702769149752741495960625996207399688284541933702394775960978730695504382155223405444342855920150089170058956647576461877712*10000*448812102f7669e53dde96be5614587a:password123");
+    HTV("MSSNTP",            0, verify_mssntp, "$sntp-ms$4da11e6ad992140a420d88062b8e2ae3$907733697536811342962140955567108526489624716566696971338784438986103976327367763739445744705380:password123");
+    HTV("SSPR-MD5",          0, verify_sspr_md5, "$sspr$0$100000$NONE$b053b034085c87139bfa696318aa8086:password123");
+    HTV("SSPR-SHA1",         0, verify_sspr_sha1, "$sspr$1$100000$NONE$af35f222b94c26aa8eec2198ce0b98c305bc3ba2:password123");
+    HTV("SSPR-SHA1S",        0, verify_sspr_sha1s, "$sspr$2$100000$CxCpGqosk9PkCBcoRFp6DLjjRhVEJKK8$c87d697549444287f755ca4209bf66ccf46caefe:password123");
+    HTV("SSPR-SHA256",       0, verify_sspr_sha256, "$sspr$3$100000$ODk2NDA5Mjc2NDIwMjMwMjQyMTQ1NzMz$3cce91a82abf97b70c3836516ce2c4033cff16bffe10de6a1d4a900e1789e0b8:password123");
+    HTV("SSPR-SHA512",       0, verify_sspr_sha512, "$sspr$4$100000$NzYwNjMyNDc2MTQ2OTE4NTUzODAyODE3$f1a614b4400702da2d49c8ee3f3b5f835dabc92ba1fd192471cbab80e9f3acb24edcfb0fa0b7acf74233a1f87c880f76a3052d5bd68e5f1fdcfbaafd7f98c08e:password123");
+    HTVC("EMPIRECMS",        0, verify_empirecms, HCLASS_HEX, "7a9664f3d30b08ec71e6b201491392ea:726620866134417802643053384570:6056291339665060317728572165496183:password123");
+    HTV("PBKDF1-SHA1",      0, verify_pbkdf1_sha1, "PBKDF1:sha1:1000:cGVuZ3VpbmtlZXBlcg==:ojgqgSA34VYUi3u7iXF/vNKR6/E=:password123");
+    HTV("MSONLINE",         0, verify_msonline, "$MSONLINEACCOUNT$0$10000$6153d80b93f4f3c4082576154118d4191744911d6370b505e823d049375654ef:password123");
+    HTV("WBB4",             0, verify_wbb4, "$2a$08$aaaaaaaaaaaaaaaaaaaaaOTh6vK9mhTsqbydr1hjy8VMv24KoT/pS:password123");
+    HTV("SAPCODVNH512",     0, verify_sapcodvnh512, "{x-isSHA512, 15000}sWjKv3fK8srBNiZxspxwl2HnFSlo7tpAQkVFwOlvcS00IPHEYWM2OAG3Q8VZ7kxJq7+N5kfZI67otz3E3ugXLTY4NTQ4MDY1NzQ2NA==:password123");
+    HTV("SM3CRYPT",         0, verify_sm3crypt, "$sm3$aaaaaaaaaaaaaaaa$9hj3BsTKoxVnrt6XmdzPzkD4Xi1i8VVI6wk6t.RK.w7:password123");
+    HTV("AS400SSHA1",       0, verify_as400ssha1, "$as400$ssha1$*QTEST1*228267B3F408E739F5A577554E978DD05536A3ED:password123");
+    HTV("ARGON2",           0, verify_argon2, "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$g21LGibBQ2iHFjsbopcv8xkV8FNXi1tW6wD6GcyKB7I:password123");
 
     /* Phase 1: Crypt-based verify types */
     HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
@@ -20425,6 +22112,46 @@ static int b64_decode(const char *src, unsigned char *dst, int srclen)
         if (src[i+3] == '=') break;
         if (e > 63) break;
         dst[j++] = (c << 6) | e;
+    }
+    return j;
+}
+
+/* Standard base64 decode, handles unpadded input (2-3 trailing chars) */
+static int b64_decode_nopad(const char *src, unsigned char *dst, int srclen)
+{
+    static const unsigned char d[] = {
+      255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+      255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+      255,255,255,255,255,255,255,255,255,255,255, 62,255,255,255, 63,
+       52, 53, 54, 55, 56, 57, 58, 59, 60, 61,255,255,255,  0,255,255,
+      255,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+       15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,255,255,255,255,255,
+      255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+       41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,255,255,255,255,255
+    };
+    int i, j = 0;
+    for (i = 0; i + 3 < srclen; i += 4) {
+        unsigned int a = d[(unsigned char)src[i]], b = d[(unsigned char)src[i+1]];
+        unsigned int c = d[(unsigned char)src[i+2]], e = d[(unsigned char)src[i+3]];
+        if (a > 63 || b > 63) break;
+        dst[j++] = (a << 2) | (b >> 4);
+        if (c > 63) break;
+        dst[j++] = (b << 4) | (c >> 2);
+        if (e > 63) break;
+        dst[j++] = (c << 6) | e;
+    }
+    { int rem = srclen - i;
+      if (rem >= 2) {
+        unsigned int a = d[(unsigned char)src[i]], b = d[(unsigned char)src[i+1]];
+        if (a <= 63 && b <= 63) {
+          dst[j++] = (a << 2) | (b >> 4);
+          if (rem >= 3) {
+            unsigned int c = d[(unsigned char)src[i+2]];
+            if (c <= 63)
+              dst[j++] = (b << 4) | (c >> 2);
+          }
+        }
+      }
     }
     return j;
 }
@@ -22266,6 +23993,7 @@ static void update_batch_limit(int type_idx)
         if (!WS) {
             tmp_ws = (struct workspace *)calloc(1, sizeof(*tmp_ws));
             tmp_ws->testvec = malloc(TESTVECSIZE + 16);
+
             ws_init_rhash(tmp_ws);
             WS = tmp_ws;
         }
@@ -23583,247 +25311,253 @@ static void usage(int brief)
 static void init_rates(void)
 {
     static const struct { int idx; long long rate; } bench_rates[] = {
-
-        {1, 3000425LL}, {2, 3048910LL}, {3, 3689982LL}, {4, 211638LL}, 
-        {5, 1593059LL}, {6, 2364183LL}, {7, 3325244LL}, {8, 2630022LL}, 
-        {9, 1837308LL}, {10, 1953065LL}, {11, 1483239LL}, {12, 1457750LL}, 
-        {13, 550242LL}, {14, 573193LL}, {15, 2904056LL}, {16, 3237238LL}, 
-        {17, 1775086LL}, {18, 3439430LL}, {19, 2289949LL}, {20, 2890939LL}, 
-        {21, 1516696LL}, {22, 2507566LL}, {23, 2800870LL}, {24, 2827628LL}, 
-        {25, 314726LL}, {26, 312040LL}, {27, 546734LL}, {28, 533294LL}, 
-        {29, 395314LL}, {30, 287700LL}, {31, 2332280LL}, {32, 817364LL}, 
-        {33, 2281210LL}, {34, 1636923LL}, {35, 959142LL}, {36, 962733LL}, 
-        {37, 753971LL}, {38, 767501LL}, {39, 1995542LL}, {40, 1893790LL}, 
-        {41, 3034368LL}, {42, 2034727LL}, {43, 1850404LL}, {44, 2614240LL}, 
-        {45, 1890517LL}, {46, 1791040LL}, {47, 2558091LL}, {48, 1910279LL}, 
-        {49, 1841251LL}, {50, 1932410LL}, {51, 1829098LL}, {52, 2239342LL}, 
-        {53, 2233472LL}, {54, 2016528LL}, {55, 2029346LL}, {56, 2195639LL}, 
-        {57, 2817079LL}, {58, 2775565LL}, {59, 2811547LL}, {60, 519270LL}, 
-        {61, 521011LL}, {62, 545644LL}, {63, 538646LL}, {64, 739532LL}, 
-        {65, 728689LL}, {66, 598840LL}, {67, 555983LL}, {68, 1079688LL}, 
-        {69, 1077894LL}, {70, 707401LL}, {71, 497556LL}, {72, 1604654LL}, 
-        {73, 1801063LL}, {74, 538572LL}, {75, 560142LL}, {76, 2581122LL}, 
-        {77, 2541498LL}, {78, 954100LL}, {79, 1044914LL}, {80, 724139LL}, 
-        {81, 746038LL}, {82, 724142LL}, {83, 746192LL}, {84, 1803019LL}, 
-        {85, 1845900LL}, {86, 1826240LL}, {87, 1839210LL}, {88, 1787075LL}, 
-        {89, 1709218LL}, {90, 1848633LL}, {91, 1750012LL}, {92, 1947911LL}, 
-        {93, 2000866LL}, {94, 1113217LL}, {95, 902854LL}, {96, 1651246LL}, 
-        {97, 2328387LL}, {98, 2162732LL}, {99, 1254265LL}, {100, 1263174LL}, 
-        {101, 1275559LL}, {102, 1281142LL}, {103, 2280559LL}, {104, 2346927LL}, 
-        {105, 977654LL}, {106, 1023177LL}, {107, 723105LL}, {108, 694922LL}, 
-        {109, 334685LL}, {110, 308238LL}, {111, 2250840LL}, {112, 2334225LL}, 
-        {113, 1955616LL}, {114, 2084598LL}, {115, 4146793LL}, {116, 1904118LL}, 
-        {117, 1995586LL}, {118, 3537586LL}, {119, 108233LL}, {120, 110421LL}, 
-        {121, 2566609LL}, {122, 2596293LL}, {123, 2221069LL}, {124, 506346LL}, 
-        {125, 400797LL}, {126, 1967163LL}, {127, 1919205LL}, {128, 1519225LL}, 
-        {129, 1442012LL}, {130, 1374476LL}, {131, 1330005LL}, {132, 1689199LL}, 
-        {133, 1722529LL}, {134, 1415203LL}, {135, 1408540LL}, {136, 1309536LL}, 
-        {137, 1386733LL}, {138, 1780554LL}, {139, 1853920LL}, {140, 1353557LL}, 
-        {141, 1429591LL}, {142, 1366215LL}, {143, 1403312LL}, {144, 1796819LL}, 
-        {145, 1730092LL}, {146, 1322579LL}, {147, 1419591LL}, {148, 1296819LL}, 
-        {149, 1296441LL}, {150, 1724602LL}, {151, 1738205LL}, {152, 1415424LL}, 
-        {153, 1502555LL}, {154, 1302974LL}, {155, 1419828LL}, {156, 1850527LL}, 
-        {157, 1818389LL}, {158, 1527538LL}, {159, 1480443LL}, {160, 1957612LL}, 
-        {161, 1684480LL}, {162, 1241416LL}, {163, 1212966LL}, {164, 1223400LL}, 
-        {165, 1226111LL}, {166, 1064113LL}, {167, 1095928LL}, {168, 1053251LL}, 
-        {169, 1158386LL}, {170, 2338124LL}, {171, 2162293LL}, {172, 1008233LL}, 
-        {173, 963772LL}, {174, 289684LL}, {175, 289572LL}, {176, 296933LL}, 
-        {177, 207808LL}, {178, 1895346LL}, {179, 1098703LL}, {180, 800955LL}, 
-        {181, 1467380LL}, {182, 2490426LL}, {183, 2020708LL}, {184, 1564655LL}, 
-        {185, 1272418LL}, {186, 408137LL}, {187, 1995564LL}, {188, 1404887LL}, 
-        {189, 984432LL}, {190, 773155LL}, {191, 1183207LL}, {192, 956605LL}, 
-        {193, 1855259LL}, {194, 1012807LL}, {195, 839997LL}, {196, 1553436LL}, 
-        {197, 871170LL}, {198, 532666LL}, {199, 946061LL}, {200, 1391662LL}, 
-        {201, 2292056LL}, {202, 1162408LL}, {203, 1756140LL}, {204, 686045LL}, 
-        {205, 1304695LL}, {206, 1195230LL}, {207, 1548525LL}, {208, 65635LL}, 
-        {209, 2057929LL}, {210, 1005494LL}, {211, 609378LL}, {212, 908068LL}, 
-        {213, 673617LL}, {214, 769754LL}, {215, 850007LL}, {216, 475978LL}, 
-        {217, 526281LL}, {218, 413114LL}, {219, 958014LL}, {220, 919867LL}, 
-        {221, 904080LL}, {222, 919377LL}, {223, 892206LL}, {224, 1030153LL}, 
-        {225, 1035332LL}, {226, 1043610LL}, {227, 171429LL}, {228, 452088LL}, 
-        {229, 56505LL}, {230, 42010LL}, {231, 1461697LL}, {232, 4415714LL}, 
-        {233, 2162694LL}, {234, 1670319LL}, {235, 1312745LL}, {236, 2540502LL}, 
-        {237, 2202468LL}, {238, 1799257LL}, {239, 1562997LL}, {240, 1497166LL}, 
-        {241, 1330446LL}, {242, 1126647LL}, {243, 1365323LL}, {244, 1162945LL}, 
-        {245, 1294790LL}, {246, 1727604LL}, {247, 1323867LL}, {248, 1312274LL}, 
-        {249, 1662569LL}, {250, 1944207LL}, {251, 1177293LL}, {252, 2127610LL}, 
-        {253, 2205497LL}, {254, 1484585LL}, {255, 1405801LL}, {256, 1214150LL}, 
-        {257, 1143144LL}, {258, 1758907LL}, {259, 1630032LL}, {260, 1929647LL}, 
-        {261, 1407118LL}, {262, 2001976LL}, {263, 3122544LL}, {264, 2152441LL}, 
-        {265, 1643821LL}, {266, 934152LL}, {267, 1521806LL}, {268, 1209852LL}, 
-        {269, 1663096LL}, {270, 1091179LL}, {271, 1338992LL}, {272, 1079421LL}, 
-        {273, 2264784LL}, {274, 946870LL}, {275, 2026780LL}, {276, 965000LL}, 
-        {277, 1210606LL}, {278, 2149296LL}, {279, 1430720LL}, {280, 1128504LL}, 
-        {281, 1448297LL}, {282, 1195033LL}, {283, 2006536LL}, {284, 2139467LL}, 
-        {285, 1489248LL}, {286, 2387867LL}, {287, 1279431LL}, {288, 1293986LL}, 
-        {289, 998228LL}, {290, 711973LL}, {291, 885386LL}, {292, 797856LL}, 
-        {293, 846308LL}, {294, 738039LL}, {295, 976278LL}, {296, 821128LL}, 
-        {297, 1280615LL}, {298, 1734373LL}, {299, 1023590LL}, {300, 1258143LL}, 
-        {301, 1040776LL}, {302, 1327881LL}, {303, 1620642LL}, {304, 1228357LL}, 
-        {305, 1117324LL}, {306, 798346LL}, {307, 745522LL}, {308, 1480178LL}, 
-        {309, 1110531LL}, {310, 1321078LL}, {311, 1859004LL}, {312, 1546832LL}, 
-        {313, 1281483LL}, {314, 931766LL}, {315, 920830LL}, {316, 851161LL}, 
-        {317, 1343119LL}, {318, 1092409LL}, {319, 982993LL}, {320, 877335LL}, 
-        {321, 736946LL}, {322, 996151LL}, {323, 1106704LL}, {324, 1043831LL}, 
-        {325, 1092282LL}, {326, 952073LL}, {327, 920874LL}, {328, 795398LL}, 
-        {329, 812625LL}, {330, 880443LL}, {331, 856499LL}, {332, 728300LL}, 
-        {333, 1230817LL}, {334, 2361891LL}, {335, 3873833LL}, {336, 2239803LL}, 
-        {337, 1057174LL}, {338, 814400LL}, {339, 678033LL}, {340, 2109526LL}, 
-        {341, 895194LL}, {342, 582348LL}, {343, 1183520LL}, {344, 965306LL}, 
-        {345, 825429LL}, {346, 3421909LL}, {347, 1366163LL}, {348, 1481128LL}, 
-        {349, 1182406LL}, {350, 2131272LL}, {351, 2264617LL}, {352, 1412354LL}, 
-        {353, 3654239LL}, {354, 1578811LL}, {355, 1266564LL}, {356, 1464638LL}, 
-        {357, 1963998LL}, {358, 1785118LL}, {359, 1330684LL}, {360, 1362170LL}, 
-        {361, 815174LL}, {362, 1098857LL}, {363, 2056804LL}, {364, 1451780LL}, 
-        {365, 1272315LL}, {366, 1843266LL}, {367, 1219872LL}, {368, 1253701LL}, 
-        {369, 1629881LL}, {370, 2136399LL}, {371, 1159425LL}, {372, 3254741LL}, 
-        {373, 3307987LL}, {374, 877477LL}, {375, 1983146LL}, {376, 1817105LL}, 
-        {377, 1110498LL}, {378, 1152477LL}, {379, 1726332LL}, {380, 1270684LL}, 
-        {381, 1251331LL}, {382, 843314LL}, {383, 1623472LL}, {384, 1897727LL}, 
-        {385, 2008046LL}, {386, 1964959LL}, {387, 701316LL}, {388, 2021370LL}, 
-        {389, 695227LL}, {390, 1829794LL}, {391, 585276LL}, {392, 1837764LL}, 
-        {393, 591972LL}, {394, 4376561LL}, {395, 1964777LL}, {396, 915526LL}, 
-        {397, 895209LL}, {398, 3295991LL}, {399, 1591789LL}, {400, 1240635LL}, 
-        {401, 1388913LL}, {402, 1287525LL}, {403, 1393249LL}, {404, 4LL}, 
-        {405, 1956572LL}, {406, 1571479LL}, {407, 2085630LL}, {408, 1420300LL}, 
-        {409, 2508166LL}, {410, 4057818LL}, {411, 3306760LL}, {412, 2494412LL}, 
-        {413, 2452457LL}, {414, 1938656LL}, {415, 603861LL}, {416, 1799673LL}, 
-        {417, 2156890LL}, {418, 1201509LL}, {419, 935864LL}, {420, 1891017LL}, 
-        {421, 665942LL}, {422, 950179LL}, {423, 861336LL}, {424, 586252LL}, 
-        {425, 66835017LL}, {427, 498423LL}, {428, 521440LL}, {430, 528477LL}, 
-        {431, 503206LL}, {434, 2286155LL}, {435, 2366482LL}, {436, 269809LL}, 
-        {437, 313074LL}, {438, 860049LL}, {439, 851660LL}, {440, 1150962LL}, 
-        {441, 2371723LL}, {442, 1131373LL}, {443, 912553LL}, {444, 751454LL}, 
-        {445, 259950LL}, {446, 2480520LL}, {447, 3017926LL}, {448, 829325LL}, 
-        {449, 3794915LL}, {450, 3LL}, {451, 3LL}, {452, 3LL}, 
-        {453, 2054094LL}, {454, 1509300LL}, {455, 2898LL}, {456, 29950492LL}, 
-        {457, 4017267LL}, {458, 1212321LL}, {459, 3700250LL}, {460, 1431685LL}, 
-        {461, 5481LL}, {462, 854733LL}, {463, 1937175LL}, {464, 904715LL}, 
-        {465, 1701741LL}, {466, 1186393LL}, {467, 1260775LL}, {468, 1433061LL}, 
-        {469, 1687611LL}, {470, 920968LL}, {471, 1482492LL}, {472, 1449194LL}, 
-        {473, 1454289LL}, {474, 2603958LL}, {475, 1030726LL}, {476, 887518LL}, 
-        {477, 775994LL}, {478, 2396717LL}, {479, 915705LL}, {480, 595562LL}, 
-        {481, 579655LL}, {482, 555216LL}, {483, 484733LL}, {484, 412683LL}, 
-        {485, 442503LL}, {486, 1213036LL}, {487, 1193831LL}, {488, 1738275LL}, 
-        {489, 1497287LL}, {490, 1646220LL}, {491, 1300489LL}, {492, 1084953LL}, 
-        {493, 221493LL}, {494, 207747LL}, {495, 1390758LL}, {496, 1650823LL}, 
-        {497, 662884LL}, {498, 2209351LL}, {499, 2288493LL}, {500, 196926LL}, 
-        {501, 184709LL}, {502, 195471LL}, {503, 1355638LL}, {504, 1478953LL}, 
-        {505, 1004612LL}, {506, 1612574LL}, {507, 1919471LL}, {508, 1018919LL}, 
-        {509, 496177LL}, {510, 950523LL}, {511, 5570LL}, {512, 403LL}, 
-        {513, 538LL}, {514, 1545972LL}, {515, 2137687LL}, {516, 2108947LL}, 
-        {517, 2122242LL}, {518, 2170922LL}, {519, 2158048LL}, {520, 1287208LL}, 
-        {521, 129325LL}, {522, 355181LL}, {523, 904182LL}, {524, 3800382LL}, 
-        {525, 3599288LL}, {526, 3135486LL}, {527, 2854262LL}, {528, 1330895LL}, 
-        {529, 27LL}, {530, 5375LL}, {531, 4156LL}, {532, 8653LL}, 
-        {533, 4249LL}, {534, 45LL}, {536, 2670482LL}, {537, 2855LL}, 
-        {538, 297LL}, {539, 1414801LL}, {540, 2542036LL}, {541, 2347318LL}, 
-        {542, 2239221LL}, {543, 423496LL}, {544, 1595755LL}, {545, 1830462LL}, 
-        {546, 2224864LL}, {547, 1548015LL}, {548, 710954LL}, {549, 808213LL}, 
-        {550, 855346LL}, {551, 591559LL}, {552, 1136316LL}, {553, 1084780LL}, 
-        {554, 1304804LL}, {555, 1775805LL}, {556, 1914138LL}, {557, 736500LL}, 
-        {558, 1989052LL}, {559, 684811LL}, {560, 540682LL}, {561, 1067400LL}, 
-        {562, 868961LL}, {563, 878003LL}, {564, 522992LL}, {565, 368056LL}, 
-        {566, 291180LL}, {567, 872042LL}, {568, 914422LL}, {569, 387429LL}, 
-        {570, 1771669LL}, {571, 1117218LL}, {572, 1479300LL}, {573, 190037LL}, 
-        {574, 185242LL}, {575, 1904817LL}, {576, 1624093LL}, {577, 3LL}, 
-        {578, 1500103LL}, {579, 1317136LL}, {580, 1041465LL}, {581, 1052597LL}, 
-        {582, 605713LL}, {583, 573795LL}, {584, 412199LL}, {585, 453348LL}, 
-        {586, 1172993LL}, {587, 1530913LL}, {588, 960321LL}, {589, 1390627LL}, 
-        {590, 1741605LL}, {591, 1317833LL}, {592, 924276LL}, {593, 670515LL}, 
-        {594, 1071678LL}, {595, 1163992LL}, {596, 837335LL}, {597, 1273396LL}, 
-        {598, 1288075LL}, {599, 773173LL}, {600, 745405LL}, {601, 2517268LL}, 
-        {602, 1362275LL}, {603, 1132101LL}, {604, 1492187LL}, {605, 1459332LL}, 
-        {606, 1361356LL}, {607, 1639819LL}, {608, 973878LL}, {609, 1005673LL}, 
-        {610, 992106LL}, {611, 994864LL}, {612, 1000639LL}, {613, 561155LL}, 
-        {614, 377298LL}, {615, 1002330LL}, {616, 1017342LL}, {617, 1063347LL}, 
-        {618, 725519LL}, {619, 753454LL}, {620, 1530456LL}, {621, 962634LL}, 
-        {622, 962232LL}, {623, 786684LL}, {624, 1348502LL}, {625, 1381515LL}, 
-        {626, 1392304LL}, {627, 623243LL}, {628, 1515808LL}, {629, 1226346LL}, 
-        {630, 956792LL}, {631, 1198371LL}, {632, 992795LL}, {633, 1055497LL}, 
-        {634, 1014613LL}, {635, 898510LL}, {636, 826861LL}, {637, 462521LL}, 
-        {638, 770165LL}, {639, 1153514LL}, {640, 1533607LL}, {641, 1774982LL}, 
-        {642, 207109LL}, {643, 1628609LL}, {644, 458611LL}, {645, 1120687LL}, 
-        {646, 647171LL}, {647, 505464LL}, {648, 614179LL}, {649, 1729213LL}, 
-        {650, 903579LL}, {651, 1493708LL}, {652, 1548495LL}, {653, 959619LL}, 
-        {654, 1315502LL}, {655, 1285957LL}, {656, 1648754LL}, {657, 472856LL}, 
-        {658, 1276160LL}, {659, 1482346LL}, {660, 1138731LL}, {661, 1543063LL}, 
-        {662, 917990LL}, {663, 1241224LL}, {664, 1851463LL}, {665, 1517672LL}, 
-        {666, 1338133LL}, {667, 1020429LL}, {668, 894079LL}, {669, 1516242LL}, 
-        {670, 1057482LL}, {671, 805274LL}, {672, 937197LL}, {673, 708499LL}, 
-        {674, 559200LL}, {675, 522240LL}, {677, 1245151LL}, {678, 1028350LL}, 
-        {679, 809774LL}, {680, 683374LL}, {681, 1396499LL}, {682, 1288091LL}, 
-        {683, 1396376LL}, {684, 1117614LL}, {685, 1227647LL}, {686, 889690LL}, 
-        {687, 976676LL}, {688, 1295326LL}, {689, 795964LL}, {690, 793492LL}, 
-        {691, 1052121LL}, {692, 1296319LL}, {693, 1238289LL}, {694, 3915274LL}, 
-        {695, 2379805LL}, {696, 1095452LL}, {697, 570716LL}, {698, 711011LL}, 
-        {699, 866540LL}, {700, 1374960LL}, {701, 878318LL}, {702, 1860354LL}, 
-        {703, 2046029LL}, {704, 1133329LL}, {705, 1342145LL}, {706, 484262LL}, 
-        {707, 894696LL}, {708, 243488LL}, {709, 1074170LL}, {710, 990747LL}, 
-        {711, 977401LL}, {712, 894172LL}, {713, 757660LL}, {714, 1611130LL}, 
-        {715, 950570LL}, {716, 1313525LL}, {717, 1017828LL}, {718, 1732951LL}, 
-        {719, 1144576LL}, {720, 1290242LL}, {721, 1014464LL}, {722, 490843LL}, 
-        {723, 654772LL}, {724, 1787845LL}, {725, 1050518LL}, {726, 837224LL}, 
-        {727, 1303841LL}, {728, 1238618LL}, {729, 1224163LL}, {730, 1259645LL}, 
-        {731, 1704957LL}, {732, 995115LL}, {733, 254367LL}, {734, 1711551LL}, 
-        {735, 1282722LL}, {736, 1631164LL}, {737, 1676881LL}, {738, 1049017LL}, 
-        {739, 1342366LL}, {740, 1285291LL}, {741, 982190LL}, {742, 1037799LL}, 
-        {743, 1189167LL}, {744, 1424240LL}, {745, 859564LL}, {746, 1274628LL}, 
-        {747, 1571468LL}, {748, 1073698LL}, {749, 1625879LL}, {750, 786311LL}, 
-        {751, 1016593LL}, {752, 1214505LL}, {753, 1796515LL}, {754, 1851801LL}, 
-        {755, 1089333LL}, {756, 854178LL}, {757, 1274285LL}, {758, 1010720LL}, 
-        {759, 1027145LL}, {760, 941155LL}, {761, 783476LL}, {762, 1527819LL}, 
-        {763, 746056LL}, {764, 719715LL}, {765, 1530854LL}, {766, 1079945LL}, 
-        {767, 1391002LL}, {768, 2227938LL}, {769, 2273967LL}, {770, 1570287LL}, 
-        {771, 1515928LL}, {772, 1259157LL}, {773, 969606LL}, {774, 1620311LL}, 
-        {775, 501851LL}, {776, 588283LL}, {777, 727138LL}, {778, 578258LL}, 
-        {779, 744323LL}, {780, 750923LL}, {781, 429754LL}, {782, 704845LL}, 
-        {783, 1136507LL}, {784, 961438LL}, {785, 971070LL}, {786, 1791574LL}, 
-        {787, 1343245LL}, {788, 1395676LL}, {789, 1351662LL}, {790, 1285097LL}, 
-        {791, 306668LL}, {792, 787891LL}, {793, 831433LL}, {794, 498857LL}, 
-        {795, 494776LL}, {796, 389073LL}, {797, 404317LL}, {798, 607404LL}, 
-        {799, 687539LL}, {800, 1568004LL}, {801, 1504518LL}, {802, 1472336LL}, 
-        {803, 1129685LL}, {804, 1122304LL}, {805, 1106102LL}, {806, 1265664LL}, 
-        {807, 1228267LL}, {808, 943749LL}, {809, 1159231LL}, {810, 1150175LL}, 
-        {811, 2236989LL}, {812, 2294291LL}, {813, 932569LL}, {814, 1154736LL}, 
-        {815, 1126141LL}, {816, 1948632LL}, {817, 1426470LL}, {818, 2184612LL}, 
-        {819, 1323448LL}, {820, 1022625LL}, {821, 1342752LL}, {822, 1790613LL}, 
-        {823, 1104698LL}, {824, 1838615LL}, {825, 2612899LL}, {826, 1170131LL}, 
-        {827, 1955169LL}, {828, 1120262LL}, {829, 17541625LL}, {830, 17264130LL}, 
-        {831, 1965421LL}, {832, 2169937LL}, {833, 3903299LL}, {834, 2013166LL}, 
-        {835, 2018989LL}, {836, 1475568LL}, {837, 198822LL}, {838, 197748LL}, 
-        {839, 179068LL}, {840, 178935LL}, {841, 2420437LL}, {842, 2397972LL}, 
-        {843, 2300690LL}, {844, 5635637LL}, {845, 3390100LL}, {846, 3240774LL}, 
-        {847, 3207486LL}, {848, 3970860LL}, {849, 1279656LL}, {850, 1349562LL}, 
-        {851, 1322364LL}, {852, 776562LL}, {853, 2959131LL}, {854, 1137200LL}, 
-        {855, 4688660LL}, {856, 4241430LL}, {857, 5485157LL}, {858, 1532724LL}, 
-        {859, 1473465LL}, {860, 1694037LL}, {861, 5152611LL}, {862, 4898202LL}, 
-        {863, 1958824LL}, {864, 2133285LL}, {865, 2240161LL}, {866, 16888LL}, 
-        {867, 2597LL}, {868, 5510LL}, {869, 14259LL}, {870, 8077LL}, 
-        {871, 6471LL}, {872, 850627LL}, {873, 801428LL}, {874, 267892LL}, 
-        {875, 400LL}, {876, 102LL}, {877, 354059LL}, {878, 2777810LL}, 
-        {879, 2176346LL}, {880, 942578LL}, {881, 3324431LL}, {882, 173689LL}, 
-        {883, 58500LL}, {884, 3278LL}, {885, 5541LL}, {886, 2161248LL}, 
-        {887, 3224165LL}, {888, 3430500LL}, {889, 820064LL}, {890, 506791LL}, 
-        {891, 933230LL}, {892, 915010LL}, {893, 1531490LL}, {894, 1757919LL}, 
-        {895, 213LL}, {896, 511948LL}, {897, 905682LL}, {898, 375322LL}, 
-        {899, 5LL}, {900, 6192624LL}, {901, 198LL}, {902, 10929333LL}, 
-        {903, 747931LL}, {904, 7902LL}, {905, 8LL}, {906, 2118365LL}, 
-        {907, 778699LL}, {908, 2618LL}, {909, 43LL}, {910, 105LL}, 
-        {911, 896533LL}, {912, 5531LL}, {913, 132LL}, {914, 273692LL}, 
-        {915, 668LL}, {916, 2203364LL}, {917, 203LL}, {918, 92LL}, 
-        {919, 1139LL}, {920, 362393LL}, {921, 395003LL}, {922, 2379168LL}, 
-        {923, 2407406LL}, {924, 861762LL}, {925, 884282LL}, {926, 3979745LL}, 
-        {927, 1290665LL}, {928, 668249LL}, {929, 18LL}, {938, 1937987LL}, 
-        {939, 399672LL}, {940, 372LL}, {941, 187LL}, {942, 123LL}, 
-        {943, 123LL}, {944, 39LL}, {945, 39LL},
-        {946, 3393LL}, {947, 1668796LL}, {948, 406LL}, {949, 16LL},
-        {950, 16LL}, {951, 678628LL}, {952, 434LL}, {953, 216LL},
-        {954, 5LL}, {955, 88LL}, {956, 36LL}, {957, 2027359LL},
-        {958, 633150LL}, {959, 5716099LL}, {960, 5602196LL}, {961, 7LL},
-        {962, 2522995LL}, {963, 4101724LL}, {964, 4076481LL}, {965, 3550762LL},
-        {966, 46LL}, {967, 416LL}, {968, 158LL}, {969, 104212LL},
-        {970, 248LL}, {971, 156LL},
+        {1, 3545014LL}, {2, 3546900LL}, {3, 5213442LL}, {4, 222203LL},
+        {5, 1813667LL}, {6, 2584737LL}, {7, 4275923LL}, {8, 3005994LL},
+        {9, 1748211LL}, {10, 1758152LL}, {11, 1402661LL}, {12, 1399165LL},
+        {13, 574842LL}, {14, 567553LL}, {15, 2684560LL}, {16, 3053094LL},
+        {17, 2200318LL}, {18, 4808415LL}, {19, 3493999LL}, {20, 3361660LL},
+        {21, 1757573LL}, {22, 3312324LL}, {23, 3395589LL}, {24, 3375454LL},
+        {25, 313206LL}, {26, 311137LL}, {27, 538940LL}, {28, 543756LL},
+        {29, 420828LL}, {30, 283796LL}, {31, 2292784LL}, {32, 881960LL},
+        {33, 2457469LL}, {34, 1721101LL}, {35, 996024LL}, {36, 992617LL},
+        {37, 777698LL}, {38, 766416LL}, {39, 2099707LL}, {40, 1945146LL},
+        {41, 2491507LL}, {42, 1914564LL}, {43, 1764179LL}, {44, 2392719LL},
+        {45, 1829762LL}, {46, 1708525LL}, {47, 2429074LL}, {48, 1843425LL},
+        {49, 2014768LL}, {50, 2160811LL}, {51, 2009176LL}, {52, 2347938LL},
+        {53, 2373946LL}, {54, 2305614LL}, {55, 2251254LL}, {56, 2423983LL},
+        {57, 2691764LL}, {58, 2725891LL}, {59, 2763951LL}, {60, 540036LL},
+        {61, 543741LL}, {62, 538510LL}, {63, 535013LL}, {64, 711105LL},
+        {65, 727610LL}, {66, 604390LL}, {67, 607215LL}, {68, 1063638LL},
+        {69, 1067236LL}, {70, 716359LL}, {71, 499392LL}, {72, 1709261LL},
+        {73, 1626060LL}, {74, 574848LL}, {75, 566045LL}, {76, 2515425LL},
+        {77, 2453693LL}, {78, 971442LL}, {79, 1005188LL}, {80, 726456LL},
+        {81, 746652LL}, {82, 754388LL}, {83, 751544LL}, {84, 1871800LL},
+        {85, 1887256LL}, {86, 1874058LL}, {87, 1853882LL}, {88, 1792039LL},
+        {89, 1704428LL}, {90, 1693278LL}, {91, 1695703LL}, {92, 1883869LL},
+        {93, 1870131LL}, {94, 1144967LL}, {95, 894464LL}, {96, 1608487LL},
+        {97, 2600399LL}, {98, 2528809LL}, {99, 1396730LL}, {100, 1329888LL},
+        {101, 1329146LL}, {102, 1335518LL}, {103, 2655136LL}, {104, 2634055LL},
+        {105, 1049462LL}, {106, 1068463LL}, {107, 693796LL}, {108, 697637LL},
+        {109, 348811LL}, {110, 345354LL}, {111, 2391491LL}, {112, 2381930LL},
+        {113, 2102123LL}, {114, 2228782LL}, {115, 4938418LL}, {116, 2147023LL},
+        {117, 2017017LL}, {118, 4198044LL}, {119, 112939LL}, {120, 113466LL},
+        {121, 2490431LL}, {122, 2378918LL}, {123, 2064322LL}, {124, 529035LL},
+        {125, 404982LL}, {126, 1853637LL}, {127, 1827451LL}, {128, 1492491LL},
+        {129, 1543290LL}, {130, 1492715LL}, {131, 1478759LL}, {132, 1853720LL},
+        {133, 1819866LL}, {134, 1490245LL}, {135, 1497505LL}, {136, 1399198LL},
+        {137, 1383786LL}, {138, 1777393LL}, {139, 1788898LL}, {140, 1481068LL},
+        {141, 1442117LL}, {142, 1376876LL}, {143, 1330535LL}, {144, 1766336LL},
+        {145, 1865534LL}, {146, 1540063LL}, {147, 1529352LL}, {148, 1410075LL},
+        {149, 1375225LL}, {150, 1826141LL}, {151, 1816071LL}, {152, 1464091LL},
+        {153, 1469167LL}, {154, 1395787LL}, {155, 1385473LL}, {156, 1864214LL},
+        {157, 1874366LL}, {158, 1476342LL}, {159, 1460826LL}, {160, 1919709LL},
+        {161, 1869850LL}, {162, 1341749LL}, {163, 1334947LL}, {164, 1302783LL},
+        {165, 1277863LL}, {166, 1099929LL}, {167, 1108341LL}, {168, 1101977LL},
+        {169, 1210782LL}, {170, 2402381LL}, {171, 2387833LL}, {172, 998271LL},
+        {173, 984470LL}, {174, 302567LL}, {175, 302261LL}, {176, 300203LL},
+        {177, 202572LL}, {178, 2066782LL}, {179, 1158103LL}, {180, 800843LL},
+        {181, 1428742LL}, {182, 2606278LL}, {183, 2110343LL}, {184, 1592410LL},
+        {185, 1256982LL}, {186, 409042LL}, {187, 1855862LL}, {188, 1343733LL},
+        {189, 1018113LL}, {190, 789192LL}, {191, 1170032LL}, {192, 960809LL},
+        {193, 2007057LL}, {194, 1089890LL}, {195, 861111LL}, {196, 1625218LL},
+        {197, 921443LL}, {198, 558619LL}, {199, 956866LL}, {200, 1398468LL},
+        {201, 2219292LL}, {202, 1290001LL}, {203, 1763089LL}, {204, 668455LL},
+        {205, 1356846LL}, {206, 1182063LL}, {207, 1527585LL}, {208, 65514LL},
+        {209, 2212660LL}, {210, 1069789LL}, {211, 608451LL}, {212, 888286LL},
+        {213, 680221LL}, {214, 805969LL}, {215, 854444LL}, {216, 512587LL},
+        {217, 539650LL}, {218, 430524LL}, {219, 929886LL}, {220, 920465LL},
+        {221, 928531LL}, {222, 919041LL}, {223, 922389LL}, {224, 1034714LL},
+        {225, 1025967LL}, {226, 972526LL}, {227, 172501LL}, {228, 459927LL},
+        {229, 57705LL}, {230, 43176LL}, {231, 1511280LL}, {232, 4573569LL},
+        {233, 2040499LL}, {234, 1736295LL}, {235, 1285704LL}, {236, 2302486LL},
+        {237, 2082121LL}, {238, 1719265LL}, {239, 1581752LL}, {240, 1490447LL},
+        {241, 1401004LL}, {242, 1369338LL}, {243, 1633572LL}, {244, 1228500LL},
+        {245, 1309247LL}, {246, 1838445LL}, {247, 1332127LL}, {248, 1310176LL},
+        {249, 1561587LL}, {250, 1800177LL}, {251, 1150928LL}, {252, 1988614LL},
+        {253, 2096728LL}, {254, 1502333LL}, {255, 1447797LL}, {256, 1281271LL},
+        {257, 1232407LL}, {258, 1938474LL}, {259, 1822909LL}, {260, 2113521LL},
+        {261, 1463936LL}, {262, 2082638LL}, {263, 3568113LL}, {264, 2284381LL},
+        {265, 1635816LL}, {266, 1121023LL}, {267, 1619572LL}, {268, 1238944LL},
+        {269, 1608436LL}, {270, 1104914LL}, {271, 1430112LL}, {272, 1096635LL},
+        {273, 2431301LL}, {274, 1137674LL}, {275, 2325767LL}, {276, 1025314LL},
+        {277, 1265980LL}, {278, 2216285LL}, {279, 1425327LL}, {280, 1092991LL},
+        {281, 1411229LL}, {282, 1436233LL}, {283, 2246450LL}, {284, 2237049LL},
+        {285, 1580531LL}, {286, 2225688LL}, {287, 1341062LL}, {288, 1314979LL},
+        {289, 1067263LL}, {290, 812679LL}, {291, 974586LL}, {292, 815937LL},
+        {293, 878430LL}, {294, 742696LL}, {295, 1014473LL}, {296, 837360LL},
+        {297, 1355524LL}, {298, 1724523LL}, {299, 1011098LL}, {300, 1260600LL},
+        {301, 1059651LL}, {302, 1335494LL}, {303, 1654584LL}, {304, 1250404LL},
+        {305, 1170434LL}, {306, 1057134LL}, {307, 885631LL}, {308, 1544098LL},
+        {309, 1160851LL}, {310, 1372388LL}, {311, 1887862LL}, {312, 1650807LL},
+        {313, 1257264LL}, {314, 1130022LL}, {315, 1022590LL}, {316, 850557LL},
+        {317, 1329543LL}, {318, 1060512LL}, {319, 989292LL}, {320, 868898LL},
+        {321, 759744LL}, {322, 1189604LL}, {323, 1195710LL}, {324, 1084363LL},
+        {325, 1114946LL}, {326, 968578LL}, {327, 973366LL}, {328, 825768LL},
+        {329, 813099LL}, {330, 915473LL}, {331, 852879LL}, {332, 751204LL},
+        {333, 1288692LL}, {334, 2332364LL}, {335, 3696445LL}, {336, 2194759LL},
+        {337, 1129038LL}, {338, 945857LL}, {339, 733696LL}, {340, 2374897LL},
+        {341, 912238LL}, {342, 585195LL}, {343, 1210617LL}, {344, 1003620LL},
+        {345, 843683LL}, {346, 3458142LL}, {347, 1544824LL}, {348, 1491511LL},
+        {349, 1172823LL}, {350, 2046111LL}, {351, 2241577LL}, {352, 1443162LL},
+        {353, 4151418LL}, {354, 2144719LL}, {355, 1550830LL}, {356, 1552527LL},
+        {357, 2197268LL}, {358, 1920836LL}, {359, 1350663LL}, {360, 1367928LL},
+        {361, 830358LL}, {362, 1362686LL}, {363, 2187483LL}, {364, 1455056LL},
+        {365, 1317469LL}, {366, 1839180LL}, {367, 1242863LL}, {368, 1254750LL},
+        {369, 1597170LL}, {370, 2362103LL}, {371, 1165155LL}, {372, 3929889LL},
+        {373, 3697761LL}, {374, 850106LL}, {375, 1933341LL}, {376, 1875188LL},
+        {377, 1106145LL}, {378, 1155088LL}, {379, 1687702LL}, {380, 1254185LL},
+        {381, 1259038LL}, {382, 890153LL}, {383, 1653649LL}, {384, 1919291LL},
+        {385, 2249401LL}, {386, 2462295LL}, {387, 733548LL}, {388, 2222943LL},
+        {389, 710046LL}, {390, 1970794LL}, {391, 606667LL}, {392, 1935922LL},
+        {393, 600389LL}, {394, 3775399LL}, {395, 1934327LL}, {396, 897081LL},
+        {397, 893223LL}, {398, 2883961LL}, {399, 1611745LL}, {400, 1240893LL},
+        {401, 1493939LL}, {402, 1516186LL}, {403, 1565898LL}, {404, 4LL},
+        {405, 2098938LL}, {406, 1659070LL}, {407, 2108745LL}, {408, 1482269LL},
+        {409, 2472377LL}, {410, 3647466LL}, {411, 3166191LL}, {412, 2294734LL},
+        {413, 2285148LL}, {414, 1885639LL}, {415, 619490LL}, {416, 2029375LL},
+        {417, 2200281LL}, {418, 1242010LL}, {419, 942792LL}, {420, 2010216LL},
+        {421, 696321LL}, {422, 968647LL}, {423, 927181LL}, {424, 613763LL},
+        {425, 66944395LL}, {427, 497315LL}, {428, 540488LL}, {430, 520439LL},
+        {431, 527054LL}, {434, 2513366LL}, {435, 2529733LL}, {436, 261539LL},
+        {437, 323468LL}, {438, 852641LL}, {439, 862304LL}, {440, 1126797LL},
+        {441, 2310286LL}, {442, 1184100LL}, {443, 1002232LL}, {444, 797336LL},
+        {445, 275264LL}, {446, 2544529LL}, {447, 2699085LL}, {448, 824955LL},
+        {449, 4251764LL}, {450, 3LL}, {451, 3LL}, {452, 3LL}, {453, 2081188LL},
+        {454, 1328238LL}, {455, 2892LL}, {456, 31959678LL}, {457, 4230007LL},
+        {458, 1278754LL}, {459, 3567989LL}, {460, 1435784LL}, {461, 5639LL},
+        {462, 908611LL}, {463, 2071370LL}, {464, 942417LL}, {465, 1714369LL},
+        {466, 1337340LL}, {467, 1312824LL}, {468, 1534230LL}, {469, 1755081LL},
+        {470, 1027719LL}, {471, 1516317LL}, {472, 1486309LL}, {473, 1502588LL},
+        {474, 2647766LL}, {475, 1049173LL}, {476, 871723LL}, {477, 777921LL},
+        {478, 2399253LL}, {479, 924608LL}, {480, 626810LL}, {481, 566832LL},
+        {482, 538171LL}, {483, 502822LL}, {484, 451162LL}, {485, 436053LL},
+        {486, 1246137LL}, {487, 1296906LL}, {488, 1655098LL}, {489, 1482085LL},
+        {490, 1678582LL}, {491, 1333858LL}, {492, 1061826LL}, {493, 221514LL},
+        {494, 223614LL}, {495, 1342876LL}, {496, 1695810LL}, {497, 743095LL},
+        {498, 2299367LL}, {499, 2466398LL}, {500, 213967LL}, {501, 204204LL},
+        {502, 206641LL}, {503, 1397825LL}, {504, 1528126LL}, {505, 1192385LL},
+        {506, 1618522LL}, {507, 1882893LL}, {508, 1053159LL}, {509, 530872LL},
+        {510, 937985LL}, {511, 5584LL}, {512, 421LL}, {513, 551LL},
+        {514, 1563246LL}, {515, 2415062LL}, {516, 2284969LL}, {517, 2207377LL},
+        {518, 2175040LL}, {519, 2176834LL}, {520, 1278516LL}, {521, 133771LL},
+        {522, 373135LL}, {523, 869195LL}, {524, 3423842LL}, {525, 3381532LL},
+        {526, 2980012LL}, {527, 2977625LL}, {528, 1463284LL}, {529, 27LL},
+        {530, 5224LL}, {531, 4094LL}, {532, 8847LL}, {533, 4250LL},
+        {534, 46LL}, {536, 2746248LL}, {537, 2957LL}, {538, 306LL},
+        {539, 1355633LL}, {540, 2654880LL}, {541, 2233786LL}, {542, 2212941LL},
+        {543, 426404LL}, {544, 1608923LL}, {545, 1875629LL}, {546, 2235214LL},
+        {547, 1689457LL}, {548, 734205LL}, {549, 852572LL}, {550, 894808LL},
+        {551, 653747LL}, {552, 1169203LL}, {553, 1117103LL}, {554, 1340780LL},
+        {555, 1815272LL}, {556, 1788781LL}, {557, 733595LL}, {558, 2225540LL},
+        {559, 699947LL}, {560, 571273LL}, {561, 1124160LL}, {562, 887468LL},
+        {563, 944061LL}, {564, 555385LL}, {565, 392406LL}, {566, 300885LL},
+        {567, 892558LL}, {568, 967400LL}, {569, 406642LL}, {570, 1753389LL},
+        {571, 1153873LL}, {572, 1447725LL}, {573, 200397LL}, {574, 188175LL},
+        {575, 1954141LL}, {576, 1745180LL}, {577, 3LL}, {578, 1547718LL},
+        {579, 1422605LL}, {580, 1127569LL}, {581, 1100410LL}, {582, 608752LL},
+        {583, 607137LL}, {584, 414820LL}, {585, 475695LL}, {586, 1186149LL},
+        {587, 1555362LL}, {588, 961136LL}, {589, 1352977LL}, {590, 1853499LL},
+        {591, 1351316LL}, {592, 940869LL}, {593, 676113LL}, {594, 1066976LL},
+        {595, 1352453LL}, {596, 925509LL}, {597, 1320820LL}, {598, 1338196LL},
+        {599, 826876LL}, {600, 770843LL}, {601, 2546961LL}, {602, 1472764LL},
+        {603, 1158231LL}, {604, 1480572LL}, {605, 1445496LL}, {606, 1441941LL},
+        {607, 1658872LL}, {608, 990377LL}, {609, 1016310LL}, {610, 1032900LL},
+        {611, 1045315LL}, {612, 1052515LL}, {613, 571253LL}, {614, 403528LL},
+        {615, 1036002LL}, {616, 1019000LL}, {617, 1068873LL}, {618, 725479LL},
+        {619, 761451LL}, {620, 1491562LL}, {621, 978708LL}, {622, 977035LL},
+        {623, 823280LL}, {624, 1416076LL}, {625, 1429406LL}, {626, 1460842LL},
+        {627, 676996LL}, {628, 1639940LL}, {629, 1234221LL}, {630, 991996LL},
+        {631, 1228357LL}, {632, 1010582LL}, {633, 1054038LL}, {634, 1023356LL},
+        {635, 914080LL}, {636, 815692LL}, {637, 477950LL}, {638, 786427LL},
+        {639, 1153704LL}, {640, 1527355LL}, {641, 1859639LL}, {642, 216574LL},
+        {643, 1810901LL}, {644, 461359LL}, {645, 1136169LL}, {646, 662864LL},
+        {647, 507896LL}, {648, 606916LL}, {649, 1756534LL}, {650, 993891LL},
+        {651, 1536746LL}, {652, 1553026LL}, {653, 956128LL}, {654, 1345170LL},
+        {655, 1339662LL}, {656, 1680729LL}, {657, 471663LL}, {658, 1334177LL},
+        {659, 1628156LL}, {660, 1191457LL}, {661, 1547036LL}, {662, 913889LL},
+        {663, 1302083LL}, {664, 1874360LL}, {665, 1533267LL}, {666, 1342405LL},
+        {667, 1041325LL}, {668, 879541LL}, {669, 1534532LL}, {670, 1050475LL},
+        {671, 833514LL}, {672, 971271LL}, {673, 739116LL}, {674, 643395LL},
+        {675, 507426LL}, {677, 1340877LL}, {678, 1027679LL}, {679, 860774LL},
+        {680, 685953LL}, {681, 1419680LL}, {682, 1262068LL}, {683, 1474109LL},
+        {684, 1157444LL}, {685, 1291786LL}, {686, 900831LL}, {687, 1000566LL},
+        {688, 1357063LL}, {689, 832706LL}, {690, 802341LL}, {691, 1047433LL},
+        {692, 1349510LL}, {693, 1270537LL}, {694, 4068505LL}, {695, 2396118LL},
+        {696, 1128122LL}, {697, 583968LL}, {698, 712815LL}, {699, 956688LL},
+        {700, 1344718LL}, {701, 907052LL}, {702, 1876830LL}, {703, 2121191LL},
+        {704, 1154806LL}, {705, 1368725LL}, {706, 471402LL}, {707, 939522LL},
+        {708, 246568LL}, {709, 1121330LL}, {710, 1032352LL}, {711, 1024973LL},
+        {712, 927907LL}, {713, 785283LL}, {714, 1561066LL}, {715, 975479LL},
+        {716, 1302876LL}, {717, 1038746LL}, {718, 1752820LL}, {719, 1189763LL},
+        {720, 1341453LL}, {721, 1088057LL}, {722, 497946LL}, {723, 662094LL},
+        {724, 1866764LL}, {725, 1073437LL}, {726, 843728LL}, {727, 1290314LL},
+        {728, 1274769LL}, {729, 1254504LL}, {730, 1291016LL}, {731, 1707037LL},
+        {732, 949514LL}, {733, 261606LL}, {734, 1700607LL}, {735, 1325666LL},
+        {736, 1690408LL}, {737, 1695164LL}, {738, 1137704LL}, {739, 1364326LL},
+        {740, 1323196LL}, {741, 1052759LL}, {742, 1082073LL}, {743, 1218996LL},
+        {744, 1389373LL}, {745, 887929LL}, {746, 1292217LL}, {747, 1654737LL},
+        {748, 1050314LL}, {749, 1741551LL}, {750, 804756LL}, {751, 1047352LL},
+        {752, 1257553LL}, {753, 1805694LL}, {754, 1855831LL}, {755, 1220796LL},
+        {756, 894148LL}, {757, 1340843LL}, {758, 1008874LL}, {759, 1052466LL},
+        {760, 923537LL}, {761, 784574LL}, {762, 1486544LL}, {763, 799414LL},
+        {764, 711935LL}, {765, 1595211LL}, {766, 1081449LL}, {767, 1389465LL},
+        {768, 2277279LL}, {769, 2482585LL}, {770, 1594359LL}, {771, 1737796LL},
+        {772, 1351312LL}, {773, 1056953LL}, {774, 1674323LL}, {775, 520221LL},
+        {776, 594824LL}, {777, 735168LL}, {778, 614287LL}, {779, 804883LL},
+        {780, 791522LL}, {781, 456271LL}, {782, 671209LL}, {783, 1280811LL},
+        {784, 998950LL}, {785, 953060LL}, {786, 1846962LL}, {787, 1524241LL},
+        {788, 1423102LL}, {789, 1415647LL}, {790, 1235075LL}, {791, 318344LL},
+        {792, 784318LL}, {793, 835219LL}, {794, 500901LL}, {795, 516941LL},
+        {796, 405420LL}, {797, 406720LL}, {798, 613967LL}, {799, 683556LL},
+        {800, 1596732LL}, {801, 1567852LL}, {802, 1546281LL}, {803, 1207360LL},
+        {804, 1200754LL}, {805, 1101700LL}, {806, 1238674LL}, {807, 1262949LL},
+        {808, 954246LL}, {809, 1131627LL}, {810, 1136135LL}, {811, 2072824LL},
+        {812, 2057630LL}, {813, 977054LL}, {814, 1124717LL}, {815, 1136157LL},
+        {816, 2005795LL}, {817, 1411851LL}, {818, 2264573LL}, {819, 1521402LL},
+        {820, 1096137LL}, {821, 1475081LL}, {822, 1842005LL}, {823, 1136419LL},
+        {824, 1899406LL}, {825, 2236129LL}, {826, 1132156LL}, {827, 1826827LL},
+        {828, 1102957LL}, {829, 11579210LL}, {830, 11940270LL},
+        {831, 1878258LL}, {832, 1876691LL}, {833, 3971892LL}, {834, 2084117LL},
+        {835, 2039674LL}, {836, 1533740LL}, {837, 202884LL}, {838, 204241LL},
+        {839, 177879LL}, {840, 177836LL}, {841, 2518204LL}, {842, 2431726LL},
+        {843, 2469872LL}, {844, 3773153LL}, {845, 3334062LL}, {846, 3223180LL},
+        {847, 3251709LL}, {848, 3902263LL}, {849, 1310624LL}, {850, 1353191LL},
+        {851, 1333365LL}, {852, 806686LL}, {853, 3060667LL}, {854, 1177130LL},
+        {855, 4834592LL}, {856, 4283870LL}, {857, 5820513LL}, {858, 1541566LL},
+        {859, 1473570LL}, {860, 1700774LL}, {861, 5333364LL}, {862, 5095876LL},
+        {863, 2028330LL}, {864, 2175474LL}, {865, 2197588LL}, {866, 17439LL},
+        {867, 2649LL}, {868, 5583LL}, {869, 14239LL}, {870, 8287LL},
+        {871, 6595LL}, {872, 847500LL}, {873, 808672LL}, {874, 269047LL},
+        {875, 426LL}, {876, 105LL}, {877, 359313LL}, {878, 2815112LL},
+        {879, 2220382LL}, {880, 978055LL}, {881, 3354049LL}, {882, 179750LL},
+        {883, 60942LL}, {884, 3404LL}, {885, 5663LL}, {886, 2237771LL},
+        {887, 3195715LL}, {888, 3536246LL}, {889, 817076LL}, {890, 510500LL},
+        {891, 976716LL}, {892, 984784LL}, {893, 1588205LL}, {894, 1742573LL},
+        {895, 222LL}, {896, 518844LL}, {897, 918426LL}, {898, 383325LL},
+        {899, 5LL}, {900, 6343139LL}, {901, 188LL}, {902, 11188492LL},
+        {903, 783186LL}, {904, 8079LL}, {905, 8LL}, {906, 2165821LL},
+        {907, 807909LL}, {908, 2792LL}, {909, 43LL}, {910, 106LL},
+        {911, 915087LL}, {912, 5517LL}, {913, 134LL}, {914, 277725LL},
+        {915, 685LL}, {916, 2258647LL}, {917, 212LL}, {918, 92LL},
+        {919, 1140LL}, {920, 372107LL}, {921, 414377LL}, {922, 2518663LL},
+        {923, 2567264LL}, {924, 843588LL}, {925, 861113LL}, {926, 3601277LL},
+        {927, 1142237LL}, {928, 583161LL}, {929, 12LL}, {930, 4505888LL},
+        {931, 28LL}, {932, 4303384LL}, {933, 537174LL}, {934, 31718LL},
+        {935, 18252LL}, {936, 26504LL}, {937, 104LL}, {938, 1283080LL},
+        {939, 259038LL}, {940, 210LL}, {941, 105LL}, {942, 104LL},
+        {943, 105LL}, {944, 25LL}, {945, 25LL}, {946, 3433LL},
+        {947, 1657308LL}, {948, 412LL}, {949, 15LL}, {950, 16LL},
+        {951, 683277LL}, {952, 422LL}, {953, 200LL}, {954, 5LL}, {955, 83LL},
+        {956, 34LL}, {957, 1968497LL}, {958, 640295LL}, {959, 5682842LL},
+        {960, 5633562LL}, {961, 7LL}, {962, 2573698LL}, {963, 4101724LL},
+        {964, 4129411LL}, {965, 3495801LL}, {966, 43LL}, {967, 401LL},
+        {968, 131LL}, {969, 95506LL}, {970, 213LL}, {971, 107LL},
+        {972, 49976443LL}, {973, 33LL}, {974, 1578642LL}, {975, 61LL},
+        {976, 86LL}, {977, 85LL}, {978, 34LL}, {979, 29LL}, {980, 912931LL},
+        {981, 8798LL}, {982, 57LL}, {983, 25LL}, {984, 192LL}, {985, 243LL},
+        {986, 4829096LL}, {987, 8LL}, {988, 2033827LL}, {989, 408LL},
+        {990, 920205LL}, {991, 4439765LL}, {992, 121LL}, {993, 447LL},
+        {994, 106LL},
     };
     int i, n = (int)(sizeof(bench_rates) / sizeof(bench_rates[0]));
     for (i = 0; i < n; i++) {

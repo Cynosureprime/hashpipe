@@ -184,7 +184,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 965 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 988 pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -221,11 +221,11 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 965 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 988 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## Supported Hash Types
 
-hashpipe supports 965 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 988 hash types.  Run `hashpipe -h` for the full list.
 
 ### Common types
 
@@ -378,6 +378,10 @@ hashpipe supports 965 hash types.  Run `hashpipe -h` for the full list.
 | e969 | AWSSIGV4 | Amazon AWS Signature v4 (hashcat 28700) |
 | e970 | KRB5DB17 | Kerberos 5 etype 17 DB (hashcat 28800) |
 | e971 | KRB5DB18 | Kerberos 5 etype 18 DB (hashcat 28900) |
+| e991 | MD5SALT1SALT2 | `md5($salt1.$pass.$salt2)` (hashcat 33000) |
+| e992 | SYMFONY256 | Symfony Legacy SHA256 (hashcat 35800) |
+| e993 | WPBCRYPT | WordPress bcrypt(hmac-sha384) (hashcat 35500) |
+| e994 | GOST12512CRYPT | `$gost12512hash$` gost12512crypt (hashcat 35600) |
 
 ### Note on NTLMH (e786)
 
@@ -397,11 +401,11 @@ Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces
 
 ### Additional algorithm families
 
-hashpipe also supports GOST, GOST-CRYPTO, Streebog, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, QNX shadow, WPA-PMKID/EAPOL, Apple Keychain/iWork/APFS, Ansible Vault, Bitwarden, MongoDB SCRAM, SolarWinds, VMware VMX, SQLCipher, JWT, TACACS+, Kerberos 5 Pre-Auth/DB (etype 17/18), AWS Signature v4, PostgreSQL SCRAM-SHA-256, and hundreds of composed/chained variants.
+hashpipe also supports GOST, GOST-CRYPTO, Streebog, gost12512crypt, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, QNX shadow, WPA-PMKID/EAPOL, Apple Keychain/iWork/APFS, Ansible Vault, Bitwarden, MongoDB SCRAM, SolarWinds, VMware VMX, SQLCipher, JWT, TACACS+, Kerberos 5 Pre-Auth/DB (etype 17/18), AWS Signature v4, PostgreSQL SCRAM-SHA-256, WordPress bcrypt, Symfony Legacy, Argon2, and hundreds of composed/chained variants.
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 965 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all 988 registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10
@@ -454,6 +458,10 @@ docker run -v ${PWD}:/data -it --rm csp/hashpipe -m auto potfile.txt
 
 The `/data` directory inside the container is used as the working directory.
 
+### Known Build Issues
+
+**sphlib BMW strict aliasing bug (GCC 12+)**: sphlib's `bmw.c` contains strict aliasing violations that cause GCC to generate incorrect code for BMW-224 and BMW-256 at `-O2` and above.  BMW-384/512 (64-bit core) and all other sphlib algorithms are unaffected.  Apple clang is unaffected.  The `make deps` target already applies the workaround (`-fno-strict-aliasing`).  If you build sphlib separately, add `-fno-strict-aliasing` to its compile flags.  See [sphlib#3](https://github.com/pornin/sphlib/issues/3).
+
 ### Dependencies
 
 hashpipe requires the following static libraries:
@@ -465,6 +473,7 @@ hashpipe requires the following static libraries:
 - MD6 (`md6.a`)
 - GOST/Streebog (`gosthash/gost2012/gost2012.a`)
 - bcrypt / crypt_blowfish (`bcrypt-master/bcrypt.a`)
+- Argon2 (`argon2/argon2.a`)
 - libJudy (`libJudy.a`)
 - yescrypt (`yescrypt/*.o`)
 
@@ -504,6 +513,22 @@ hashpipe -m 0,1000,auto potfile.txt
 
 Run `hashpipe -h` to see the full type list with hashcat mode mappings.
 
+## Hashcat Mode Coverage
+
+hashpipe maps hashcat mode numbers to internal type indices via the `-m` option.  Of hashcat's ~590 distinct modes, hashpipe currently resolves ~335.  The remaining ~255 modes are not supported for the following reasons:
+
+| Reason | Modes | Description |
+|--------|------:|-------------|
+| Full-disk / volume encryption | ~80 | TrueCrypt, VeraCrypt, LUKS, BitLocker, DiskCryptor, BestCrypt, VirtualBox — require XTS block cipher decryption of 512+ byte sectors to verify a candidate password.  hashpipe verifies hashes, not disk images. |
+| Document / archive encryption | ~25 | MS Office (2003–2016), PDF, 7-Zip, RAR3/5, WinZip, PKZIP, ODF, Stuffit, AxCrypt, AES Crypt — require decrypting a document/archive payload and checking structural integrity (CRC, HMAC, XML parse).  The "hash" is really an encrypted blob. |
+| Wallet / blockchain encryption | ~25 | Bitcoin wallet.dat, Ethereum, Electrum, MultiBit, Exodus, MetaMask, Blockchain.com, MEGA, Terra Station, Bisq, Dogechain, Stargazer, 1Password — PBKDF2/scrypt key derivation followed by AES/3DES decryption of wallet data with structural verification. |
+| Key file / credential store | ~20 | OpenSSH private keys, GnuPG/PGP, PEM, JKS Java Key Store, DPAPI master keys, KeePass, Mozilla NSS (key3.db/key4.db), SecureCRT, iTunes backup, Radmin3, Windows Hello — require decrypting a key structure and verifying internal consistency (ASN.1, PKCS padding, key check values). |
+| Elliptic curve / cipher operations | ~17 | Bitcoin WIF/raw private keys (secp256k1 point multiplication), RC4 DropN (stream cipher key recovery), ChaCha20, Skip32, Kremlin NewDES — these are not hash functions; they require elliptic curve arithmetic or cipher-specific operations that have no place in a hash verification tool. |
+| Network protocol / session tokens | ~15 | SIP digest auth, SNMPv3, Kerberos TGS/AS-REP (etype 17/18/23), XMPP SCRAM, WPA-EAPOL, KNX IP Secure, Flask/Mojolicious session cookies — require protocol-specific challenge-response state, ticket structures, or application-specific secret keys beyond what a password hash tool provides. |
+| Non-cryptographic hashes | 6 | CRC32, CRC32C, CRC64Jones, Java Object hashCode(), MurmurHash (64-bit), STDOUT — trivially reversible checksums or debugging modes with no cryptographic purpose.  Infinite collisions make verification meaningless. |
+
+The full list of unresolved modes with per-mode explanations is maintained in `regress/unresolved-hashcat.txt` and can be regenerated with `regress/build_unresolved_table.sh`.
+
 ## Acknowledgments
 
 hashpipe depends on the following libraries:
@@ -516,6 +541,7 @@ hashpipe depends on the following libraries:
 - [libmhash](https://mhash.sourceforge.net/) — Nikos Mavroyanopoulos, Sascha Schumann
 - [bcrypt](https://www.openwall.com/crypt/) — Niels Provos, David Mazieres (via Openwall crypt_blowfish)
 - [yescrypt](https://www.openwall.com/yescrypt/) — Alexander Peslyak (via Openwall)
+- [Argon2](https://github.com/P-H-C/phc-winner-argon2) — Alex Biryukov, Daniel Dinu, Dmitry Khovratovich (University of Luxembourg; PHC winner, RFC 9106)
 - [stribob](https://github.com/mjosaarinen/brutus) — Markku-Juhani O. Saarinen (Streebog/GOST R 34.11-2012 primitives; standalone wrapper from stricat bundled with permission)
 
 Platform detection in the Makefile was inspired by [PR #1](https://github.com/Cynosureprime/hashpipe/pull/1) from [@0xVavaldi](https://github.com/0xVavaldi).

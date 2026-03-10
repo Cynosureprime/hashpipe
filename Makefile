@@ -53,13 +53,26 @@ LDFLAGS = -pthread -O3
 
 # Static libraries (expected in current directory or subdirectories)
 LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
-       gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a libJudy.a $(ICONV)
+       gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a \
+       argon2/argon2.a libJudy.a $(ICONV)
 
 # yescrypt (object files, not a .a archive)
 YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
                 yescrypt/sha256.o yescrypt/insecure_memzero.o
 
 OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o
+
+# argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
+ifeq ($(UNAME_M),x86_64)
+  ARGON2_FILL_SRC = opt.c
+  ARGON2_FILL_OBJ = opt.o
+else ifeq ($(UNAME_M),amd64)
+  ARGON2_FILL_SRC = opt.c
+  ARGON2_FILL_OBJ = opt.o
+else
+  ARGON2_FILL_SRC = ref.c
+  ARGON2_FILL_OBJ = ref.o
+endif
 
 all: hashpipe
 
@@ -75,11 +88,17 @@ crypt-des.o: crypt-des.c
 hashpipe.o: hashpipe.c
 	$(CC) $(CFLAGS) -c hashpipe.c
 
-hashpipe: $(OBJS)
+argon2/argon2.a:
+	cd argon2 && $(CC) $(CFLAGS) -c argon2.c core.c encoding.c thread.c $(ARGON2_FILL_SRC) && \
+	$(CC) $(CFLAGS) -c -o blake2b.o blake2/blake2b.c && \
+	$(AR) rcs argon2.a argon2.o core.o encoding.o thread.o $(ARGON2_FILL_OBJ) blake2b.o
+
+hashpipe: $(OBJS) argon2/argon2.a
 	$(CC) $(LDFLAGS) -o hashpipe $(OBJS) $(YESCRYPT_OBJS) $(LIBS) $(LDEXTRA)
 
 clean:
 	rm -f hashpipe $(OBJS)
+	rm -f argon2/*.o argon2/argon2.a
 
 distclean: clean
 	rm -rf deps
@@ -186,7 +205,7 @@ dep-sphlib:
 	cd $(DEPDIR)/sphlib/c && \
 	SPH_SRCS=$$(ls *.c | grep -v '^test_' | grep -v '^hsum' | grep -v '^speed' \
 		| grep -v 'sha3nist' | grep -v '^utest' | grep -v '_helper\.c') && \
-	$(CC) -O3 -w -c $$SPH_SRCS && \
+	$(CC) -O3 -w -fno-strict-aliasing -c $$SPH_SRCS && \
 	$(AR) rcs libsph.a *.o; \
 	cp $(DEPDIR)/sphlib/c/libsph.a $(TOPDIR)/; \
 	cp $(DEPDIR)/sphlib/c/sph_*.h $(TOPDIR)/; \
