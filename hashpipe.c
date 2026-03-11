@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.73 2026/03/10 15:14:54 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.74 2026/03/11 17:04:39 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25251,7 +25251,8 @@ static void run_benchmark(void)
 
 static void usage(int brief)
 {
-    fprintf(stderr,
+    FILE *out = brief ? stderr : stdout;
+    fprintf(out,
         "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
@@ -25277,7 +25278,36 @@ static void usage(int brief)
 
     if (!brief && Hashtypes) {
         int i, val;
-        fprintf(stderr, "\n%-10s%-10s%-30s%s\n", "Internal", "Flags", "Hash name", "hashcat -m");
+        int w1 = 8, w2 = 5, w3 = 9; /* min = header widths */
+        char ibuf[16];
+
+        /* First pass: measure max column widths */
+        for (i = 0; i < Numtypes; i++) {
+            struct hashtype *ht = &Hashtypes[i];
+            int fp = 0, nlen;
+
+            if (!ht->name) continue;
+            if (!ht->compute && !ht->verify && ht->nchain == 0) continue;
+
+            nlen = snprintf(ibuf, sizeof(ibuf), "e%d", i);
+            if (nlen > w1) w1 = nlen;
+
+            if (ht->flags & HTF_SALTED)   fp++;
+            if (ht->flags & HTF_UC)        fp++;
+            if (ht->flags & HTF_NTLM)     fp++;
+            if (ht->flags & HTF_COMPOSED)  fp++;
+            if (ht->flags & HTF_NONHEX)   fp++;
+            if (ht->verify)                fp++;
+            if (fp == 0) fp = 1;
+            if (fp > w2) w2 = fp;
+
+            nlen = (int)strlen(ht->name);
+            if (nlen > w3) w3 = nlen;
+        }
+        w1 += 2; w2 += 2; w3 += 2; /* 2-space gap */
+
+        /* Second pass: print */
+        fprintf(out, "\n%-*s%-*s%-*s%s\n", w1, "Internal", w2, "Flags", w3, "Hash name", "hashcat -m");
         for (i = 0; i < Numtypes; i++) {
             struct hashtype *ht = &Hashtypes[i];
             char flags[16], hcbuf[64];
@@ -25301,10 +25331,11 @@ static void usage(int brief)
                     hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, "%d", Maphashcat[val].hc);
                 }
             }
-            fprintf(stderr, "e%-9d%-10s%-30s%s\n", i, flags, ht->name,
+            snprintf(ibuf, sizeof(ibuf), "e%d", i);
+            fprintf(out, "%-*s%-*s%-*s%s\n", w1, ibuf, w2, flags, w3, ht->name,
                 hci ? hcbuf : "n/a");
         }
-        fprintf(stderr, "\nFlags: s=salted u=UC c=composed n=NTLM v=non-hex V=verify\n");
+        fprintf(out, "\nFlags: s=salted u=UC c=composed n=NTLM v=non-hex V=verify\n");
     }
 }
 
