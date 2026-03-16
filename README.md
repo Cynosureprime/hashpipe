@@ -401,7 +401,7 @@ Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces
 
 ### Additional algorithm families
 
-hashpipe also supports GOST, GOST-CRYPTO, Streebog, gost12512crypt, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS\_TOKEN, WINPHONE, QNX shadow, WPA-PMKID/EAPOL, Apple Keychain/iWork/APFS, Ansible Vault, Bitwarden, MongoDB SCRAM, SolarWinds, VMware VMX, SQLCipher, JWT, TACACS+, Kerberos 5 Pre-Auth/DB (etype 17/18), AWS Signature v4, PostgreSQL SCRAM-SHA-256, WordPress bcrypt, Symfony Legacy, Argon2, and hundreds of composed/chained variants.
+hashpipe also supports GOST, GOST-CRYPTO, Streebog, gost12512crypt, RIPEMD-128/160/320, TIGER, HAVAL (all variants), BLAKE-224/256/384/512, BMW, CubeHash, ECHO, Fugue, Groestl, Hamsi, JH, Keccak, SHA-3, Luffa, Panama, RadioGatun, Shabal, SHAvite, SIMD, Skein, Whirlpool, MD6, MDC2, EDON, Snefru, HAS-160, BLAKE2B/2S, MurmurHash, RADMIN2, LM, SipHash, SAP BCODE/PASSCODE, AS/400 DES, PS-TOKEN, WINPHONE, QNX shadow, WPA-PMKID/EAPOL, Apple Keychain/iWork/APFS, Ansible Vault, Bitwarden, MongoDB SCRAM, SolarWinds, VMware VMX, SQLCipher, JWT, TACACS+, Kerberos 5 Pre-Auth/DB (etype 17/18), AWS Signature v4, PostgreSQL SCRAM-SHA-256, WordPress bcrypt, Symfony Legacy, Argon2, and hundreds of composed/chained variants.
 
 ## Benchmarking
 

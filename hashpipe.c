@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.74 2026/03/11 17:04:39 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.76 2026/03/16 04:58:40 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -830,7 +830,7 @@ struct MapHashcat {
     {13200, 915},   /* 13200 | AxCrypt */
     {13300, 916},   /* 13300 | AxCrypt in-memory SHA1  */
     {13400, 65535}, /* 13400 | KeePass 1 (AES/Twofish) and KeePass 2 (AES) */
-    {13500, 927},  /* 13500 | PeopleSoft PS_TOKEN */
+    {13500, 927},  /* 13500 | PeopleSoft PS-TOKEN */
     {13600, 65535}, /* 13600 | WinZip */
     {13711, 65535}, /* Veracrypt */
     {13712, 65535},
@@ -1396,14 +1396,14 @@ char *Types[] = {
     "CISCO9",
     "DCC2",
     "PWSAFE3",
-    "IKEPSK_MD5",
-    "IKEPSK_SHA1",
+    "IKEPSK-MD5",
+    "IKEPSK-SHA1",
     "SAP-BCODE",
     "SAP-BCODE4",
     "SAP-PASSCODE",
     "SAP-PASSCODE5",
     "AS400-DES",
-    "PS_TOKEN",
+    "PS-TOKEN",
     "WINPHONE",
     "RACF-KDFAES",
     "TACACS",
@@ -1466,7 +1466,7 @@ char *Types[] = {
     "ARGON2",
     "SM3",
     "BCRYPTHMACSHA256",
-    "WPA_PMK",
+    "WPA-PMK",
     "MD5SALT1SALT2",
     "SYMFONY256",
     "WPBCRYPT",
@@ -21646,15 +21646,15 @@ static void init_hashtypes(void)
     HTV("CISCO9",       0, verify_cisco9, "$9$rndSa1tRndSa1t$vNe65wzVje3iwyqNXv34z3vaHXV9qbyYgYB37IWc5uA:password123");
     HTV("DCC2",         0, verify_dcc2, "$DCC2$10240#6848#4f9d6397a4756474a8ee1bdf701f4db5:password123");
     HTV("PWSAFE3",      0, verify_pwsafe3, "50575333e4e2a590a5e5c8269f57ec04a8a1c0c03da55b311c51236dab8c6b96b0afca0200080000a146c17e011363b180b2a121713dc6ea94accb57a2751a99e67528a5872622bd:password123");
-    HTV("IKEPSK_MD5",   0, verify_ikepsk_md5, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:37b806b82e7cd215df7283dc417e61a1:password123");
-    HTV("IKEPSK_SHA1",  0, verify_ikepsk_sha1, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:8bcc01c0e06096876785012e8ddb071e7b629917:password123");
+    HTV("IKEPSK-MD5",   0, verify_ikepsk_md5, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:37b806b82e7cd215df7283dc417e61a1:password123");
+    HTV("IKEPSK-SHA1",  0, verify_ikepsk_sha1, "4141414141414141:4242424242424242:4343434343434343:4444444444444444:4545454545454545:4646464646464646:4747474747474747:4848484848484848:8bcc01c0e06096876785012e8ddb071e7b629917:password123");
     HTV("SAP-BCODE",          0, verify_sap_bcode_full, "ABCDEFGH$9512E367C5A82CC2:pass1234");
     HTV("SAP-BCODE4",         0, verify_sap_bcode4, "ABCDEFGH$9512E36700000000:pass1234");
     HTV("SAP-PASSCODE",       0, verify_sap_passcode_full, "ABCDEFGH$66251d3727a1d78eac92fe616a5174aa8a8f6632:password123");
     HTV("SAP-PASSCODE5",      0, verify_sap_passcode5, "ABCDEFGH$66251d3727000000000000000000000000000000:password123");
     HTV("AS400-DES",          0, verify_as400des, "$as400$des$*OPEN3*EC76FC0DEF5B0A83:SYS1");
     HTV("RACF-KDFAES",       0, verify_racf_kdfaes, "$racf-kdfaes$*USER*E7D7E66D000180000008003200100010*00112233445566778899AABBCCDDEEFF*57558AFDA9513B926E3E2BE86DFAF72D:pass1234");
-    HTV("PS_TOKEN",           0, verify_ps_token, "d7ace0616a3ae62d2c271e3bb3fa4204099cfea0:deadbeef01020304:password123");
+    HTV("PS-TOKEN",           0, verify_ps_token, "d7ace0616a3ae62d2c271e3bb3fa4204099cfea0:deadbeef01020304:password123");
     HTV("WINPHONE",           0, verify_winphone, "d032042e65aea887f5d3a8b9a18dfd66fb4c7df6bd45721f5f3a18dda8f01f0f:4141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141:password123");
     HTV("TACACS",             0, verify_tacacs, "$tacacs-plus$0$5fde8e68$2c388f382ca4$c006:password123");
     HTV("APPLE-SECURE-NOTES", 0, verify_apple_secure_notes, "$ASN$*1*20000*80771171105233481004850004085037*ead1884ed4297f1087be86ae90ab696018ef07cc96fefe57:password123");
@@ -21671,7 +21671,7 @@ static void init_hashtypes(void)
     HTV("KRB5PA-18",         0, verify_krb5pa_18, "$krb5pa$18$hashpipe$HASHPIPEDOMAIN.FAKE$ce165afbd18b9b6f50ed9cb9954cd77c0c7a6054a26dbe5607206ed459156b27df4a6db33cc1e39aa1263ddfd6c45540af2b316e109da4ca:password123");
     HTV("WPA-PMKID",         0, verify_wpa_pmkid, "WPA*01*73e1a080000ac80417aa784bec8627fa*fc690c158264*f4747f87f9f4*686173686361742d6573736964***:password123");
     HTV("WPA-EAPOL",         0, verify_wpa_eapol, "WPA*02*7703121020ac20025ce3347aba2ccf55*fc690c158264*f4747f87f9f4*686173686361742d6573736964*10e3be3b005a629e89de088d6a2fdc489db83ad4764f2d186b9cde15446e972e*0103007502010a0000000000000000000148ce2ccba9c1fda130ff2fbbfb4fd3b063d1a93920b0f7df54a5cbf787b16171000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001630140100000fac040100000fac040100000fac028000*00:password123");
-    HTV("WPA_PMK",           0, verify_wpa_pmk, "WPA*01*5ce7ebe97a1bbfeb2822ae627b726d5b*27462da350ac*accd10fb464e*686173686361742d6573736964***:88f43854ae7b1624fc2ab7724859e795130f4843c7535729e819cf92f39535dc");
+    HTV("WPA-PMK",           0, verify_wpa_pmk, "WPA*01*5ce7ebe97a1bbfeb2822ae627b726d5b*27462da350ac*accd10fb464e*686173686361742d6573736964***:88f43854ae7b1624fc2ab7724859e795130f4843c7535729e819cf92f39535dc");
     HTV("MD5SALT1SALT2",     0, verify_md5salt1salt2, "7af9397a334889154d305e3bea6e251b:salt1:salt2:password123");
     HTV("SYMFONY256",        0, verify_symfony256, "b131e8c370fcafef01c2a7604b5fe9646e2db46df559b05237d3e45e1afb7650:salt1234salt5678:password123");
     HTV("WPBCRYPT",          0, verify_wpbcrypt, "$wp$2b$05$RndSa1tRndSa1tRndSa1tugwc9wduHyReZB0wwYpf/1LAbf.pn.Fa:password123");
@@ -23381,6 +23381,29 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                     *hot_iter = item->match_iter;
                     return;
                 }
+                /* compute_alt retry for unsalted types (e.g. MD5-DBL-PASS colon variant) */
+                if (ht->compute_alt) {
+                    ht->compute_alt(pass, passlen, NULL, 0, computed);
+                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                        item->verified = 1;
+                        item->match_type = ht;
+                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        *hot_type = ModeList[m];
+                        *hot_iter = item->match_iter;
+                        return;
+                    }
+                }
+                if (ht->compute_alt2) {
+                    ht->compute_alt2(pass, passlen, NULL, 0, computed);
+                    if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
+                        item->verified = 1;
+                        item->match_type = ht;
+                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        *hot_type = ModeList[m];
+                        *hot_iter = item->match_iter;
+                        return;
+                    }
+                }
             }
         }
 
@@ -23506,6 +23529,29 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             *hot_type = cands[c] - Hashtypes;
             *hot_iter = item->match_iter;
             return;
+        }
+        /* compute_alt retry for unsalted types (e.g. MD5-DBL-PASS colon variant) */
+        if (cands[c]->compute_alt) {
+            cands[c]->compute_alt(pass, passlen, NULL, 0, computed);
+            if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
+                item->verified = 1;
+                item->match_type = cands[c];
+                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                *hot_type = cands[c] - Hashtypes;
+                *hot_iter = item->match_iter;
+                return;
+            }
+        }
+        if (cands[c]->compute_alt2) {
+            cands[c]->compute_alt2(pass, passlen, NULL, 0, computed);
+            if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
+                item->verified = 1;
+                item->match_type = cands[c];
+                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                *hot_type = cands[c] - Hashtypes;
+                *hot_iter = item->match_iter;
+                return;
+            }
         }
     }
 
@@ -24529,7 +24575,7 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 if (item->hashlen == 40 && is_hex(hashstart, 40) &&
                     colon1 && (colon_last - colon1 - 1) >= 16 &&
                     is_hex(colon1 + 1, colon_last - colon1 - 1))
-                    item->hint = find_type_by_name("PS_TOKEN");
+                    item->hint = find_type_by_name("PS-TOKEN");
                 else if (item->hashlen == 64 && is_hex(hashstart, 64) &&
                          colon1 && (colon_last - colon1 - 1) == 256)
                     item->hint = find_type_by_name("WINPHONE");
@@ -24561,9 +24607,9 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 if (prev > hashstart && *prev == ':') {
                     int lastlen = lc - (prev + 1);
                     if (lastlen == 40 && is_hex(prev + 1, 40))
-                        item->hint = find_type_by_name("IKEPSK_SHA1");
+                        item->hint = find_type_by_name("IKEPSK-SHA1");
                     else if (lastlen == 32 && is_hex(prev + 1, 32))
-                        item->hint = find_type_by_name("IKEPSK_MD5");
+                        item->hint = find_type_by_name("IKEPSK-MD5");
                 }
             }
             else if (item->hashlen == 16 && is_hex(hashstart, 16) && ncolons >= 1)
