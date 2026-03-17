@@ -225,7 +225,7 @@ Rather than scanning all 988 types for each input line, hashpipe maintains per-h
 
 ## Supported Hash Types
 
-hashpipe supports 988 hash types.  Run `hashpipe -h` for the full list.
+hashpipe supports 988 hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
 
 ### Common types
 
