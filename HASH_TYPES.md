@@ -137,7 +137,7 @@ self-test vector; they are still fully functional.
 | e120 | MD2MD5PASS | n/a | `5e7db5843b5d6b9f09b377b6e7ebfc1a:password123` |
 | e121 | MD4MD5 | n/a | `afb204805372c4d49b797117e7cad74b:password123` |
 | e122 | MD4MD5PASS | n/a | `5af3fd4ab6704fd4ceda700eb3677b28:password123` |
-| e123 | MD5MD5PASS | n/a | `` |
+| e123 | MD5MD5PASS | n/a | `bd338a397028b480434dfc1f4cc73e37:password1234` |
 | e124 | GOSTMD5 | n/a | `16d1edab552d7f1277d1a05124fe3a4dbe6294cb396512276eb47a8215d4e3f6:password123` |
 | e125 | GOSTMD5PASS | n/a | `b2a4bf185b2e1226ad2e15082dd44d09c764f26d4b019ee94da8f7149058aa83:password123` |
 | e126 | HAV128MD5 | n/a | `d7674c26a4d368d28f68c58c745e6fc2:password123` |
@@ -197,11 +197,11 @@ self-test vector; they are still fully functional.
 | e180 | MD5SHA512 | n/a | `2dc96034c9ecbd894474ebcb79c09448:password123` |
 | e181 | SHA1PASSSHA1 | n/a | `f4ec43b2a3b850de920746ec9c701ac614db5a41:password123` |
 | e182 | SHA1UC | n/a | `CBFDAC6008F9CAB4083784CBD1874F76618D2A97:password123` |
-| e183 | MD5HEXSALT | n/a | `` |
-| e184 | SHA1HEXSALT | n/a | `` |
-| e185 | SHA256HEXSALT | n/a | `` |
-| e186 | GOSTHEXSALT | n/a | `` |
-| e187 | HAV128HEXSALT | n/a | `` |
+| e183 | MD5HEXSALT | n/a | `fbdad8ef09239075982cc64505d43a32:00:password1234` |
+| e184 | SHA1HEXSALT | n/a | `e98041847f496142921fe4401f3b6acbe53a1878:00:password1234` |
+| e185 | SHA256HEXSALT | n/a | `1da31a6fd779f719737bfa9a028a4033d544ac74a328a9253bc52f2be95f8fcf:00:password1234` |
+| e186 | GOSTHEXSALT | n/a | `a26fd15a01602db5b903935dcdf05a7c8d75ddac5e89e158d595ee7d4013a21f:00:password1234` |
+| e187 | HAV128HEXSALT | n/a | `32ca4acfb20648bf178f8bc962caf4b7:00:password1234` |
 | e188 | MD5SHA1MD5 | 32800 | `3b4f022014f794549416f9c1bd25fa63:password123` |
 | e189 | MD5SHA1MD5SHA1 | n/a | `508a60f7683f2aeee51920f5000af7a7:password123` |
 | e190 | MD5SHA1MD5SHA1SHA1 | n/a | `6f853d7025b462217bf65bce41ae1b38:password123` |
@@ -215,12 +215,12 @@ self-test vector; they are still fully functional.
 | e198 | SHA256SHA512 | n/a | `91ce0064ece5029452c4145edaa737ef579c799a7cc7e2c62a7fc17265824eb3:password123` |
 | e199 | MD5WRL | n/a | `b961c2abc423335d8ca92d3f943cc03d:password123` |
 | e200 | MD5SHA1SHA1RAW | n/a | `7ae92abdb62aede2b092f11591818bb4:password123` |
-| e201 | MD5PASSMD5 | n/a | `` |
-| e202 | MD5-DBL-PASS | n/a | `` |
+| e201 | MD5PASSMD5 | n/a | `a4bfd4666b8774bf82adff50ea9d49c1:password1234` |
+| e202 | MD5-DBL-PASS | n/a | `06bf21bb53b8c589dd3359139f0db176:password1234` |
 | e203 | SHA1MD5UC | n/a | `900bd2208de3ca960ecee76ee483904300ceb991:password123` |
 | e204 | SHA1MD5SHA1MD5SHA1MD5 | n/a | `e8eed22214746f4d65566bacd2dc3468b45f75a6:password123` |
 | e205 | MD5SQL5 | n/a | `4b9c0924c807868a66f7ff0e713c2cb2:password123` |
-| e206 | SHA1SQL5 | n/a | `` |
+| e206 | SHA1SQL5 | n/a | `3d597118acbe286752288c1cb9508aa4b40fd791:password1234` |
 | e207 | MD5MD5UCMD5 | n/a | `d168e00fe57116e52a5e804887a05cd0:password123` |
 | e208 | HMAC-MD2 | n/a | `04912f388000a9ea3d21047d21150f0f:testsalt:password123` |
 | e209 | HMAC-MD4 | n/a | `ab18ed06836fdbf52f6e440cc603c190:testsalt:password123` |
@@ -251,14 +251,14 @@ self-test vector; they are still fully functional.
 | e234 | MD5SHA1BASE64 | n/a | `ca1cadacfe3b29687903c39e922ecae7:password123` |
 | e235 | MD5SHA1MD5BASE64 | n/a | `364946e99c9332ecb45913e2046bbda3:password123` |
 | e236 | SHA1BASE64 | n/a | `402720a0a1cf4494318ee024a43898d4166eed11:password123` |
-| e237 | MD5BASE64MD5RAW | n/a | `` |
+| e237 | MD5BASE64MD5RAW | n/a | `a52beba4acfe78f1094ede91ad736c13:password1234` |
 | e238 | MD5BASE64SHA1RAW | n/a | `c20983cb4198e300ba28a9423660a9c9:password123` |
 | e239 | SHA1BASE64MD5RAW | n/a | `08c372085a6831b1d0af96392dc47deed1ae3a3a:password123` |
 | e240 | SHA1BASE64SHA1RAW | n/a | `d775d52d922d95e1ec4ce86ace48e4306b8fbf44:password123` |
 | e241 | MD5BASE64SHA1RAWMD5 | n/a | `c3568ae620d0bbadcb902ba9523a9da2:password123` |
-| e242 | MD5BASE64MD5RAWSHA1 | n/a | `` |
-| e243 | MD5BASE64MD5RAWMD5 | n/a | `` |
-| e244 | MD5BASE64MD5RAWMD5MD5 | n/a | `` |
+| e242 | MD5BASE64MD5RAWSHA1 | n/a | `b7f63f54c96552581ea3d529528ff869:password1234` |
+| e243 | MD5BASE64MD5RAWMD5 | n/a | `7df4a3db60ae7b21b5fd90b64e530520:password1234` |
+| e244 | MD5BASE64MD5RAWMD5MD5 | n/a | `c47e17ea94ab5ba8fac3a57e7156526f:password1234` |
 | e245 | MD5BASE64SHA1RAWBASE64SHA1RAW | n/a | `20900515918ed3bdf0fb505e8a446287:password123` |
 | e246 | MD5SHA1UC | n/a | `840b89e46e9e5850533e834477dba072:password123` |
 | e247 | MD5SHA1UCMD5 | n/a | `1a22ce81ee0fff8670f6700195890c37:password123` |
@@ -297,10 +297,10 @@ self-test vector; they are still fully functional.
 | e280 | SHA1RADMIN2MD5 | n/a | `640ccb961495b5a0e3ceb8ef62ddc28b0370a0e4:password123` |
 | e281 | SHA1RADMIN2BASE64 | n/a | `fffdf736d6f8c25deaec20fb3671dd29b2adf3d8:password123` |
 | e282 | MD5-MULTISALT | n/a | `100b151325a157856fdbc4cf935a3a8f:angel:password123` |
-| e283 | MD52SALTMD5 | n/a | `` |
+| e283 | MD52SALTMD5 | n/a | `903006b5979bbcc96cfc3717e9704d0a:$HEX[0909]:password1234` |
 | e284 | MD51SALTMD5UC | n/a | `3c7cdcfb2ea4813dca96d14fe542b28d:D:password123` |
 | e285 | MD51SALTMD5MD5 | n/a | `acedaa16f08b61bb4de2ab57099b6d86:~:password123` |
-| e286 | MD5MD5USER | n/a | `` |
+| e286 | MD5MD5USER | n/a | `1369f158239f72c084ce44c7a89cd568:testsalt:password1234` |
 | e287 | SHA1MD5MD5 | 18500 | `43445e0d1298d6c987a881f361808422fb3b8ed7:password123` |
 | e288 | SHA1SHA1RAWMD5 | n/a | `2c13011ac7f9b6ce6564935154f8986a535979a9:password123` |
 | e289 | SHA1MD5MD5MD5 | n/a | `0d3ee472e2f623ab9fda6aa1afc39c329987a7a5:password123` |
@@ -322,7 +322,7 @@ self-test vector; they are still fully functional.
 | e305 | MD5-2xMD5-SHA1 | n/a | `e71cba2abebcf2548647345b55ae24df:password123` |
 | e306 | MD5-2xMD5-MD5MD5 | n/a | `6175fd3774c355d762d39512f2392ce3:password123` |
 | e307 | MD5-2xMD5-MD5MD5MD5 | n/a | `7822c838b5f172ccc3fc6d9a07cc6a73:password123` |
-| e308 | SHA1MD5USER | 4711 | `` |
+| e308 | SHA1MD5USER | 4711 | `a2b60995488bc3f3954166bd48779efb2707d6f4:testsalt:password1234` |
 | e309 | SHA1MD5RADMIN2 | n/a | `20bd7be8772e70bfd776c0629762b6ba04056e62:password123` |
 | e310 | SHA1SHA1USER | 4510 | `3b8240b10f2caefcc6cd7c970b332b4109d7e63c:testsalt:password123` |
 | e311 | SHA11SALTMD5 | n/a | `f635c6f7e80b172f2bd7a40e2c36804a09df3785:~:password123` |
@@ -362,25 +362,25 @@ self-test vector; they are still fully functional.
 | e345 | MD51SALTMD5MD5MD5MD5MD5 | n/a | `32e0ed968d6e554d35d6f200b1fc8a14:~:password123` |
 | e346 | MD5BASE64ROT13 | n/a | `e1f3134140c094abd2d2de53a5f7cc4f:password123` |
 | e347 | MD5MD5SALT | n/a | `966fb8f379de3a2dbdbf249470a76e86:testsalt:password123` |
-| e348 | MD52SALTMD5MD5 | n/a | `` |
-| e349 | MD52SALTMD5MD5MD5 | n/a | `` |
+| e348 | MD52SALTMD5MD5 | n/a | `86a2519100894289d22209c1cb09c2b8:$HEX[0909]:password1234` |
+| e349 | MD52SALTMD5MD5MD5 | n/a | `c207465fbc1e7afcff045f59135a6bf6:$HEX[0909]:password1234` |
 | e350 | MD5UCSALT | n/a | `69da68d2893de24e2d927a619bbd92bf:testsalt:password123` |
 | e351 | MD5TIGER | n/a | `a59cd29db27f3e78119ab1d001d616bc:password123` |
 | e352 | MD5SHA1MD5PASS | n/a | `57b511120d3e396e3973b2185e683f7f:password123` |
 | e353 | MD5CAP | n/a | `42f749ade7f9e195bf475f37a44cafcb:password123` |
-| e354 | MD5CAPMD5USER | n/a | `` |
-| e355 | MD5CAPMD5MD5USER | n/a | `` |
-| e356 | MD5MD5MD5USER | 3610 | `` |
+| e354 | MD5CAPMD5USER | n/a | `8603f0a4d1970a65ea29c491cb1a75d6:testsalt:password1234` |
+| e355 | MD5CAPMD5MD5USER | n/a | `3a83d213b43ffdac52441ed77394bfb3:testsalt:password1234` |
+| e356 | MD5MD5MD5USER | 3610 | `0ceef83865c66c3181938742b3a68263:testsalt:password1234` |
 | e357 | MD5MD5SALT-SALT | n/a | `87648169a3b4d61e05b6077b81eb4746:Neverfound:password123` |
 | e358 | MD5CAPSHA1 | n/a | `0d5e1292d06bf6860d98acb8fb6ce324:password123` |
 | e359 | MD5SHA1MD5x | n/a | `3b4f022014f794549416f9c1bd25fa63:1:password123` |
 | e360 | MD5SHA1BASE64MD5RAW | n/a | `c3568ae620d0bbadcb902ba9523a9da2:password123` |
 | e361 | MD5SHA1MD5MD5SHA1 | n/a | `99a6cc386824d69d0fe34b514c268b3a:password123` |
 | e362 | MD5SHA1MD5UC | n/a | `1a5ba6e4a959208325eb412e21528ae9:password123` |
-| e363 | MD5MD5HUM | n/a | `` |
-| e364 | SHA1MD5HUM | n/a | `` |
-| e365 | SHA1SHA1HUM | n/a | `` |
-| e366 | MD5SHA1HUM | n/a | `` |
+| e363 | MD5MD5HUM | n/a | `1c16bcaed64f3d1652488eab6469ea02:00- x 1:password1234` |
+| e364 | SHA1MD5HUM | n/a | `8ebd444b9af9bb5a6128a8ddd04eb04aa02231ef:00- x 1:password1234` |
+| e365 | SHA1SHA1HUM | n/a | `d7d22404d4e72197cc16d6e8ecc99415eca34480:00- x 1:password1234` |
+| e366 | MD5SHA1HUM | n/a | `9242469002a4a2a5497b61ca52d71c5b:00- x 1:password1234` |
 | e367 | MD5-MD5SALTMD5PASS | 2811 | `63a6a536607c1341f3b6c2ac076bd536:KMo),:password123` |
 | e368 | MD5NTLM | n/a | `efb08065cdc200d996d9991ec1815a01:password123` |
 | e369 | NTLM | 1000 | `a9fdfa038c4b75ebc76dc855dd74f0da:password123` |
@@ -389,10 +389,10 @@ self-test vector; they are still fully functional.
 | e372 | MD5USERPASS | n/a | `4e48abb76d3e0295f3f89eb02d05b344:testsalt:password123` |
 | e373 | MD5PASSSALT | 10,11,2630 | `3bafc2e8611d1e4e84338b552539ce28:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123` |
 | e374 | MD5SHA1RADMIN2MD5 | n/a | `9b6b90e5373bfe7755d79511d3435ea1:password123` |
-| e375 | MD5UCBASE64MD5RAW | n/a | `` |
+| e375 | MD5UCBASE64MD5RAW | n/a | `a52beba4acfe78f1094ede91ad736c13:password1234` |
 | e376 | MD5UCBASE64SHA1RAW | n/a | `c20983cb4198e300ba28a9423660a9c9:password123` |
 | e377 | MD5SHA1MD5MD5UC | n/a | `ad811f10a07e284386c5474858169d00:password123` |
-| e378 | MD5SHA1MD5HUM | n/a | `` |
+| e378 | MD5SHA1MD5HUM | n/a | `cd7ee31bccad543ad9e6b38b053b37ba:00- x 1:password1234` |
 | e379 | LM | 3000 | `e52cac67419a9a22664345140a852f61:PASSWORD123` |
 | e380 | MD5LM | n/a | `af9292d80b8d3673b7bd66a04d3d7cdb:PASSWORD123` |
 | e381 | MD5LMUC | n/a | `f762f0da0424f3c16520548989b5a960:PASSWORD123` |
@@ -584,8 +584,8 @@ self-test vector; they are still fully functional.
 | e572 | MD5BASE64SHA1MD5 | n/a | `2b37df836d04c4ec1438324b42ae2534:password123` |
 | e573 | SHA1DESCRYPT | n/a | `4ac9fce4c379eeaafa815a81da1bd451be87ea52:..:password` |
 | e574 | MD4UTF16DESCRYPT | n/a | `6c29032ff65d0cab0b4f83cda5af788e:..:password` |
-| e575 | MD4UTF16MD5HUM | n/a | `` |
-| e576 | MD4UTF16SHA1HUM | n/a | `` |
+| e575 | MD4UTF16MD5HUM | n/a | `268181fcedec1a8720e017f4d0c2467f:00- x 1:password1234` |
+| e576 | MD4UTF16SHA1HUM | n/a | `e6f73512bbc38efce9eb4776df62be40:00- x 1:password1234` |
 | e577 | BCRYPT256 | 30600 | `$2a$12$DG3Vk1qDyvwkh96yaCuf6.HqWPKac6Ur7nOitGIbrN05iqtnveM7C:password123` |
 | e578 | SHA1-MD5PASSSALT | n/a | `18768e979e77779052a467262d0cf1d486c76d2c:testsalt:password123` |
 | e579 | SHA1SHA1PASSSALT | 4521,4522 | `3b8240b10f2caefcc6cd7c970b332b4109d7e63c:testsalt:password123` |
@@ -768,8 +768,8 @@ self-test vector; they are still fully functional.
 | e757 | SHA1SALTMD5UCMD5UC | n/a | `f64fcfa112d86a86ae338ea17486b5fdfde00830:1122334455667788:password123` |
 | e758 | SHA1MD51CAPMD5MD5 | n/a | `333574e6fa95b77c5996cd7d98c11601a0653a3e:password123` |
 | e759 | SHA1MD5SHA1PASSSALT | n/a | `30bd73e67b446ec9ad36c591b7b93bcd6e47ddb5:administrator:password123` |
-| e760 | SHA1SQL5MD5 | n/a | `` |
-| e761 | SHA1SQL5MD5MD5 | n/a | `` |
+| e760 | SHA1SQL5MD5 | n/a | `60616c7f592c853d2eb255244360e4c520120c38:password1234` |
+| e761 | SHA1SQL5MD5MD5 | n/a | `ab24118bb091d46c5e380cdde2f247ced0aa4077:password1234` |
 | e762 | SHA1revSHA1 | n/a | `adbf03f086ae522a1b2f136bdabad0e3cb670fb6:password123` |
 | e763 | SHA11SALTMD5SHA256 | n/a | `1fbe24e8ee1bfb36376dc8715af1c2eb15764c05:$HEX[09]:password123` |
 | e764 | SHA1SHA256MD5MD5 | n/a | `9451d9164fa3f30da85ecf0a554924dba2b34196:password123` |
