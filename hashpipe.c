@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.76 2026/03/16 04:58:40 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.78 2026/03/29 05:33:41 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20084,7 +20084,9 @@ static int verify_as400ssha1(const char *hashstr, int hashlen,
 }
 
 /* ARGON2 (e987, mode 34000):
- * Format: $argon2{d|i|id}$v=VER$m=MEM,t=ITER,p=PARA$B64SALT$B64HASH
+ * Format 1: $argon2{d|i|id}$v=VER$m=MEM,t=ITER,p=PARA$B64SALT$B64HASH
+ * Format 2 (Magento v2): HEXHASH:SALT:2  (defaults: argon2id v19, t=2, m=65536, p=1, hashlen=32)
+ * Format 3 (Magento v2): HEXHASH:SALT:3_HASHLEN_ITER_MEMBYTES
  * Algorithm: argon2{d|i|id}(pass, salt, t_cost, m_cost, parallelism, hashlen) */
 static int verify_argon2(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -20095,13 +20097,76 @@ static int verify_argon2(const char *hashstr, int hashlen,
     char *buf = (char *)WS->gp4;                       /* copy of hashstr for parsing */
 
     if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
-    if (memcmp(hashstr, "$argon2", 7) != 0) return 0;
+
+    int a2type, ver, m_cost, t_cost, parallelism, saltlen, exp_hashlen;
+
+    if (memcmp(hashstr, "$argon2", 7) != 0) {
+        /* Magento v2 format: HEXHASH:SALT:{2|3[_HASHLEN_ITER_MEMBYTES]}
+         * Always argon2id, version 19, parallelism 1.
+         * Salt is first 16 chars of salt field, used as raw ASCII bytes. */
+        memcpy(buf, hashstr, hashlen);
+        buf[hashlen] = 0;
+
+        /* Find the three colon-delimited fields */
+        char *colon1 = strchr(buf, ':');
+        if (!colon1) return 0;
+        *colon1 = 0;
+        char *saltfield = colon1 + 1;
+
+        char *colon2 = strchr(saltfield, ':');
+        if (!colon2) return 0;
+        *colon2 = 0;
+        char *verfield = colon2 + 1;
+
+        /* Hex hash field must be even length, all hex */
+        int hexlen = (int)(colon1 - buf);
+        if (hexlen < 2 || hexlen > 256 || (hexlen & 1)) return 0;
+        exp_hashlen = hex2bin(buf, hexlen, expected);
+        if (exp_hashlen < 1) return 0;
+
+        /* Parse version field: "2", "3", or "3_32_2_67108864" */
+        a2type = 2;       /* argon2id */
+        ver = 19;
+        parallelism = 1;
+        if (verfield[0] == '2' && (verfield[1] == 0 || verfield[1] == '_')) {
+            /* Version 2: use defaults or parse extended params */
+        } else if (verfield[0] == '3' && (verfield[1] == 0 || verfield[1] == '_')) {
+            /* Version 3: same algorithm, may have extended params */
+        } else {
+            return 0;
+        }
+
+        if (verfield[1] == '_') {
+            /* Extended: VER_HASHLEN_ITER_MEMBYTES e.g. 3_32_2_67108864 */
+            int parsed_hashlen = 0, parsed_iter = 0;
+            long long parsed_mem = 0;
+            if (sscanf(verfield + 2, "%d_%d_%lld", &parsed_hashlen, &parsed_iter, &parsed_mem) != 3)
+                return 0;
+            if (parsed_hashlen != exp_hashlen) return 0;
+            if (parsed_iter < 1 || parsed_mem < 8192) return 0;
+            t_cost = parsed_iter;
+            m_cost = (int)(parsed_mem / 1024);  /* bytes to KiB */
+        } else {
+            /* Bare "2" or "3": Magento defaults */
+            t_cost = 2;
+            m_cost = 65536;  /* 64 MiB in KiB */
+        }
+
+        /* Salt: first 16 chars of salt field, raw ASCII */
+        int sflen = (int)strlen(saltfield);
+        saltlen = (sflen > 16) ? 16 : sflen;
+        if (saltlen < 1) return 0;
+        memcpy(salt, saltfield, saltlen);
+
+        goto do_argon2;
+    }
 
     memcpy(buf, hashstr, hashlen);
     buf[hashlen] = 0;
 
     /* Parse type: d/i/id */
-    int a2type = -1;
+    a2type = -1;
+    {
     char *p = buf + 7;
     if (*p == 'd' && p[1] == '$') { a2type = 0; p += 2; }
     else if (*p == 'i' && p[1] == '$') { a2type = 1; p += 2; }
@@ -20110,14 +20175,14 @@ static int verify_argon2(const char *hashstr, int hashlen,
 
     /* Parse v=VER */
     if (memcmp(p, "v=", 2) != 0) return 0;
-    int ver = atoi(p + 2);
+    ver = atoi(p + 2);
     if (ver != 19 && ver != 16) return 0;
     char *d1 = strchr(p, '$');
     if (!d1) return 0;
     d1++;
 
     /* Parse m=MEM,t=ITER,p=PARA */
-    int m_cost = 0, t_cost = 0, parallelism = 0;
+    m_cost = 0; t_cost = 0; parallelism = 0;
     if (sscanf(d1, "m=%d,t=%d,p=%d", &m_cost, &t_cost, &parallelism) != 3) return 0;
     if (m_cost < 1 || t_cost < 1 || parallelism < 1 || parallelism > 32) return 0;
 
@@ -20132,15 +20197,18 @@ static int verify_argon2(const char *hashstr, int hashlen,
 
     /* Decode salt (base64, no padding) */
     int b64saltlen = strlen(d2);
-    int saltlen = b64_decode_nopad(d2, salt, b64saltlen);
+    saltlen = b64_decode_nopad(d2, salt, b64saltlen);
     if (saltlen < 1 || saltlen > 255) return 0;
 
     /* Decode expected hash */
     int b64hashlen = strlen(d3);
-    int exp_hashlen = b64_decode_nopad(d3, expected, b64hashlen);
+    exp_hashlen = b64_decode_nopad(d3, expected, b64hashlen);
     if (exp_hashlen < 1 || exp_hashlen > 128) return 0;
+    }
 
+do_argon2:
     /* Compute argon2 — malloc/free workspace inside (variable size) */
+    {
     argon2_context ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.out = computed;
@@ -20163,6 +20231,7 @@ static int verify_argon2(const char *hashstr, int hashlen,
 
     WS->verify_iter = t_cost;
     return memcmp(computed, expected, exp_hashlen) == 0;
+    }
 }
 
 /* MD5SALT1SALT2 (e991, hashcat mode 33000): md5($salt1.$pass.$salt2)
@@ -21727,6 +21796,9 @@ static void init_hashtypes(void)
     HTV("SM3CRYPT",         0, verify_sm3crypt, "$sm3$aaaaaaaaaaaaaaaa$9hj3BsTKoxVnrt6XmdzPzkD4Xi1i8VVI6wk6t.RK.w7:password123");
     HTV("AS400SSHA1",       0, verify_as400ssha1, "$as400$ssha1$*QTEST1*228267B3F408E739F5A577554E978DD05536A3ED:password123");
     HTV("ARGON2",           0, verify_argon2, "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$g21LGibBQ2iHFjsbopcv8xkV8FNXi1tW6wD6GcyKB7I:password123");
+    HTV("ARGON2",           0, verify_argon2, "3118004b2f9ce8fcf3abc2fdf9623b85988db360951c607456beb26821381a12:aaaaaaaaaaaaaaaa:2:password123");
+    HTV("ARGON2",           0, verify_argon2, "3118004b2f9ce8fcf3abc2fdf9623b85988db360951c607456beb26821381a12:aaaaaaaaaaaaaaaa:3_32_2_67108864:password123");
+    HTV("ARGON2",           0, verify_argon2, "3118004b2f9ce8fcf3abc2fdf9623b85988db360951c607456beb26821381a12:aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb:3_32_2_67108864:password123");
 
     /* Phase 1: Crypt-based verify types */
     HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
@@ -22377,6 +22449,8 @@ static volatile int BatchLimit = BATCH_SIZE;
 static int Numthreads = 1;
 static FILE *Outfp;
 static FILE *Errfp;
+static int OutFd;
+static int ErrFd;
 static int *ModeList;                   /* -m: ordered array of type indices */
 static int ModeCount;                   /* entries in ModeList */
 static int ModeAuto;                    /* -m includes "auto": fallback to auto-detect */
@@ -24102,7 +24176,7 @@ static void worker(void *dummy)
                 format_output(&b->items[i], WS->fmtbuf, &olen);
                 if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                     possess(OutLock);
-                    fwrite(WS->outbuf, 1, outpos, Outfp);
+                    write(OutFd, WS->outbuf, outpos);
                     release(OutLock);
                     outpos = 0;
                 }
@@ -24137,7 +24211,7 @@ static void worker(void *dummy)
                             format_output(&b->items[i], WS->fmtbuf, &olen);
                             if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                                 possess(OutLock);
-                                fwrite(WS->outbuf, 1, outpos, Outfp);
+                                write(OutFd, WS->outbuf, outpos);
                                 release(OutLock);
                                 outpos = 0;
                             }
@@ -24153,7 +24227,7 @@ static void worker(void *dummy)
                 int elen = b->items[i].linelen;
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                     possess(ErrLock);
-                    fwrite(WS->errbuf, 1, errpos, Errfp);
+                    write(ErrFd, WS->errbuf, errpos);
                     release(ErrLock);
                     errpos = 0;
                 }
@@ -24287,7 +24361,7 @@ static void worker(void *dummy)
                 int elen = item->linelen;
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                     possess(ErrLock);
-                    fwrite(WS->errbuf, 1, errpos, Errfp);
+                    write(ErrFd, WS->errbuf, errpos);
                     release(ErrLock);
                     errpos = 0;
                 }
@@ -24306,7 +24380,7 @@ static void worker(void *dummy)
             format_output(item, WS->fmtbuf, &olen);
             if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                 possess(OutLock);
-                fwrite(WS->outbuf, 1, outpos, Outfp);
+                write(OutFd, WS->outbuf, outpos);
                 release(OutLock);
                 outpos = 0;
             }
@@ -24317,12 +24391,12 @@ static void worker(void *dummy)
         /* Flush remaining */
         if (outpos > 0) {
             possess(OutLock);
-            fwrite(WS->outbuf, 1, outpos, Outfp);
+            write(OutFd, WS->outbuf, outpos);
             release(OutLock);
         }
         if (errpos > 0) {
             possess(ErrLock);
-            fwrite(WS->errbuf, 1, errpos, Errfp);
+            write(ErrFd, WS->errbuf, errpos);
             release(ErrLock);
         }
 
@@ -24872,6 +24946,9 @@ static void process_input(FILE *fp)
                         item->saltlen = lc - item->rest;
                         item->password = (char *)lc + 1;
                         item->passlen = item->restlen - (int)(lc - item->rest) - 1;
+                        /* fullpass = entire rest for unsalted types with colons in password */
+                        item->fullpass = item->rest;
+                        item->fullpasslen = item->restlen;
                     } else {
                         item->salt = NULL;
                         item->saltlen = 0;
@@ -24895,7 +24972,8 @@ static void process_input(FILE *fp)
             /* No colon or invalid → stderr */
             Nocolon++;
             possess(ErrLock);
-            fprintf(Errfp, "%.*s\n", len, linebuf);
+            linebuf[len] = '\n';
+            write(ErrFd, linebuf, len + 1);
             release(ErrLock);
             continue;
         }
@@ -25664,6 +25742,8 @@ int main(int argc, char **argv)
 
     Outfp = stdout;
     Errfp = stderr;
+    OutFd = fileno(stdout);
+    ErrFd = fileno(stderr);
     BenchAll = 0;
     BenchSpec = NULL;
 
@@ -25959,6 +26039,7 @@ int main(int argc, char **argv)
             perror(outfile);
             exit(1);
         }
+        OutFd = fileno(Outfp);
     }
     if (errfile) {
         Errfp = fopen(errfile, err_append ? "ab" : "wb");
@@ -25966,6 +26047,7 @@ int main(int argc, char **argv)
             perror(errfile);
             exit(1);
         }
+        ErrFd = fileno(Errfp);
     }
     if (statfile) {
         Statfp = fopen(statfile, "a");
