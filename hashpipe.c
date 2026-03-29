@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.78 2026/03/29 05:33:41 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.79 2026/03/29 06:41:50 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22655,6 +22655,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
     int altpasslen;
     struct hashtype *cands[MAX_CANDIDATES];
     int ncands, c, iter;
+    int fullpass_retry = 0;
 
     item->verified = 0;
 
@@ -22892,7 +22893,35 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 }
                 /* Fall through to hex/compute path */
             } else {
-                return;  /* truly non-hex, can't fallback */
+                /* Non-hex: retry with fullpass before giving up */
+                if (!fullpass_retry && item->fullpass &&
+                    item->fullpass != item->password) {
+                    const unsigned char *fvpass;
+                    int fvpasslen, fv;
+                    fullpass_retry = 1;
+                    if (item->fullpass > item->hashstr &&
+                        item->fullpass <= item->hashstr + item->hashlen) {
+                        item->hashlen = (item->fullpass - 1) - item->hashstr;
+                    }
+                    item->password = item->fullpass;
+                    item->passlen = item->fullpasslen;
+                    fvpasslen = decode_hex_password(item->password, item->passlen,
+                                                    WS->vpassbuf, MAXLINE);
+                    if (fvpasslen >= 0) { fvpass = WS->vpassbuf; }
+                    else { fvpass = (const unsigned char *)item->password; fvpasslen = item->passlen; }
+                    for (fv = 0; fv < Numtypes; fv++) {
+                        struct hashtype *fht = &Hashtypes[fv];
+                        if (!fht->verify) continue;
+                        WS->verify_iter = 0;
+                        if (hash_verify(fht, item->hashstr, item->hashlen, fvpass, fvpasslen)) {
+                            item->verified = 1;
+                            item->match_type = fht;
+                            item->match_iter = WS->verify_iter;
+                            return;
+                        }
+                    }
+                }
+                return;
             }
         }
     }
@@ -22950,10 +22979,43 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 return;
             }
         }
+        /* Retry with fullpass for non-hex verify types */
+        if (!fullpass_retry && item->fullpass &&
+            item->fullpass != item->password) {
+            fullpass_retry = 1;
+            if (item->fullpass > item->hashstr &&
+                item->fullpass <= item->hashstr + item->hashlen) {
+                item->hashlen = (item->fullpass - 1) - item->hashstr;
+            }
+            item->password = item->fullpass;
+            item->passlen = item->fullpasslen;
+            item->salt = NULL;
+            item->saltlen = 0;
+            /* Re-decode password and retry verify scan */
+            vpasslen = decode_hex_password(item->password, item->passlen,
+                                           WS->vpassbuf, MAXLINE);
+            if (vpasslen >= 0) { vpass = WS->vpassbuf; }
+            else { vpass = (const unsigned char *)item->password; vpasslen = item->passlen; }
+            for (v = 0; v < Numtypes; v++) {
+                struct hashtype *ht = &Hashtypes[v];
+                if (!ht->verify) continue;
+                WS->verify_iter = 0;
+                if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
+                    item->verified = 1;
+                    item->match_type = ht;
+                    item->match_iter = WS->verify_iter;
+                    *hot_type = v;
+                    *hot_iter = WS->verify_iter;
+                    hot_list_add(hot_list, nhot, v, -1);
+                    return;
+                }
+            }
+        }
         return;
     }
 
     /* Decode password: handle $HEX[] and $TESTVEC[] */
+retry_with_fullpass:
     passlen = decode_hex_password(item->password, item->passlen, passbuf, MAXLINE);
     if (passlen >= 0) {
         pass = passbuf;
@@ -23985,6 +24047,27 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         }
     }
 
+try_fullpass:
+    /* Retry with fullpass: if the password had colons and we split at the last
+     * colon, the unsalted interpretation (entire rest = password) may be correct.
+     * Retry the full identification once with password = fullpass, no salt.
+     * For verify types, also shorten hashstr to exclude the password portion,
+     * since hashstr was extended to colon_last which may include password text. */
+    if (!fullpass_retry && item->fullpass &&
+        item->fullpass != item->password) {
+        fullpass_retry = 1;
+        /* Shorten hashstr: if fullpass starts inside hashstr, trim it */
+        if (item->fullpass > item->hashstr &&
+            item->fullpass <= item->hashstr + item->hashlen) {
+            item->hashlen = (item->fullpass - 1) - item->hashstr;  /* -1 for colon */
+        }
+        item->password = item->fullpass;
+        item->passlen = item->fullpasslen;
+        item->salt = NULL;
+        item->saltlen = 0;
+        goto retry_with_fullpass;
+    }
+
 }
 
 /* ---- Output formatting ---- */
@@ -24845,6 +24928,21 @@ hash_parsed:
             item->password = item->line + pw_off;
             item->passlen = end - (colon_last + 1);
         }
+        /* fullpass for retry: password = after second-to-last colon.
+         * This handles passwords that contain or end with colons. */
+        {
+            /* Find the colon before colon_last */
+            const char *c2l = NULL;
+            { int ci;
+              for (ci = (colon_last - line) - 1; ci >= 0; ci--)
+                if (line[ci] == ':') { c2l = line + ci; break; }
+            }
+            if (c2l) {
+                int fp_off = (c2l + 1) - line;
+                item->fullpass = item->line + fp_off;
+                item->fullpasslen = end - (c2l + 1);
+            }
+        }
         return 1;
     }
 
@@ -24935,18 +25033,26 @@ static void process_input(FILE *fp)
                 item->hash_class = HCLASS_HEX;
                 item->rest = item->line + hexlen + 1;
                 item->restlen = len - hexlen - 1;
-                /* Primary split: find last colon for salt:password */
+                /* Split rest into salt:password based on hot type */
                 {
                     const char *lc = NULL;
                     int i;
                     for (i = len - 1; i > hexlen; i--)
                         if (linebuf[i] == ':') { lc = item->line + i; break; }
                     if (lc && lc >= item->rest) {
-                        item->salt = item->rest;
-                        item->saltlen = lc - item->rest;
-                        item->password = (char *)lc + 1;
-                        item->passlen = item->restlen - (int)(lc - item->rest) - 1;
-                        /* fullpass = entire rest for unsalted types with colons in password */
+                        if (ght->flags & HTF_SALTED) {
+                            /* Salted type: salt=rest..last_colon, password=after last colon */
+                            item->salt = item->rest;
+                            item->saltlen = lc - item->rest;
+                            item->password = (char *)lc + 1;
+                            item->passlen = item->restlen - (int)(lc - item->rest) - 1;
+                        } else {
+                            /* Unsalted type: entire rest is the password (colons included) */
+                            item->salt = NULL;
+                            item->saltlen = 0;
+                            item->password = item->rest;
+                            item->passlen = item->restlen;
+                        }
                         item->fullpass = item->rest;
                         item->fullpasslen = item->restlen;
                     } else {
