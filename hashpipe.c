@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.79 2026/03/29 06:41:50 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.81 2026/03/29 07:00:29 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -24065,6 +24065,10 @@ try_fullpass:
         item->passlen = item->fullpasslen;
         item->salt = NULL;
         item->saltlen = 0;
+        item->alt_salt = NULL;
+        item->alt_saltlen = 0;
+        item->alt_password = NULL;
+        item->alt_passlen = 0;
         goto retry_with_fullpass;
     }
 
@@ -24928,21 +24932,10 @@ hash_parsed:
             item->password = item->line + pw_off;
             item->passlen = end - (colon_last + 1);
         }
-        /* fullpass for retry: password = after second-to-last colon.
+        /* fullpass = entire rest (everything after first colon).
          * This handles passwords that contain or end with colons. */
-        {
-            /* Find the colon before colon_last */
-            const char *c2l = NULL;
-            { int ci;
-              for (ci = (colon_last - line) - 1; ci >= 0; ci--)
-                if (line[ci] == ':') { c2l = line + ci; break; }
-            }
-            if (c2l) {
-                int fp_off = (c2l + 1) - line;
-                item->fullpass = item->line + fp_off;
-                item->fullpasslen = end - (c2l + 1);
-            }
-        }
+        item->fullpass = item->rest;
+        item->fullpasslen = item->restlen;
         return 1;
     }
 
