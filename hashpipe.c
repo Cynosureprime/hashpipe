@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.84 2026/04/08 18:34:01 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.85 2026/04/14 04:46:11 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
