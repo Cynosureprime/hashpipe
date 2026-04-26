@@ -1936,6 +1936,7 @@ static void compute_hmac_streebog512_kpass(const unsigned char *pass, int passle
   #define POM_GETLO64(x)      pom_getlo64(x)
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
   #define POM_NEON 1
+  #include <arm_neon.h>
   typedef uint64x2_t pom128_t;
   #define POM_ADD(x, y)       vaddq_u64((x), (y))
   #define POM_XOR(x, y)       veorq_u64((x), (y))
