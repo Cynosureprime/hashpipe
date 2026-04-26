@@ -1958,6 +1958,7 @@ static void compute_hmac_streebog512_kpass(const unsigned char *pass, int passle
   #define POM_GETLO64(x)      pom_getlo64(x)
 #elif defined(__ALTIVEC__) || defined(__VSX__)
   #define POM_ALTIVEC 1
+  #include <altivec.h>
   typedef __vector unsigned long long pom128_t;
   #define POM_ADD(x, y)       vec_add((x), (y))
   #define POM_XOR(x, y)       vec_xor((x), (y))
