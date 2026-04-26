@@ -7,19 +7,6 @@
 #include <string.h>
 #include "hx_ast.h"
 
-/* strndup may not be available on all platforms (e.g., MinGW/Windows) */
-#ifndef strndup
-static char *hx_strndup(const char *s, size_t n)
-{
-	size_t len = strlen(s);
-	if (len > n) len = n;
-	char *r = malloc(len + 1);
-	if (r) { memcpy(r, s, len); r[len] = '\0'; }
-	return r;
-}
-#define strndup hx_strndup
-#endif
-
 static hx_node *node_new(hx_node_type type, int line)
 {
 	hx_node *n = calloc(1, sizeof(hx_node));

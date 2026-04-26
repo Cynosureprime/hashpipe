@@ -22,6 +22,21 @@
 #define HX_AST_H
 
 #include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+
+/* strndup portability (not available in MinGW/MSVCRT) */
+#if defined(_WIN32) && !defined(strndup)
+static inline char *hx_strndup(const char *s, size_t n)
+{
+	size_t len = strlen(s);
+	if (len > n) len = n;
+	char *r = (char *)malloc(len + 1);
+	if (r) { memcpy(r, s, len); r[len] = '\0'; }
+	return r;
+}
+#define strndup hx_strndup
+#endif
 
 /* ---- AST node types ---- */
 
