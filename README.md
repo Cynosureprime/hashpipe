@@ -46,6 +46,20 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [
 
 **`-h`** — Print help and list all supported hash types
 
+**`-X 'expr'`** — Evaluate an hx (hash expression language) expression.  Reads passwords from stdin and outputs the computed hash for each.  See [hx Language](#hx-hash-expression-language) below.
+
+**`-X -f file`** — Read hx script from file instead of the command line
+
+**`-p pass`** — Single password (used with `-X` instead of reading stdin)
+
+**`-s salt`** — Salt value (used with `-X`)
+
+**`-S salt2`** — Secondary salt (used with `-X`)
+
+**`-P pepper`** — Pepper value (used with `-X`)
+
+**`-u user`** — User/userid value (used with `-X`)
+
 ### Input Format
 
 Each input line has the form:
@@ -222,6 +236,64 @@ Hash types use one of three verification strategies:
 ### Per-hashlen Candidate Caches
 
 Rather than scanning all 988 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+
+## hx Hash Expression Language
+
+hashpipe includes **hx**, a domain-specific language for describing, computing, and verifying cryptographic hash compositions.  The `-X` flag activates hx mode.
+
+### Quick Examples
+
+```bash
+# Simple hash
+echo password | hashpipe -X 'md5(pass)'
+5f4dcc3b5aa765d61d8327deb882cf99
+
+# Salted compound hash (mdxfind type e385)
+echo password | hashpipe -X 'sha1(md5(pass) . salt)' -s 12345
+
+# NTLM
+echo password | hashpipe -X 'md4(utf16le(pass))'
+8846f7eaee8fb117ad06bdd830b7586c
+
+# bcrypt with explicit salt and cost
+echo password | hashpipe -X 'bcrypt(pass, fromhex("6162636465666768696a6b6c6d6e6f70"), 12)'
+
+# Binary intermediate → hex encoding
+echo password | hashpipe -X 'hex(bswap32(sha1_bin(pass)))'
+
+# Iterated hash
+echo password | hashpipe -X 'md5^1000(pass)'
+```
+
+### Output Format Suffixes
+
+Every hash function supports suffixes that control the output encoding:
+
+| Suffix | Meaning |
+|--------|---------|
+| (none) | Canonical form (hex for digests, MCF for crypt) |
+| `_bin` | Raw binary bytes |
+| `_hex` | Lowercase hexadecimal |
+| `_b64` | RFC 4648 base64 |
+| `_mcf` | Modular Crypt Format (crypt-family only) |
+
+### Built-in Functions
+
+All 988 hashpipe hash types are automatically available as hx functions (lowercase names).  In addition, hx provides:
+
+- **Crypt-family**: `md5crypt()`, `apr1()`, `sha256crypt()`, `sha512crypt()`, `sm3crypt()`, `gost12_512crypt()`, `descrypt()`, `phpass()`
+- **KDFs**: `pbkdf2_sha1/sha256/sha512/md5()`, `pbkdf1_sha1()`, `bcrypt()`, `yescrypt()`, `scrypt()`, `argon2id/i/d()`, `pomelo()`
+- **Kerberos**: `rc4_hmac_md5()`, `aes128_cts_hmac_sha1()`, `aes256_cts_hmac_sha1()`
+- **Ciphers**: `des()`, `des_block()`, `des3()`, `aes_ecb_encrypt()`, `aes_cbc_encrypt/decrypt()`, `aes_unwrap()`
+- **String transforms**: `hex()`, `upper()`, `lower()`, `rev()`, `bswap32()`, `rotate()`, `cut()`, `pad()`, `trunc()`, `cap()`, `rot13()`
+- **Encoding**: `base64()`, `frombase64()`, `fromhex()`, `utf16le/be()`, `utf7()`, `zext16()`, `ebcdic()`, `from_cp1252/1251()`
+- **Non-crypto hashes**: `siphash()`, `murmur3()`
+- **Bitwise/arithmetic**: `xor()`, `and()`, `or()`, `wperm()`, `add()`, `sub()`, `mul()`, `mod()`, `length()`
+- **Control flow**: `for`/`to` loops, `if`/`else` conditionals, `emit()` for multi-value output
+
+### hx Language Specification
+
+The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all 988 mdxfind types to their hx expressions.
 
 ## Supported Hash Types
 
@@ -524,7 +596,7 @@ hashpipe maps hashcat mode numbers to internal type indices via the `-m` option.
 | Wallet / blockchain encryption | ~25 | Bitcoin wallet.dat, Ethereum, Electrum, MultiBit, Exodus, MetaMask, Blockchain.com, MEGA, Terra Station, Bisq, Dogechain, Stargazer, 1Password — PBKDF2/scrypt key derivation followed by AES/3DES decryption of wallet data with structural verification. |
 | Key file / credential store | ~20 | OpenSSH private keys, GnuPG/PGP, PEM, JKS Java Key Store, DPAPI master keys, KeePass, Mozilla NSS (key3.db/key4.db), SecureCRT, iTunes backup, Radmin3, Windows Hello — require decrypting a key structure and verifying internal consistency (ASN.1, PKCS padding, key check values). |
 | Elliptic curve / cipher operations | ~17 | Bitcoin WIF/raw private keys (secp256k1 point multiplication), RC4 DropN (stream cipher key recovery), ChaCha20, Skip32, Kremlin NewDES — these are not hash functions; they require elliptic curve arithmetic or cipher-specific operations that have no place in a hash verification tool. |
-| Network protocol / session tokens | ~15 | SIP digest auth, SNMPv3, Kerberos TGS/AS-REP (etype 17/18/23), XMPP SCRAM, WPA-EAPOL, KNX IP Secure, Flask/Mojolicious session cookies — require protocol-specific challenge-response state, ticket structures, or application-specific secret keys beyond what a password hash tool provides. |
+| Network protocol / session tokens | ~5 | SIP digest auth, SNMPv3, KNX IP Secure, Flask/Mojolicious session cookies — require protocol-specific challenge-response state or application-specific secret keys beyond what a password hash tool provides.  Note: many network protocol types *are* supported, including NTLMv1/v2 (5500/5600), WPA-PMKID (16800/22000), WPA-EAPOL, WPA-PMK (22001), TACACS+ (16100), Kerberos Pre-Auth and TGS etype 23 (7500/13100), Kerberos etype 17/18 (19800/19900/28800/28900), PostgreSQL SCRAM (11100/28600), and MongoDB SCRAM (24100/24200). |
 | Non-cryptographic hashes | 6 | CRC32, CRC32C, CRC64Jones, Java Object hashCode(), MurmurHash (64-bit), STDOUT — trivially reversible checksums or debugging modes with no cryptographic purpose.  Infinite collisions make verification meaningless. |
 
 The full list of unresolved modes with per-mode explanations is maintained in `regress/unresolved-hashcat.txt` and can be regenerated with `regress/build_unresolved_table.sh`.

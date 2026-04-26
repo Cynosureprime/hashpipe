@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.85 2026/04/14 04:46:11 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.87 2026/04/26 05:45:38 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1910,6 +1910,276 @@ static void compute_hmac_streebog512_kpass(const unsigned char *pass, int passle
     reverse_bytes(inner, 64);
     for (ki = 0; ki < 64; ki++) kpad[ki] ^= 0x36 ^ 0x5c;
     streebog_init(&stx, 64); streebog_update(&stx, kpad, 64); streebog_update(&stx, inner, 64); streebog_final(dest, &stx);
+}
+
+/* ================================================================
+ * POMELO v2 (PHC submission by Hongjun Wu)
+ * Portable implementation: SSE2, NEON, Altivec/VSX, scalar fallback.
+ * Extracted from pom.c (Waffle, 2026).
+ * ================================================================ */
+
+#if defined(__SSE2__) || (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64)))
+  #define POM_SSE2 1
+  #include <emmintrin.h>
+  typedef __m128i pom128_t;
+  #define POM_ADD(x, y)       _mm_add_epi64((x), (y))
+  #define POM_XOR(x, y)       _mm_xor_si128((x), (y))
+  #define POM_OR(x, y)        _mm_or_si128((x), (y))
+  #define POM_SHL64(x, n)     _mm_slli_epi64((x), (n))
+  #define POM_SHR64(x, n)     _mm_srli_epi64((x), (n))
+  #define POM_BYTEL8(x)       _mm_slli_si128((x), 8)
+  #define POM_BYTER8(x)       _mm_srli_si128((x), 8)
+  #define POM_ZERO()          _mm_setzero_si128()
+  static inline unsigned long long pom_getlo64(__m128i x) {
+    return (unsigned long long)_mm_cvtsi128_si64(x);
+  }
+  #define POM_GETLO64(x)      pom_getlo64(x)
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+  #define POM_NEON 1
+  typedef uint64x2_t pom128_t;
+  #define POM_ADD(x, y)       vaddq_u64((x), (y))
+  #define POM_XOR(x, y)       veorq_u64((x), (y))
+  #define POM_OR(x, y)        vorrq_u64((x), (y))
+  #define POM_SHL64(x, n)     vshlq_n_u64((x), (n))
+  #define POM_SHR64(x, n)     vshrq_n_u64((x), (n))
+  static inline pom128_t pom_bytel8(pom128_t x) {
+    return vextq_u64(vdupq_n_u64(0), x, 1);
+  }
+  static inline pom128_t pom_byter8(pom128_t x) {
+    return vextq_u64(x, vdupq_n_u64(0), 1);
+  }
+  #define POM_BYTEL8(x)       pom_bytel8(x)
+  #define POM_BYTER8(x)       pom_byter8(x)
+  #define POM_ZERO()          vdupq_n_u64(0)
+  static inline unsigned long long pom_getlo64(pom128_t x) {
+    return vgetq_lane_u64(x, 0);
+  }
+  #define POM_GETLO64(x)      pom_getlo64(x)
+#elif defined(__ALTIVEC__) || defined(__VSX__)
+  #define POM_ALTIVEC 1
+  typedef __vector unsigned long long pom128_t;
+  #define POM_ADD(x, y)       vec_add((x), (y))
+  #define POM_XOR(x, y)       vec_xor((x), (y))
+  #define POM_OR(x, y)        vec_or((x), (y))
+  static inline pom128_t pom_shl64(pom128_t x, unsigned int n) {
+    pom128_t sv = {n, n}; return vec_sl(x, sv);
+  }
+  static inline pom128_t pom_shr64(pom128_t x, unsigned int n) {
+    pom128_t sv = {n, n}; return vec_sr(x, sv);
+  }
+  #define POM_SHL64(x, n)     pom_shl64((x), (n))
+  #define POM_SHR64(x, n)     pom_shr64((x), (n))
+  static inline pom128_t pom_bytel8(pom128_t x) {
+    pom128_t zero = {0, 0};
+  #ifdef __LITTLE_ENDIAN__
+    return vec_sld(x, zero, 8);
+  #else
+    return vec_sld(zero, x, 8);
+  #endif
+  }
+  static inline pom128_t pom_byter8(pom128_t x) {
+    pom128_t zero = {0, 0};
+  #ifdef __LITTLE_ENDIAN__
+    return vec_sld(zero, x, 8);
+  #else
+    return vec_sld(x, zero, 8);
+  #endif
+  }
+  #define POM_BYTEL8(x)       pom_bytel8(x)
+  #define POM_BYTER8(x)       pom_byter8(x)
+  #define POM_ZERO()          ((pom128_t){0, 0})
+  static inline unsigned long long pom_getlo64(pom128_t x) {
+  #ifdef __LITTLE_ENDIAN__
+    return x[0];
+  #else
+    return x[1];
+  #endif
+  }
+  #define POM_GETLO64(x)      pom_getlo64(x)
+#else
+  #define POM_SCALAR 1
+  typedef struct { unsigned long long lo, hi; } pom128_t;
+  static inline pom128_t pom_add(pom128_t x, pom128_t y) {
+    pom128_t r; r.lo = x.lo + y.lo; r.hi = x.hi + y.hi; return r;
+  }
+  static inline pom128_t pom_xor(pom128_t x, pom128_t y) {
+    pom128_t r; r.lo = x.lo ^ y.lo; r.hi = x.hi ^ y.hi; return r;
+  }
+  static inline pom128_t pom_or(pom128_t x, pom128_t y) {
+    pom128_t r; r.lo = x.lo | y.lo; r.hi = x.hi | y.hi; return r;
+  }
+  static inline pom128_t pom_shl64(pom128_t x, int n) {
+    pom128_t r; r.lo = x.lo << n; r.hi = x.hi << n; return r;
+  }
+  static inline pom128_t pom_shr64(pom128_t x, int n) {
+    pom128_t r; r.lo = x.lo >> n; r.hi = x.hi >> n; return r;
+  }
+  static inline pom128_t pom_bytel8(pom128_t x) {
+    pom128_t r; r.hi = x.lo; r.lo = 0; return r;
+  }
+  static inline pom128_t pom_byter8(pom128_t x) {
+    pom128_t r; r.lo = x.hi; r.hi = 0; return r;
+  }
+  #define POM_ADD(x, y)       pom_add((x), (y))
+  #define POM_XOR(x, y)       pom_xor((x), (y))
+  #define POM_OR(x, y)        pom_or((x), (y))
+  #define POM_SHL64(x, n)     pom_shl64((x), (n))
+  #define POM_SHR64(x, n)     pom_shr64((x), (n))
+  #define POM_BYTEL8(x)       pom_bytel8(x)
+  #define POM_BYTER8(x)       pom_byter8(x)
+  static inline pom128_t pom_zero(void) {
+    pom128_t r; r.lo = r.hi = 0; return r;
+  }
+  #define POM_ZERO()          pom_zero()
+  static inline unsigned long long pom_getlo64(pom128_t x) { return x.lo; }
+  #define POM_GETLO64(x)      pom_getlo64(x)
+#endif
+
+#define POM_ROTL(x, n) POM_XOR(POM_SHL64((x),(n)), POM_SHR64((x),(64-(n))))
+
+#define POM_F0(i)  { \
+    i0 = ((i) - 0*2)  & mask1; \
+    i1 = ((i) - 2*2)  & mask1; \
+    i2 = ((i) - 3*2)  & mask1; \
+    i3 = ((i) - 7*2)  & mask1; \
+    i4 = ((i) - 13*2) & mask1; \
+    S[i0]   = POM_XOR(POM_ADD(POM_XOR(S[i1],   S[i2]),   S[i3]),   S[i4]); \
+    S[i0+1] = POM_XOR(POM_ADD(POM_XOR(S[i1+1], S[i2+1]), S[i3+1]), S[i4+1]); \
+    temp = S[i0]; \
+    S[i0]   = POM_XOR(POM_BYTEL8(S[i0]),   POM_BYTER8(S[i0+1])); \
+    S[i0+1] = POM_XOR(POM_BYTEL8(S[i0+1]), POM_BYTER8(temp)); \
+    S[i0]   = POM_ROTL(S[i0],  17); \
+    S[i0+1] = POM_ROTL(S[i0+1],17); \
+}
+
+#define POM_F(i)  { \
+    i0 = ((i) - 0*2)  & mask1; \
+    i1 = ((i) - 2*2)  & mask1; \
+    i2 = ((i) - 3*2)  & mask1; \
+    i3 = ((i) - 7*2)  & mask1; \
+    i4 = ((i) - 13*2) & mask1; \
+    S[i0]   = POM_ADD(S[i0],POM_XOR(POM_ADD(POM_XOR(S[i1],   S[i2]),   S[i3]),   S[i4])); \
+    S[i0+1] = POM_ADD(S[i0+1],POM_XOR(POM_ADD(POM_XOR(S[i1+1], S[i2+1]), S[i3+1]), S[i4+1])); \
+    temp = S[i0]; \
+    S[i0]   = POM_XOR(POM_BYTEL8(S[i0]),   POM_BYTER8(S[i0+1])); \
+    S[i0+1] = POM_XOR(POM_BYTEL8(S[i0+1]), POM_BYTER8(temp)); \
+    S[i0]   = POM_ROTL(S[i0],  17); \
+    S[i0+1] = POM_ROTL(S[i0+1],17); \
+}
+
+#define POM_G(i, random_number)  { \
+    index_global = ((random_number >> 16) & mask) << 1; \
+    for (j = 0; j < 64; j = j+2) { \
+        POM_F(i+j); \
+        index_global     = (index_global + 2) & mask1; \
+        index_local      = (((i + j) >> 1) - 0x1000 + (random_number & 0x1fff)) & mask; \
+        index_local      = index_local << 1; \
+        S[i0]            = POM_ADD(S[i0],  POM_SHL64(S[index_local],1)); \
+        S[i0+1]          = POM_ADD(S[i0+1],POM_SHL64(S[index_local+1],1)); \
+        S[index_local]   = POM_ADD(S[index_local],   POM_SHL64(S[i0],2)); \
+        S[index_local+1] = POM_ADD(S[index_local+1], POM_SHL64(S[i0+1],2)); \
+        S[i0]            = POM_ADD(S[i0],  POM_SHL64(S[index_global],1)); \
+        S[i0+1]          = POM_ADD(S[i0+1],POM_SHL64(S[index_global+1],1)); \
+        S[index_global]  = POM_ADD(S[index_global],  POM_SHL64(S[i0],3)); \
+        S[index_global+1]= POM_ADD(S[index_global+1],POM_SHL64(S[i0+1],3)); \
+        random_number   += (random_number << 2); \
+        random_number    = (random_number << 19) ^ (random_number >> 45) ^ 3141592653589793238ULL; \
+    } \
+}
+
+#define POM_H(i, random_number)  { \
+    index_global = ((random_number >> 16) & mask) << 1; \
+    for (j = 0; j < 64; j = j+2) { \
+        POM_F(i+j); \
+        index_global     = (index_global + 2) & mask1; \
+        index_local      = (((i + j) >> 1) - 0x1000 + (random_number & 0x1fff)) & mask; \
+        index_local      = index_local << 1; \
+        S[i0]            = POM_ADD(S[i0],  POM_SHL64(S[index_local],1)); \
+        S[i0+1]          = POM_ADD(S[i0+1],POM_SHL64(S[index_local+1],1)); \
+        S[index_local]   = POM_ADD(S[index_local],   POM_SHL64(S[i0],2)); \
+        S[index_local+1] = POM_ADD(S[index_local+1], POM_SHL64(S[i0+1],2)); \
+        S[i0]            = POM_ADD(S[i0],  POM_SHL64(S[index_global],1)); \
+        S[i0+1]          = POM_ADD(S[i0+1],POM_SHL64(S[index_global+1],1)); \
+        S[index_global]  = POM_ADD(S[index_global],  POM_SHL64(S[i0],3)); \
+        S[index_global+1]= POM_ADD(S[index_global+1],POM_SHL64(S[i0+1],3)); \
+        random_number  = POM_GETLO64(S[i3]); \
+    } \
+}
+
+int pomelo_hash(void *out, size_t outlen, const void *in, size_t inlen,
+        const void *salt, size_t saltlen,
+        unsigned int t_cost, unsigned int m_cost)
+{
+  unsigned long long i, j;
+  pom128_t temp;
+  unsigned long long i0, i1, i2, i3, i4;
+  pom128_t S[4096];
+  unsigned long long random_number, index_global, index_local;
+  unsigned long long state_size, mask, mask1;
+
+  if (inlen > 256 || saltlen > 64 || outlen > 256 ||
+      inlen < 0 || saltlen < 0 || outlen < 0) return 1;
+
+  state_size = 1ULL << (13 + m_cost);
+  mask  = (1ULL << (8 + m_cost)) - 1;
+  mask1 = (1ULL << (9 + m_cost)) - 1;
+
+  for (i = 0; i < inlen; i++)
+    ((unsigned char *) S)[i] = ((unsigned char *) in)[i];
+  for (i = 0; i < saltlen; i++)
+    ((unsigned char *) S)[inlen + i] = ((unsigned char *) salt)[i];
+  for (i = inlen + saltlen; i < 384; i++)
+    ((unsigned char *) S)[i] = 0;
+  ((unsigned char *) S)[384] = inlen & 0xff;
+  ((unsigned char *) S)[385] = (inlen >> 8) & 0xff;
+  ((unsigned char *) S)[386] = saltlen;
+  ((unsigned char *) S)[387] = outlen & 0xff;
+  ((unsigned char *) S)[388] = (outlen >> 8) & 0xff;
+  ((unsigned char *) S)[389] = 0;
+  ((unsigned char *) S)[390] = 0;
+  ((unsigned char *) S)[391] = 0;
+  ((unsigned char *) S)[392] = 1;
+  ((unsigned char *) S)[393] = 1;
+  for (i = 394; i < 416; i++)
+    ((unsigned char *) S)[i] = ((unsigned char *) S)[i - 1] + ((unsigned char *) S)[i - 2];
+
+  for (i = 13 * 2; i < (1ULL << (9 + m_cost)); i = i + 2)
+    POM_F0(i);
+
+  random_number = 123456789ULL;
+  for (i = 0; i < (1ULL << (8 + m_cost + t_cost)); i = i + 64)
+    POM_G(i, random_number);
+
+  for (i = 1ULL << (8 + m_cost + t_cost);
+       i < (1ULL << (9 + m_cost + t_cost)); i = i + 64)
+    POM_H(i, random_number);
+
+  for (i = 0; i < (1ULL << (9 + m_cost)); i = i + 2)
+    POM_F(i);
+
+  memcpy(out, ((unsigned char *) S) + state_size - outlen, outlen);
+  return 0;
+}
+
+/* POMELO verify: salted, 64 hex chars (32 bytes output), t_cost=2, m_cost=3 */
+static int hex2bin(const char *src, int srclen, unsigned char *dst);
+
+static int verify_pomelo(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char expected[32], computed[32];
+    const char *salt;
+    int saltlen;
+
+    /* Format: 64hex:salt */
+    if (hashlen < 65 || hashstr[64] != ':') return 0;
+    if (hex2bin(hashstr, 64, expected) != 32) return 0;
+    salt = hashstr + 65;
+    saltlen = hashlen - 65;
+
+    if (pomelo_hash(computed, 32, pass, passlen, salt, saltlen, 2, 3) != 0)
+        return 0;
+    return memcmp(computed, expected, 32) == 0;
 }
 
 /* ---- OpenSSL base compute functions ---- */
@@ -19906,7 +20176,7 @@ static void hp_sm3_transform(hp_sm3_ctx *ctx, const uint8_t *data)
     ctx->h[4] ^= E; ctx->h[5] ^= F; ctx->h[6] ^= G; ctx->h[7] ^= H;
 }
 
-static void hp_sm3_init(hp_sm3_ctx *ctx)
+void hp_sm3_init(hp_sm3_ctx *ctx)
 {
     ctx->h[0] = 0x7380166f; ctx->h[1] = 0x4914b2b9;
     ctx->h[2] = 0x172442d7; ctx->h[3] = 0xda8a0600;
@@ -19916,7 +20186,7 @@ static void hp_sm3_init(hp_sm3_ctx *ctx)
     memset(ctx->buf, 0, 64);
 }
 
-static void hp_sm3_update(hp_sm3_ctx *ctx, const uint8_t *data, size_t len)
+void hp_sm3_update(hp_sm3_ctx *ctx, const uint8_t *data, size_t len)
 {
     size_t off = ctx->total % 64;
     ctx->total += len;
@@ -19931,7 +20201,7 @@ static void hp_sm3_update(hp_sm3_ctx *ctx, const uint8_t *data, size_t len)
     if (len) memcpy(ctx->buf, data, len);
 }
 
-static void hp_sm3_final(hp_sm3_ctx *ctx, uint8_t *out)
+void hp_sm3_final(hp_sm3_ctx *ctx, uint8_t *out)
 {
     uint64_t bits = ctx->total * 8;
     size_t off = ctx->total % 64;
@@ -21986,6 +22256,7 @@ static void init_hashtypes(void)
     HTV("MD5-MD5MD5PASSSALT-PEP", 0, verify_md5_md5md5passsalt_pep, "ee7c5e3d9be506a265c21e426add16ec:Salt:Pepper:password123");
     HTV("MD5-MD5MD5PASSSALT-PEP2", 0, verify_md5_md5md5passsalt_pep2, "047fa549f1df6605aca81502bb2952af:Salt:Pepper:password123");
     HTV("MD5-SALT-SHA1PEPPASS", 0, verify_md5_salt_sha1peppass, "18c133153bfd1b331afcde5f81fd0809:Salt:Pepper:password123");
+    HTV("POMELO", 0, verify_pomelo, "bcd54363852c98fadd2d7ad0e8bb3f96d7a4f6bf3d46dcd00532e75ac4f2e01d:administrator:password123");
 
     #undef HT
     #undef HTC
@@ -25647,6 +25918,130 @@ static const struct { int idx; long long rate; } bench_rates[] = {
     }
 }
 
+/* ================================================================
+ * hx expression language integration
+ * ================================================================ */
+#include "hx_vm.h"
+
+/*
+ * Register all hashpipe compute_* functions into the hx registry.
+ * Called once after init_hashtypes().  Names are lowercased.
+ */
+static void hx_register_hashpipe_types(void)
+{
+    int i;
+    for (i = 0; i < Numtypes; i++) {
+        struct hashtype *ht = &Hashtypes[i];
+        char lcname[128];
+        int j, len;
+
+        if (!ht->compute || ht->hashlen <= 0)
+            continue;
+
+        /* lowercase the type name */
+        len = strlen(ht->name);
+        if (len >= (int)sizeof(lcname)) continue;
+        for (j = 0; j < len; j++)
+            lcname[j] = tolower((unsigned char)ht->name[j]);
+        lcname[len] = '\0';
+
+        /* skip if already registered (e.g. transforms) */
+        if (hx_func_lookup(lcname))
+            continue;
+
+        hx_func_register(lcname, hx_bridge_hash, ht->hashlen,
+                          ht->compute, ht->hashlen,
+                          ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64,
+                          ROLE_HEX);
+
+        /* Register underscore variant for hyphenated names (gost-crypto → gost_crypto) */
+        if (strchr(lcname, '-')) {
+            char altname[128];
+            strncpy(altname, lcname, sizeof(altname) - 1);
+            altname[sizeof(altname) - 1] = '\0';
+            for (j = 0; altname[j]; j++)
+                if (altname[j] == '-') altname[j] = '_';
+            if (!hx_func_lookup(altname))
+                hx_func_register(altname, hx_bridge_hash, ht->hashlen,
+                                  ht->compute, ht->hashlen,
+                                  ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64,
+                                  ROLE_HEX);
+        }
+    }
+}
+
+static int run_hx_mode(const char *expr, const char *hx_file,
+                        const char *hx_salt, const char *hx_salt2,
+                        const char *hx_pepper, const char *hx_user,
+                        const char *hx_pass, int hx_dump)
+{
+    hx_program *prog;
+    hx_vm vm;
+    struct workspace *_ws;
+
+    /* Initialize a workspace for compute_* functions that use WS-> */
+    _ws = (struct workspace *)calloc(1, sizeof(*_ws));
+    if (!_ws) { perror("calloc"); return 1; }
+    ws_init_rhash(_ws);
+    WS = _ws;
+
+    hx_register_hashpipe_types();
+
+    prog = hx_compile_expr(expr, hx_file);
+    if (!prog) {
+        fprintf(stderr, "hashpipe: hx compile failed\n");
+        return 1;
+    }
+
+    if (hx_dump) {
+        hx_program_dump(prog);
+        hx_program_free(prog);
+        return 0;
+    }
+
+    hx_vm_init(&vm, prog);
+
+    if (hx_pass) {
+        /* single password mode */
+        hx_val result = hx_vm_run(&vm,
+            hx_pass, strlen(hx_pass),
+            hx_salt, strlen(hx_salt),
+            hx_salt2, strlen(hx_salt2),
+            hx_pepper, strlen(hx_pepper),
+            hx_user, strlen(hx_user));
+        if (!prog->has_emit) {
+            if (result.data && result.len > 0)
+                fwrite(result.data, 1, result.len, stdout);
+            putchar('\n');
+        }
+    } else {
+        /* read passwords from stdin */
+        char line[4096];
+        while (fgets(line, sizeof(line), stdin)) {
+            int len = strlen(line);
+            hx_val result;
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+                len--;
+            line[len] = '\0';
+            result = hx_vm_run(&vm,
+                line, len,
+                hx_salt, strlen(hx_salt),
+                hx_salt2, strlen(hx_salt2),
+                hx_pepper, strlen(hx_pepper),
+                hx_user, strlen(hx_user));
+            if (!prog->has_emit) {
+                if (result.data && result.len > 0)
+                    fwrite(result.data, 1, result.len, stdout);
+                putchar('\n');
+            }
+        }
+    }
+
+    hx_vm_free(&vm);
+    hx_program_free(prog);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int opt, i;
@@ -25654,6 +26049,12 @@ int main(int argc, char **argv)
     int out_append = 0, err_append = 0;
     char *modespec = NULL;
     int show_help = 0;
+    /* hx expression mode */
+    char *hx_expr = NULL, *hx_file = NULL;
+    char *hx_salt = "", *hx_salt2 = "", *hx_pepper = "";
+    char *hx_user = "";
+    char *hx_pass = NULL;
+    int hx_dump = 0;
     (void)Version;
 
     Numthreads = get_nprocs();
@@ -25667,7 +26068,7 @@ int main(int argc, char **argv)
     BenchSpec = NULL;
 
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVh")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:D")) != -1) {
         switch (opt) {
         case 't':
             Numthreads = atoi(optarg);
@@ -25699,6 +26100,7 @@ int main(int argc, char **argv)
             break;
         case 's':
             statfile = optarg;
+            hx_salt = optarg;   /* dual use: statfile in normal mode, salt in hx mode */
             break;
         case 'm':
             modespec = optarg;
@@ -25725,6 +26127,28 @@ int main(int argc, char **argv)
         case 'h':
             show_help = 1;
             break;
+        /* hx expression mode */
+        case 'X':
+            hx_expr = optarg;
+            break;
+        case 'F':
+            hx_file = optarg;
+            break;
+        case 'p':
+            hx_pass = optarg;
+            break;
+        case 'S':
+            hx_salt2 = optarg;
+            break;
+        case 'P':
+            hx_pepper = optarg;
+            break;
+        case 'u':
+            hx_user = optarg;
+            break;
+        case 'D':
+            hx_dump = 1;
+            break;
         default:
             usage(1);
             exit(1);
@@ -25742,9 +26166,19 @@ int main(int argc, char **argv)
     StatSolved = calloc(Numtypes, sizeof(_Atomic uint64_t));
     StatHotHit = calloc(Numtypes, sizeof(_Atomic uint64_t));
 
-    if (show_help) {
+    if (show_help && !hx_expr && !hx_file) {
         usage(0);
         exit(0);
+    }
+
+    /* hx expression mode: -X 'expr' or -F script.hx */
+    if (hx_expr || hx_file) {
+        if (hx_expr && hx_file) {
+            fprintf(stderr, "hashpipe: -X and -F are mutually exclusive\n");
+            exit(1);
+        }
+        exit(run_hx_mode(hx_expr, hx_file, hx_salt, hx_salt2,
+                          hx_pepper, hx_user, hx_pass, hx_dump));
     }
 
     /* Parse -m mode spec (needs Numtypes from init_hashtypes) */

@@ -60,7 +60,9 @@ LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
 YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
                 yescrypt/sha256.o yescrypt/insecure_memzero.o
 
-OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o
+HX_OBJS = hx_lib.o hx_ast.o hx_compile.o hx_vm.o hx_func.o hx.tab.o hx.lex.o
+
+OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o $(HX_OBJS)
 
 # argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
 ifeq ($(UNAME_M),x86_64)
@@ -88,6 +90,28 @@ crypt-des.o: crypt-des.c
 hashpipe.o: hashpipe.c
 	$(CC) $(CFLAGS) -c hashpipe.c
 
+# hx language objects (pre-generated lex/yacc sources included)
+hx_lib.o: hx.c hx_ast.h hx_vm.h hx.tab.h
+	$(CC) $(CFLAGS) -c hx.c -o hx_lib.o
+
+hx_ast.o: hx_ast.c hx_ast.h
+	$(CC) $(CFLAGS) -c hx_ast.c
+
+hx_compile.o: hx_compile.c hx_ast.h hx_vm.h
+	$(CC) $(CFLAGS) -c hx_compile.c
+
+hx_vm.o: hx_vm.c hx_vm.h
+	$(CC) $(CFLAGS) -c hx_vm.c
+
+hx_func.o: hx_func.c hx_vm.h
+	$(CC) $(CFLAGS) -c hx_func.c
+
+hx.tab.o: hx.tab.c hx_ast.h
+	$(CC) $(CFLAGS) -c hx.tab.c
+
+hx.lex.o: hx.lex.c hx.tab.h
+	$(CC) $(CFLAGS) -c hx.lex.c
+
 argon2/argon2.a:
 	cd argon2 && $(CC) $(CFLAGS) -c argon2.c core.c encoding.c thread.c $(ARGON2_FILL_SRC) && \
 	$(CC) $(CFLAGS) -c -o blake2b.o blake2/blake2b.c && \
@@ -97,7 +121,7 @@ hashpipe: $(OBJS) argon2/argon2.a
 	$(CC) $(LDFLAGS) -o hashpipe $(OBJS) $(YESCRYPT_OBJS) $(LIBS) $(LDEXTRA)
 
 clean:
-	rm -f hashpipe $(OBJS)
+	rm -f hashpipe $(OBJS) hx_lib.o
 	rm -f argon2/*.o argon2/argon2.a
 
 distclean: clean
