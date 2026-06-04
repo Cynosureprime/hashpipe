@@ -79,7 +79,7 @@ hx_program *hx_compile_expr(const char *expr, const char *script_file)
 	return prog;
 }
 
-#ifdef HX_STANDALONE
+#if defined(HX_STANDALONE) && !defined(HX_NO_MAIN)
 
 static void usage(void)
 {
@@ -406,4 +406,4 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-#endif /* HX_STANDALONE */
+#endif /* HX_STANDALONE && !HX_NO_MAIN */

@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.88 2026/04/26 18:49:32 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.98 2026/06/01 22:43:05 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -819,7 +819,7 @@ struct MapHashcat {
     {12150, 908},   /* 12150 | Apache Shiro 1 SHA-512 */
     {12200, 909},   /* 12200 | eCryptfs */
     {12300, 910},   /* 12300 | Oracle T: Type (Oracle 12+) */
-    {12400, 500},  /* Extended DES */
+    {12400, 997},  /* BSDi Extended DES (BSDICRYPT) */
     {12500, 65535}, /* 12500 | RAR3-hp */
     {12600, 911},   /* 12600 | ColdFusion 10+ */
     {12700, 65535}, /* 12700 | Blockchain, My Wallet */
@@ -1474,6 +1474,7 @@ char *Types[] = {
     "GOST12512CRYPT",
     "YESCRYPT",
     "MD5SHA256SHA256",
+    "BSDICRYPT",
 
 NULL
 
@@ -8182,7 +8183,7 @@ static struct chain_step chain_sha1sql5md5[]       = { S_MD5, S_SQL5, S_SHA1 };
 static struct chain_step chain_sha1sql5md5md5[]    = { S_MD5, S_MD5, S_SQL5, S_SHA1 };
 static struct chain_step chain_sha1md5sql5[]       = { S_SQL5, S_MD5, S_SHA1 };
 static struct chain_step chain_sha1md5md5sql5[]    = { S_SQL5, S_MD5, S_MD5, S_SHA1 };
-static struct chain_step chain_mysql5md5[]         = { S_MD5, S_SQL5 };  /* SQL5 inner, MD5 outer... wait no */
+static struct chain_step chain_mysql5md5[]         = { S_MD5, S_SQL5 };
 
 /* SHA1SHA256 deeper chains */
 static struct chain_step chain_sha1sha256sha1[]    = { S_SHA1, S_SHA256, S_SHA1 };
@@ -8290,10 +8291,6 @@ static struct chain_step chain_md5_sha1_md5_md5uc[] = { SU_MD5, S_MD5, S_SHA1, S
 /* Actually: MD5SHA1MD5MD5UC: the UC suffix means the FINAL output is uppercase */
 /* The chain itself uses normal hex internally. The UC flag on the HT entry handles output. */
 /* So this is the same chain as MD5SHA1MD5MD5, just with HTF_UC on the HT entry */
-
-/* Additional missing composition chains */
-/* MYSQL5MD5 — wait, MYSQL5 is SHA1(SHA1(pass)) = SQL5 already. So MYSQL5MD5 = rhash_msg(RHASH_MD5, hex(SQL5(pass))) */
-/* Already have chain_mysql5md5 */
 
 /* MD5GOSTMD5UC — same chain as MD5GOSTMD5 but with HTF_UC */
 
@@ -12846,7 +12843,7 @@ static struct Desinfo *get_desinfo(void) {
     return tls_desinfo;
 }
 
-/* DESCRYPT: DES crypt(pass, 2-char-salt) — "SShashhashhas:password" format
+/* DESCRYPT: DES crypt(pass, 2-char-salt) — standard 25-round DES
  * hashstr = 13-char DES crypt output (salt is first 2 chars) */
 static int verify_descrypt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -12857,16 +12854,6 @@ static int verify_descrypt(const char *hashstr, int hashlen,
     char *s;
     int plen;
 
-    if (hashlen == 20 && hashstr[0] == '_') {
-        /* BSDi extended DES: _CCCCSSSSHHHHHHHHHHH (20 chars) */
-        if (passlen >= (int)WS_GP_SIZE) return 0;
-        memcpy(passbuf, pass, passlen);
-        passbuf[passlen] = 0;
-        di = get_desinfo();
-        s = bsd_crypt_des(passbuf, hashstr, result, di);
-        if (!s) return 0;
-        return strncmp(s, hashstr, 20) == 0;
-    }
     if (hashlen != 13) return 0;
     if (passlen >= (int)WS_GP_SIZE) return 0;
     /* DES crypt only uses first 8 chars */
@@ -12877,6 +12864,26 @@ static int verify_descrypt(const char *hashstr, int hashlen,
     s = bsd_crypt_des(passbuf, hashstr, result, di);
     if (!s) return 0;
     return strncmp(s, hashstr, 13) == 0;
+}
+
+/* BSDICRYPT: BSDi extended DES crypt(pass, 9-char-salt) — variable rounds
+ * hashstr = 20-char BSDi crypt output (_CCCCSSSSHHHHHHHHHHH format) */
+static int verify_bsdicrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *passbuf = (char *)WS->gp1;
+    char *result = (char *)WS->gp2;
+    struct Desinfo *di;
+    char *s;
+
+    if (hashlen != 20 || hashstr[0] != '_') return 0;
+    if (passlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(passbuf, pass, passlen);
+    passbuf[passlen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, hashstr, result, di);
+    if (!s) return 0;
+    return strncmp(s, hashstr, 20) == 0;
 }
 
 /* MD5DESCRYPT: MD5(descrypt(pass, salt)) — "32hex:SS:password"
@@ -21319,7 +21326,7 @@ static void init_hashtypes(void)
     HTC("SHA1SHA256MD5", 20, HTF_COMPOSED, chain_sha1sha256md5, "4b89f9b11e9b3d30c2c2f6f6034bda9cb7393df2:password123");
     HTC("SHA1SHA256SHA512",20,HTF_COMPOSED, chain_sha1sha256sha512, "bce1f0e714ffa8e2c9f961ea50c6e2dcff79a001:password123");
     HTC("SHA1WRLMD5",    20, HTF_COMPOSED, chain_sha1wrlmd5, "a76b923b5f08ae3f68dd5bcafc3b44230cfd0762:password123");
-    HTC("MYSQL5MD5",     16, HTF_COMPOSED, chain_mysql5md5, "2c13011ac7f9b6ce6564935154f8986a:password123");
+    HTC("MYSQL5MD5",     20, HTF_COMPOSED, chain_mysql5md5, "2c13011ac7f9b6ce6564935154f8986a535979a9:password123");
 
     /* 4-step chains */
     HTC("MD5SHA1MD5MD5", 16, HTF_COMPOSED, chain_md5sha1md5md5, "edf0460584d8d492c762bd8d7c42a087:password123");
@@ -22129,6 +22136,7 @@ static void init_hashtypes(void)
 
     /* Phase 1: Crypt-based verify types */
     HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
+    HTV("BSDICRYPT",   0, verify_bsdicrypt, "_J9......I6Q/yEZj5OA:password123");
     HTV("MD5CRYPT",    0, verify_md5crypt, "$1$rndSa1t$Qprc9yqwxuXgLPGQYn8/M1:password123");
     HTV("JUNIPERIVE",  0, verify_juniperive, "hn9NPzVmhLxotWISQlgcHIt7y1p5zPDZXqW5AGKrTSNi7lgSKXbXGCGVIgfwMDir8FuS+x0+4MxIfdErHoaZ6aDkvMuMSlYSXG8hvw==:password123");
     HTV("SHA256CRYPT",  0, verify_sha256crypt, "$5$rndSa1t$128qLp1GH7Qcc2/kyO/.6dtTlHHiHyRcNMAdCAFSjU1:password123");
@@ -24411,6 +24419,20 @@ try_fullpass:
 
 /* ---- Output formatting ---- */
 
+/*
+ * Milestone 3 (user-defined hash types -- hashpipe parity): test the input
+ * item against every loaded user-defined hash type and, for each match, emit
+ * an additional pipe-mode line tagged USER_<name>xNN.  Defined after the
+ * hx_vm.h/userdef.h include below (the worker is compiled before that point);
+ * forward-declared here.  Walks userdef_get_by_index, hashlen-filters on the
+ * probed digest length, runs the shared hx_program over the candidate
+ * password via a per-thread hx_vm, and reuses format_output for byte-identical
+ * output.  Additive: it runs regardless of whether a built-in type matched,
+ * so a hash that is both a built-in and a user type reports both.  Returns the
+ * number of user-type matches emitted.
+ */
+static int emit_user_matches(struct workitem *item, int *outpos);
+
 static void format_output(struct workitem *item, char *outbuf, int *outlen)
 {
     int pos = 0;
@@ -24559,6 +24581,7 @@ static void worker(void *dummy)
     struct hot_entry hot_list[HOT_LIST_MAX];
     int nhot;
     int hard[BATCH_SIZE];
+    int umatched[BATCH_SIZE];   /* per-item: user-defined-type matches emitted; suppresses the stderr pass-through */
     int nhard;
 
     (void)dummy;
@@ -24587,6 +24610,16 @@ static void worker(void *dummy)
 
         /* Fast pass: verify with hot list tried first */
         for (i = 0; i < b->count; i++) {
+            /*
+             * User-defined hash types (Milestone 3): test each loaded user
+             * type FIRST, while the parse-time fields (rest/hashstr/hashlen)
+             * are pristine -- verify_item may rewrite item->hashlen/password/
+             * salt on a built-in match.  Additive + independent of the
+             * built-in result.  No-op (single count check) when no user
+             * types are loaded.
+             */
+            umatched[i] = emit_user_matches(&b->items[i], &outpos);
+
             verify_item(&b->items[i], &hot_type, &hot_iter, hot_list, &nhot);
 
             if (b->items[i].verified) {
@@ -24645,17 +24678,19 @@ static void worker(void *dummy)
                         b->items[i].passlen = orig_plen;
                     }
                 }
-                /* Unresolved → stderr */
-                int elen = b->items[i].linelen;
-                if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
-                    possess(ErrLock);
-                    write(ErrFd, WS->errbuf, errpos);
-                    release(ErrLock);
-                    errpos = 0;
+                /* Unresolved → stderr (unless a user-defined type already matched) */
+                if (!umatched[i]) {
+                    int elen = b->items[i].linelen;
+                    if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
+                        possess(ErrLock);
+                        write(ErrFd, WS->errbuf, errpos);
+                        release(ErrLock);
+                        errpos = 0;
+                    }
+                    memcpy((char *)WS->errbuf + errpos, b->items[i].line, elen);
+                    errpos += elen;
+                    ((char *)WS->errbuf)[errpos++] = '\n';
                 }
-                memcpy((char *)WS->errbuf + errpos, b->items[i].line, elen);
-                errpos += elen;
-                ((char *)WS->errbuf)[errpos++] = '\n';
             }
         }
 
@@ -24778,8 +24813,8 @@ static void worker(void *dummy)
                 if (_hex_found) goto hard_ok;
             }
 
-            /* Unresolved → stderr (original line) */
-            {
+            /* Unresolved → stderr (original line), unless a user-defined type matched */
+            if (!umatched[hard[i]]) {
                 int elen = item->linelen;
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                     possess(ErrLock);
@@ -25924,6 +25959,152 @@ static const struct { int idx; long long rate; } bench_rates[] = {
  * hx expression language integration
  * ================================================================ */
 #include "hx_vm.h"
+#include "userdef.h"
+
+/*
+ * Milestone 3 (user-defined hash types -- hashpipe parity): per-line matching.
+ *
+ * The loader (userdef_load, called from main) parses $MDXFIND_CACHE/userdef.txt
+ * and registers each stanza's compiled hx_program under a synthetic op with a
+ * USER_<name> display name and a probed digest length.  Until now hashpipe
+ * only LOADED + LISTED those types; the per-line matching loop tested only
+ * the built-in Hashtypes[] candidate caches, so a USER_* hash was never
+ * identified in pipe mode.  This closes that gap: emit_user_matches walks the
+ * loaded user registry and, for each type whose probed hex digest length
+ * equals the input hash length, runs the shared hx_program over the candidate
+ * password and -- on a match -- emits a pipe line tagged USER_<name>xNN via the
+ * existing format_output path (byte-identical to built-in match output).
+ *
+ * Threading: the hx_program is shared/read-only, but an hx_vm carries a
+ * private 256 KB arena + stack, so each worker thread keeps its OWN array of
+ * hx_vm (one per user type), lazily initialised on first use and indexed by
+ * the user type's sequence index.  hx_vm_run dereferences the thread-local WS
+ * via the hashpipe compute_* bridges; the worker has already set WS = b->ws
+ * before this is called, so the bridges run on the calling worker's workspace.
+ *
+ * The synthetic struct hashtype below feeds format_output (which reads only
+ * ->name and ->flags); user types are unsalted so flags = 0.  We never index
+ * StatSolved[] / the hot list with this synthetic type (those use
+ * match_type - Hashtypes pointer arithmetic, which would be out of bounds);
+ * the user-match emit is fully self-contained.  Item fields borrowed for the
+ * format_output call are saved and restored so the subsequent verify_item /
+ * built-in emit see pristine parse-time state.
+ */
+static __thread hx_vm  *UserVMs       = NULL;   /* [userdef_count()] */
+static __thread int     UserVMs_count = 0;      /* allocated length   */
+
+static int emit_user_matches(struct workitem *item, int *outpos)
+{
+    int nuser = userdef_count();
+    int matched = 0;
+    int u;
+    const unsigned char *cand;
+    int candlen;
+    /* candidate password buffer for $HEX[] decode (per worker, via WS) */
+    unsigned char *passbuf;
+
+    if (nuser <= 0) return 0;               /* no user types loaded */
+    if (!item->hashstr || item->hashlen <= 0) return 0;
+
+    /* Lazily build this thread's per-user-type hx_vm array. */
+    if (UserVMs_count < nuser) {
+        hx_vm *nv = (hx_vm *)realloc(UserVMs, (size_t)nuser * sizeof(hx_vm));
+        if (!nv) return 0;                  /* out of memory: skip user types */
+        UserVMs = nv;
+        for (u = UserVMs_count; u < nuser; u++) {
+            struct userdef_type *ut = userdef_get_by_index(u);
+            if (ut && ut->prog)
+                hx_vm_init(&UserVMs[u], ut->prog);
+            else
+                memset(&UserVMs[u], 0, sizeof(hx_vm));
+        }
+        UserVMs_count = nuser;
+    }
+
+    /*
+     * Candidate password for unsalted user types = the whole tail after the
+     * first colon (item->rest), so passwords that themselves contain ':'
+     * still match.  Falls back to item->password when rest is unset.  Decode
+     * $HEX[] the same way format_output does.
+     */
+    {
+        const char *rp = item->rest ? item->rest : item->password;
+        int rlen = item->rest ? item->restlen : item->passlen;
+        int dec;
+        if (!rp) return 0;
+        passbuf = (unsigned char *)WS->vpassbuf;
+        dec = decode_hex_password(rp, rlen, passbuf, MAXLINE);
+        if (dec >= 0) { cand = passbuf; candlen = dec; }
+        else          { cand = (const unsigned char *)rp; candlen = rlen; }
+    }
+
+    for (u = 0; u < nuser; u++) {
+        struct userdef_type *ut = userdef_get_by_index(u);
+        hx_val r;
+        int j, eq;
+
+        if (!ut || !ut->prog) continue;
+        if (ut->diglen_hex != item->hashlen) continue;   /* hashlen filter */
+        if (!UserVMs[u].prog) continue;                  /* init failed    */
+
+        r = hx_vm_run(&UserVMs[u], (const char *)cand, candlen,
+                      "", 0, "", 0, "", 0, "", 0);
+        if (!r.data || r.len != item->hashlen) continue;
+
+        /* The hx VM emits lowercase hex (ROLE_HEX); the input may be upper-
+         * case, so compare case-insensitively over the hex digest length. */
+        eq = 1;
+        for (j = 0; j < item->hashlen; j++) {
+            if (tolower((unsigned char)r.data[j]) !=
+                tolower((unsigned char)item->hashstr[j])) { eq = 0; break; }
+        }
+        if (!eq) continue;
+
+        /* --- match: emit via the existing format_output path --- */
+        {
+            struct hashtype synth;          /* fed to format_output (name/flags only) */
+            struct hashtype *save_mt   = item->match_type;
+            int    save_mi             = item->match_iter;
+            char  *save_salt           = item->salt;
+            int    save_saltlen        = item->saltlen;
+            char  *save_pass           = item->password;
+            int    save_passlen        = item->passlen;
+            int    olen;
+
+            memset(&synth, 0, sizeof(synth));
+            synth.name  = ut->dispname;     /* "USER_<name>" */
+            synth.flags = 0;                /* unsalted */
+            item->match_type = &synth;
+            item->match_iter = 1;           /* x01 -- one hx evaluation */
+            item->salt       = NULL;
+            item->saltlen    = 0;
+            item->password   = item->rest ? item->rest : save_pass;
+            item->passlen    = item->rest ? item->restlen : save_passlen;
+
+            format_output(item, WS->fmtbuf, &olen);
+
+            if (*outpos + olen > (int)(MAXLINE * 2) - 1) {
+                possess(OutLock);
+                write(OutFd, WS->outbuf, *outpos);
+                release(OutLock);
+                *outpos = 0;
+            }
+            memcpy((char *)WS->outbuf + *outpos, WS->fmtbuf, olen);
+            *outpos += olen;
+            matched++;
+
+            /* restore pristine parse-time state for the built-in path */
+            item->match_type = save_mt;
+            item->match_iter = save_mi;
+            item->salt       = save_salt;
+            item->saltlen    = save_saltlen;
+            item->password   = save_pass;
+            item->passlen    = save_passlen;
+        }
+    }
+
+    return matched;
+}
 
 /*
  * Register all hashpipe compute_* functions into the hx registry.
@@ -26051,6 +26232,7 @@ int main(int argc, char **argv)
     int out_append = 0, err_append = 0;
     char *modespec = NULL;
     int show_help = 0;
+    int show_userdef = 0;   /* -Y: load userdef.txt, print the load report, exit */
     /* hx expression mode */
     char *hx_expr = NULL, *hx_file = NULL;
     char *hx_salt = "", *hx_salt2 = "", *hx_pepper = "";
@@ -26070,7 +26252,7 @@ int main(int argc, char **argv)
     BenchSpec = NULL;
 
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:D")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DY")) != -1) {
         switch (opt) {
         case 't':
             Numthreads = atoi(optarg);
@@ -26151,6 +26333,13 @@ int main(int argc, char **argv)
         case 'D':
             hx_dump = 1;
             break;
+        case 'Y':
+            /* Load userdef.txt, print the load report, and exit.  The loader
+             * is silent by default (so it never corrupts pipe output); this
+             * turns the report on so the user can confirm the file is read. */
+            userdef_verbose = 1;
+            show_userdef = 1;
+            break;
         default:
             usage(1);
             exit(1);
@@ -26162,6 +26351,45 @@ int main(int argc, char **argv)
     rhash_library_init();
     init_hashtypes();
     init_rates();
+
+    /*
+     * User-defined hash types (Milestone 3 -- hashpipe parity): load the
+     * SAME $MDXFIND_CACHE/userdef.txt the mdxfind loader reads, via the
+     * shared userdef.c core, so hashpipe IDENTIFIES the user types (the
+     * "userdef: loaded USER_<name> ..." lines) consistently with mdxfind.
+     * hx_compile_expr (called inside userdef_load) needs the hashpipe
+     * compute_* functions present in the hx registry first; that registry
+     * is populated by hx_register_hashpipe_types() (idempotent -- it skips
+     * already-registered names, so run_hx_mode's later call is harmless).
+     * hashpipe links userdef_hp.o (built WITHOUT -DUSERDEF_HAVE_CODEGEN):
+     * the dedup-advisory + GPU-eligibility niceties are guarded out (no
+     * codegen catalog, no GPU path here); the shared core still parses,
+     * compiles, registers, rejects-salted, records skips, and suggests a
+     * content-hash id.
+     *
+     * userdef_load probes each compiled program with the hx VM (to learn
+     * its digest length), and the hashpipe compute_* bridges dereference
+     * the per-thread WS workspace -- so we must establish a workspace on
+     * THIS thread first, mirroring run_hx_mode's setup.  The probe runs on
+     * the main thread before the worker pool starts, so a single transient
+     * workspace here is sufficient and safe.
+     */
+    hx_register_hashpipe_types();
+    {
+        struct workspace *_uws = (struct workspace *)calloc(1, sizeof(*_uws));
+        if (_uws) {
+            ws_init_rhash(_uws);
+            WS = _uws;
+            userdef_load(getenv("MDXFIND_CACHE"));
+            WS = NULL;
+            ws_free_rhash(_uws);
+            free(_uws);
+        }
+    }
+
+    /* -Y: the load report (if any) has now been printed; exit before reading
+     * stdin, so this is a pure "validate userdef.txt" mode. */
+    if (show_userdef) exit(0);
 
     /* Allocate stat counters (unconditional) */
     StatTry = calloc(Numtypes, sizeof(_Atomic uint64_t));
