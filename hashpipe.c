@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.98 2026/06/01 22:43:05 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.99 2026/07/29 16:28:22 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11263,7 +11263,7 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
     unsigned char *decrypted = (unsigned char *)WS->gp2;
     unsigned int hmac_len;
     const char *p;
-    int dc, enc_hex_len, enc_len, data_len, i;
+    int dc, enc_hex_len, enc_len, data_len;
 
     if (hashlen < 30 || memcmp(hashstr, "$krb5pa$23$", 11) != 0) return 0;
 
@@ -11304,12 +11304,14 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
       hp_rc4(&rc4key, data_len, enc_bin, decrypted);
     }
 
-    /* Verify: bytes 14-15 must be '2','0' and bytes 16-27 must be ASCII digits */
-    if (data_len < 28) return 0;
-    if (decrypted[14] != '2' || decrypted[15] != '0') return 0;
-    for (i = 16; i < 28; i++)
-        if (decrypted[i] < '0' || decrypted[i] > '9') return 0;
-    return 1;
+    /* Definitive verification: recompute the RC4-HMAC checksum over the full
+     * decrypted data and require all 16 bytes to match the stored checksum
+     * (the PA-ENC-TS timestamp heuristic is not cryptographic). k3 is reused as
+     * the 16-byte scratch -- no longer needed after the RC4 decrypt. */
+    if (data_len < 16) return 0;
+    hmac_len = 16;
+    HMAC(EVP_md5(), k1, 16, decrypted, data_len, k3, &hmac_len);
+    return memcmp(k3, enc_bin + data_len, 16) == 0;
 }
 
 /* AIX-MD5 (e868): md5crypt with empty magic — {smd5}salt$encoded */
@@ -12588,20 +12590,15 @@ static int verify_krb5tgs23(const char *hashstr, int hashlen,
     hp_rc4_set_key(&rc4key, 16, k3);
     hp_rc4(&rc4key, edata_len, edata, decrypted);
 
-    /* Verify ASN.1 ticket structure */
-    if (edata_len >= 22 &&
-        decrypted[8] == 0x63 && (decrypted[9] == 0x81 || decrypted[9] == 0x82) &&
-        decrypted[11] == 0x30)
-        return 1;
-    if (edata_len >= 24 &&
-        decrypted[16] == 0x03 && decrypted[17] == 0x05 && decrypted[18] == 0x00)
-        return 1;
-    if (edata_len >= 24 &&
-        decrypted[16] == 0x05 && decrypted[17] == 0x03 && decrypted[18] == 0x07 &&
-        decrypted[19] == 0xa0)
-        return 1;
-
-    return 0;
+    /* Definitive verification: recompute the RC4-HMAC checksum over the full
+     * decrypted data and require all 16 bytes to equal the stored checksum
+     * (matches hashcat m13100 decrypt_and_check). The previous ASN.1-structure
+     * heuristic false-positived -- a wrong RC4 key can hit the loose byte
+     * pattern (notably the 0x82 long-length case, where the SEQUENCE tag is at
+     * decrypted[12], not [11]) while the HMAC never matches. ntlm is reused as
+     * the 16-byte scratch (no longer needed after K1). */
+    HMAC(EVP_md5(), k1, 16, decrypted, edata_len, ntlm, &hlen);
+    return memcmp(ntlm, checksum, 16) == 0;
 }
 
 /* AXCRYPT (e915, mode 13200): SHA1(pass) XOR salt -> AES Key Unwrap
