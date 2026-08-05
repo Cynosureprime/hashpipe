@@ -62,7 +62,7 @@ YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
 
 HX_OBJS = hx_lib.o hx_ast.o hx_compile.o hx_vm.o hx_func.o hx.tab.o hx.lex.o
 
-OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o $(HX_OBJS)
+OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o userdef.o $(HX_OBJS)
 
 # argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
 ifeq ($(UNAME_M),x86_64)
@@ -89,6 +89,11 @@ crypt-des.o: crypt-des.c
 
 hashpipe.o: hashpipe.c
 	$(CC) $(CFLAGS) -c hashpipe.c
+
+# user-defined hash type loader (hx-based).  Built without
+# -DUSERDEF_HAVE_CODEGEN: the codegen catalog is mdxfind-only.
+userdef.o: userdef.c userdef.h hx_vm.h
+	$(CC) $(CFLAGS) -c userdef.c
 
 # hx language objects (pre-generated lex/yacc sources included)
 hx_lib.o: hx.c hx_ast.h hx_vm.h hx.tab.h
