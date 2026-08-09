@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.99 2026/07/29 16:28:22 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.100 2026/08/09 20:14:07 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -804,7 +804,7 @@ struct MapHashcat {
     {11300, 65535}, /* 11300 | Bitcoin/Litecoin wallet.dat */
     {11400, 65535}, /* 11400 | SIP digest authentication (MD5) */
     {11500, 65535}, /* CRC32 */
-    {11600, 65535}, /* 11600 | 7-Zip  */
+    {11600, 1000},  /* 11600 | 7-Zip (7zAES)  */
     {11700, 427},
     {11750, 837},  /* 11750 | HMAC-Streebog-256 (key = $pass) */
     {11760, 838},  /* 11760 | HMAC-Streebog-256 (key = $salt) */
@@ -861,7 +861,7 @@ struct MapHashcat {
     {14800, 65535}, /* 14800 | iTunes backup >= 10.0 */
     {14900, 65535},
     {15000, 65535}, /* 15000 | FileZilla Server >= 0.9.55 */
-    {15100, 65535}, /* 15100 | Juniper/NetBSD sha1crypt */
+    {15100, 999},   /* 15100 | Juniper/NetBSD sha1crypt */
     {15200, 65535}, /* 15200 | Blockchain, My Wallet, V2 */
     {15300, 65535}, /* 15300 | DPAPI masterkey file v1 and v2  */
     {15400, 65535}, /* ChaCha20 */
@@ -996,6 +996,7 @@ struct MapHashcat {
     {35500, 993},  /* 35500 | WordPress bcrypt(hmac-sha384($pass)) */
     {35600, 994},  /* 35600 | gost12512crypt */
     {35800, 992},  /* 35800 | Symfony Legacy SHA256 */
+    {46100, 998},  /* 46100 | gost-yescrypt (team-local mode; not upstream hashcat) */
     {67000, 995},  /* 67000 | yescrypt */
     {65535, 65535}  /* EOF */
 };
@@ -1475,6 +1476,10 @@ char *Types[] = {
     "YESCRYPT",
     "MD5SHA256SHA256",
     "BSDICRYPT",
+    "GOST-YESCRYPT",
+    "SHA1CRYPT",
+    "7ZIP",
+    "CMIYC",
 
 NULL
 
@@ -12708,6 +12713,97 @@ static int verify_axcryptsha1(const char *hashstr, int hashlen,
 
 /* SCRYPT: crypto_scrypt(pass, salt, N, r, p, output, 32)
  * Format: SCRYPT:N:r:p:base64_salt:base64_hash:password */
+/* crypt(3) base64 decode helpers for the $7$ scrypt encoding.
+ * Alphabet is phpitoa64 (./0-9A-Za-z); bit order is LITTLE-endian
+ * 6-bit groups, per yescrypt/yescrypt-common.c:184. Mirrors
+ * crypt64_uint32()/crypt64_bytes() in mdxfind.c. */
+static int hp_crypt64_val(int c) {
+    const char *p = memchr(phpitoa64, c, 64);
+    return p ? (int)(p - phpitoa64) : -1;
+}
+
+static int hp_crypt64_uint32(const char *s, int nchar, unsigned int *out) {
+    unsigned int v = 0;
+    int i;
+    for (i = 0; i < nchar; i++) {
+        int d = hp_crypt64_val((unsigned char)s[i]);
+        if (d < 0) return -1;
+        v |= (unsigned int)d << (6 * i);
+    }
+    *out = v;
+    return 0;
+}
+
+static int hp_crypt64_bytes(const char *s, int nchar,
+                            unsigned char *out, int outmax) {
+    unsigned int acc = 0;
+    int bits = 0, n = 0, i;
+    for (i = 0; i < nchar; i++) {
+        int d = hp_crypt64_val((unsigned char)s[i]);
+        if (d < 0) return -1;
+        acc |= (unsigned int)d << bits;
+        bits += 6;
+        while (bits >= 8) {
+            if (n >= outmax) return -1;
+            out[n++] = (unsigned char)(acc & 0xff);
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    return n;
+}
+
+/* SCRYPT alternate input format: $7$<log2N><r:5><p:5><salt>$<hash:43>
+ * Salt is raw ASCII (not base64); hash is 43 crypt64 chars = 32 bytes.
+ * Returns 1 on verified match, 0 otherwise. Split out so the canonical
+ * SCRYPT: parse below stays exactly as it was. */
+static int verify_scrypt_dollar7(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *salt_bin = (unsigned char *)WS->gp2;
+    unsigned char *output   = (unsigned char *)WS->ctx1;
+    unsigned char *expected = (unsigned char *)WS->ctx2;
+    unsigned int n_log2 = 0, sc_r = 0, sc_p = 0;
+    const char *pfields, *saltp, *lastsep;
+    int saltlen, nlv, i;
+
+    /* 3 prefix + 11 params + >=1 salt + '$' + 43 hash */
+    if (hashlen < 3 + 11 + 1 + 1 + 43) return 0;
+    pfields = hashstr + 3;
+    saltp   = hashstr + 3 + 11;
+
+    /* Rightmost '$' terminates the salt, matching yescrypt_r(). */
+    lastsep = NULL;
+    for (i = hashlen - 1; i >= 3 + 11; i--)
+        if (hashstr[i] == '$') { lastsep = hashstr + i; break; }
+    if (!lastsep || lastsep <= saltp) return 0;
+    if (hashlen - (int)(lastsep + 1 - hashstr) != 43) return 0;
+
+    saltlen = (int)(lastsep - saltp);
+    if (saltlen <= 0 || saltlen >= (int)WS_GP_SIZE) return 0;
+
+    nlv = hp_crypt64_val((unsigned char)pfields[0]);
+    if (nlv < 1 || nlv > 63) return 0;
+    n_log2 = (unsigned int)nlv;
+    if (hp_crypt64_uint32(pfields + 1, 5, &sc_r) != 0) return 0;
+    if (hp_crypt64_uint32(pfields + 6, 5, &sc_p) != 0) return 0;
+    if (sc_r == 0 || sc_p == 0) return 0;
+
+    if (hp_crypt64_bytes(lastsep + 1, 43, expected, 32) != 32) return 0;
+
+    { unsigned long long sc_N = 1ULL << n_log2;
+      if (verify_cost_exceeds(WS->cur_rate, 1024.0,
+                              (double)sc_N * (double)sc_r * (double)sc_p))
+          return 0;
+      /* $7$ uses the salt characters themselves as the salt bytes. */
+      memcpy(salt_bin, saltp, saltlen);
+      if (crypto_scrypt(pass, (size_t)passlen, salt_bin, (size_t)saltlen,
+                        sc_N, sc_r, sc_p, output, 32) != 0)
+          return 0;
+    }
+    return memcmp(output, expected, 32) == 0;
+}
+
 static int verify_scrypt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -12719,6 +12815,8 @@ static int verify_scrypt(const char *hashstr, int hashlen,
     char *b64out = (char *)WS->gp3;
 
     if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$7$", 3) == 0)
+        return verify_scrypt_dollar7(hashstr, hashlen, pass, passlen);
     if (memcmp(hashstr, "SCRYPT:", 7) != 0) return 0;
 
     memcpy(buf, hashstr, hashlen);
@@ -12804,6 +12902,415 @@ static int verify_yescrypt(const char *hashstr, int hashlen,
     int result_len = strlen((char *)result);
     if (result_len != hashlen) return 0;
     return memcmp(result, hashstr, hashlen) == 0;
+}
+
+/* GOST-YESCRYPT (e998, mode 46100): gost-yescrypt, libxcrypt
+ * lib/crypt-gost-yescrypt.c.
+ *
+ *   HMAC_Streebog256( HMAC_Streebog256(Streebog256(K), M), yescrypt(K, S) )
+ *
+ * Streebog helpers are LOCAL to this type rather than reusing
+ * compute_hmac_streebog256() above: that one deliberately leaves the FINAL
+ * digest in the bundled library's reversed order (the e837/e838 convention),
+ * whereas gost-yescrypt needs standard byte order at every step -- key hash,
+ * inner digest and final digest. Of the 8 possible reversal combinations,
+ * only all-three reproduces libxcrypt 4.4.27 (verified 2026-08-07).
+ */
+static void gy_sbog256(const void *data, size_t len, unsigned char *out)
+{
+    streebog(out, 32, data, len);
+    reverse_bytes(out, 32);
+}
+
+static void gy_hmac256(const unsigned char *key, int keylen,
+    const unsigned char *msg, int msglen, unsigned char *out)
+{
+    unsigned char *kpad  = (unsigned char *)WS->ctx7;
+    unsigned char *inner = (unsigned char *)WS->ctx8;
+    streebog_t stx;
+    int ki;
+
+    if (keylen > 64) {
+        gy_sbog256(key, (size_t)keylen, kpad);
+        memset(kpad + 32, 0, 32);
+    } else {
+        memcpy(kpad, key, keylen);
+        memset(kpad + keylen, 0, 64 - keylen);
+    }
+    for (ki = 0; ki < 64; ki++) kpad[ki] ^= 0x36;
+    streebog_init(&stx, 32);
+    streebog_update(&stx, kpad, 64);
+    if (msglen) streebog_update(&stx, msg, msglen);
+    streebog_final(inner, &stx);
+    reverse_bytes(inner, 32);
+
+    for (ki = 0; ki < 64; ki++) kpad[ki] ^= 0x36 ^ 0x5c;
+    streebog_init(&stx, 32);
+    streebog_update(&stx, kpad, 64);
+    streebog_update(&stx, inner, 32);
+    streebog_final(out, &stx);
+    reverse_bytes(out, 32);
+}
+
+static int verify_gostyescrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *setting        = (char *)WS->gp1;
+    uint8_t *result_buf  = (uint8_t *)WS->gp2;
+    unsigned char *gy_Y  = (unsigned char *)WS->ctx3;
+    unsigned char *gy_hk = (unsigned char *)WS->ctx4;
+    unsigned char *gy_in = (unsigned char *)WS->ctx5;
+    unsigned char *gy_o  = (unsigned char *)WS->ctx6;
+    unsigned char *want  = (unsigned char *)WS->ctx9;
+    uint8_t *result;
+
+    if (hashlen < 12 || hashlen >= (int)WS_GP_SIZE) return 0;
+    /* exact, anchored, lowercase -- the corpus carries $1$gY$/$1$Gy$ decoys */
+    if (memcmp(hashstr, "$gy$", 4) != 0) return 0;
+
+    const char *p = hashstr + 4;
+    const char *salt_start = strchr(p, '$');
+    if (!salt_start) return 0;
+    salt_start++;
+    const char *hash_start = strchr(salt_start, '$');
+    if (!hash_start) return 0;
+    if (hashlen - (int)(hash_start + 1 - hashstr) != 43) return 0;
+
+    /* "$gy$params$salt$" -> "$y$params$salt$" (exactly one byte shorter) */
+    int gy_setting_len = (int)(hash_start - hashstr) + 1;
+    if (gy_setting_len < 5 || gy_setting_len >= (int)WS_GP_SIZE) return 0;
+    setting[0] = '$'; setting[1] = 'y'; setting[2] = '$';
+    memcpy(setting + 3, hashstr + 4, (size_t)(gy_setting_len - 4));
+    setting[gy_setting_len - 1] = 0;
+
+    if (!tls_yescrypt_local) {
+        tls_yescrypt_local = calloc(1, sizeof(yescrypt_local_t));
+        if (!tls_yescrypt_local) return 0;
+        yescrypt_init_local(tls_yescrypt_local);
+    }
+
+    result = yescrypt_r(NULL, tls_yescrypt_local, pass, passlen,
+                        (const uint8_t *)setting, NULL,
+                        result_buf, WS_GP_SIZE);
+    if (!result) return 0;
+
+    { char *hp = strrchr((char *)result, '$');
+      if (!hp) return 0;
+      if (hp_crypt64_bytes(hp + 1, (int)strlen(hp + 1), gy_Y, 32) != 32) return 0; }
+
+    gy_sbog256(pass, (size_t)passlen, gy_hk);
+    /* M is the $gy$ setting WITHOUT its trailing '$' -- length
+     * 5 + len(params) + len(salt). Including the '$' fails every candidate. */
+    gy_hmac256(gy_hk, 32, (const unsigned char *)hashstr, gy_setting_len - 1, gy_in);
+    gy_hmac256(gy_in, 32, gy_Y, 32, gy_o);
+
+    /* Compare raw 32 bytes rather than re-encoding to crypt64. */
+    if (hp_crypt64_bytes(hash_start + 1, 43, want, 32) != 32) return 0;
+    return memcmp(gy_o, want, 32) == 0;
+}
+
+/* SHA1CRYPT (e999, mode 15100): NetBSD/Juniper sha1crypt,
+ * NetBSD lib/libcrypt/crypt-sha1.c rev 1.11.
+ *
+ *   H = HMAC_SHA1(pw, salt || "$sha1$" || decimal(iterations))
+ *   repeat iterations-1 more times:  H = HMAC_SHA1(pw, H)
+ *
+ * `iterations` is the TOTAL count of HMAC calls, so iterations=1 runs the
+ * loop zero times. The magic follows the salt in the primed message
+ * ("75552156$sha1$20000") -- intentional, not a typo in the C.
+ *
+ * We decode the stored 28 chars and compare only the 20 real digest bytes.
+ * The 28-char form actually encodes 21 bytes, the 21st being digest[0]
+ * wrapped around; comparing 20 sidesteps that entirely. See
+ * sha1crypt_b64encode() in mdxfind.c for the wrap and for why hashcat's
+ * published -m 15100 example hash is nonconformant.
+ *
+ * The HMAC key is the password and never changes, so the ipad/opad
+ * midstates are absorbed once and cloned per iteration: 2 SHA-1
+ * compressions per iteration instead of 4.
+ */
+/* 7-Zip 7zAES (e1000, hashcat 11600).
+ *
+ * Stage 1 only, matching mdxfind: derive the AES key, decrypt the FINAL
+ * ciphertext block in CBC (using the preceding block as its IV) and require
+ * the last packedlen-unpackedlen plaintext bytes to be zero. No decompression,
+ * which is what lets this handle Deflate64 archives that hashcat and john both
+ * fail silently.
+ *
+ * Accepts the truncated data field mdxfind uses (last 32 bytes) as well as a
+ * full stock 7z2john line, since only the final two blocks are consulted.
+ */
+static __thread EVP_MD_CTX *tls_7z_md;
+
+static int verify_7zip(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *u16 = (unsigned char *)WS->u16a;
+    unsigned char *stage = (unsigned char *)WS->gp2;
+    unsigned char *tail = (unsigned char *)WS->ctx3;
+    unsigned char sz_key[32], sz_salt[64], plain[16];
+    char *f[12];
+    int nf = 0, u16len, dlen, padsize, b, ok;
+    long sz_log2, sz_saltlen, sz_packed, sz_unpacked, sz_saltbin = 0;
+    unsigned int keylen = 32;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$7z$", 4) != 0) return 0;
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+
+    { char *sp = buf + 4;
+      f[nf++] = sp;
+      while (*sp && nf < 12) { if (*sp == '$') { *sp = 0; f[nf++] = sp + 1; } sp++; }
+    }
+    if (nf < 10) return 0;                     /* 10, or 12 for LZMA coder props */
+    sz_log2     = strtol(f[1], NULL, 10);
+    sz_saltlen  = strtol(f[2], NULL, 10);
+    sz_packed   = strtol(f[7], NULL, 10);
+    sz_unpacked = strtol(f[8], NULL, 10);
+    padsize     = (int)(sz_packed - sz_unpacked);
+    dlen        = (int)strlen(f[9]);
+    if (sz_log2 < 0 || sz_log2 > 40) return 0;
+    if (padsize <= 0 || padsize > 16) return 0;   /* padsize 0 is undecidable */
+    if (dlen < 64 || (dlen & 1)) return 0;
+    if (sz_saltlen > 0) {
+        if (sz_saltlen > 64) return 0;
+        sz_saltbin = hex2bin(f[3], (int)strlen(f[3]), sz_salt);
+        if (sz_saltbin < 0) return 0;
+    }
+    if (hex2bin(f[9] + dlen - 64, 64, tail) != 32) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 524288.0, (double)(1ULL << sz_log2))) return 0;
+
+    u16len = utf8_to_utf16le(pass, passlen, u16, WS_U16_SIZE);
+    if (u16len <= 0) return 0;
+
+    if (!tls_7z_md) tls_7z_md = EVP_MD_CTX_new();
+    if (!tls_7z_md) return 0;
+    EVP_DigestInit_ex(tls_7z_md, EVP_sha256(), NULL);
+    { const size_t cap = 32768;
+      size_t rec = (size_t)sz_saltbin + u16len + 8, nrec, k, coff = (size_t)sz_saltbin + u16len;
+      unsigned long long i, total = 1ULL << sz_log2;
+      if (rec > cap) return 0;
+      nrec = cap / rec;
+      for (k = 0; k < nrec; k++) {                 /* prefix is invariant */
+          unsigned char *slot = stage + k * rec;
+          if (sz_saltbin) memcpy(slot, sz_salt, sz_saltbin);
+          memcpy(slot + sz_saltbin, u16, u16len);
+      }
+      for (i = 0; i < total; ) {
+          size_t batch = (total - i) < (unsigned long long)nrec ? (size_t)(total - i) : nrec;
+          for (k = 0; k < batch; k++) {
+              unsigned char *cp = stage + k * rec + coff;
+              unsigned long long cv = i + k;
+              for (b = 0; b < 8; b++) cp[b] = (unsigned char)(cv >> (8 * b));
+          }
+          EVP_DigestUpdate(tls_7z_md, stage, batch * rec);
+          i += batch;
+      }
+    }
+    EVP_DigestFinal_ex(tls_7z_md, sz_key, &keylen);
+
+    { AES_KEY ak;
+      AES_set_decrypt_key(sz_key, 256, &ak);
+      AES_decrypt(tail + 16, plain, &ak);
+      for (b = 0; b < 16; b++) plain[b] ^= tail[b];   /* CBC: XOR preceding ct */
+    }
+    ok = 1;
+    for (b = 16 - padsize; b < 16; b++) if (plain[b]) { ok = 0; break; }
+    return ok;
+}
+
+/* CMIYC contest hash (e1001). Mirrors the mdxfind implementation exactly;
+ * see the JOB_CMIYC case there for the construction and for the standing
+ * caveat that the algorithm is NOT yet validated against ground truth. */
+static const char Hp_b64url[] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static int hp_b64url_dec(const char *s, int nchar, unsigned char *out, int outmax) {
+    unsigned int acc = 0;
+    int bits = 0, n = 0, i;
+    for (i = 0; i < nchar; i++) {
+        const char *p = memchr(Hp_b64url, (unsigned char)s[i], 64);
+        if (!p) return -1;
+        acc = (acc << 6) | (unsigned int)(p - Hp_b64url);
+        bits += 6;
+        if (bits >= 8) { bits -= 8; if (n >= outmax) return -1;
+                         out[n++] = (unsigned char)((acc >> bits) & 0xff); }
+    }
+    return n;
+}
+
+static __thread unsigned char *tls_cmiyc_buf;
+static __thread size_t tls_cmiyc_bufsz;
+
+static int verify_cmiyc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *sm = (unsigned char *)WS->gp2;
+    unsigned char c_salt[24], c_want[40], c_seed[64], c_acc[64], c_dig[64];
+    unsigned char c_msg[160];
+    char *f[5];
+    int nf = 0, b;
+    long c_rounds, c_memlog;
+    unsigned long long c_N, c_mask, ii;
+    long rr;
+    unsigned int hl = 64;
+
+    if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$cmiyc$", 7) != 0) return 0;
+    memcpy(buf, hashstr, hashlen);
+    buf[hashlen] = 0;
+    { char *sp = buf + 7;
+      f[nf++] = sp;
+      while (*sp && nf < 5) { if (*sp == '$') { *sp = 0; f[nf++] = sp + 1; } sp++; }
+    }
+    if (nf != 5) return 0;
+    c_rounds = strtol(f[1], NULL, 10);
+    c_memlog = strtol(f[2], NULL, 10);
+    if (c_rounds < 1 || c_rounds > 32) return 0;
+    if (c_memlog < 10 || c_memlog > 24) return 0;
+    if (hp_b64url_dec(f[3], (int)strlen(f[3]), c_salt, sizeof(c_salt)) != 16) return 0;
+    if (hp_b64url_dec(f[4], (int)strlen(f[4]), c_want, sizeof(c_want)) != 32) return 0;
+
+    c_N = 1ULL << c_memlog;
+    c_mask = c_N - 1;
+    /* cost model: the HTV vector runs at memlog=10/rounds=1 */
+    if (verify_cost_exceeds(WS->cur_rate, (double)(1 << 10),
+                            (double)(c_N * (unsigned long long)c_rounds))) return 0;
+
+    if (tls_cmiyc_bufsz < c_N * 64) {
+        unsigned char *nb = realloc(tls_cmiyc_buf, (size_t)(c_N * 64));
+        if (!nb) return 0;
+        tls_cmiyc_buf = nb; tls_cmiyc_bufsz = (size_t)(c_N * 64);
+    }
+    if (passlen + 8 > (int)WS_GP_SIZE) return 0;
+    memcpy(sm, pass, passlen);
+    sm[passlen+0]=(unsigned char)c_rounds;       sm[passlen+1]=(unsigned char)(c_rounds>>8);
+    sm[passlen+2]=(unsigned char)(c_rounds>>16); sm[passlen+3]=(unsigned char)(c_rounds>>24);
+    sm[passlen+4]=(unsigned char)c_memlog;       sm[passlen+5]=(unsigned char)(c_memlog>>8);
+    sm[passlen+6]=(unsigned char)(c_memlog>>16); sm[passlen+7]=(unsigned char)(c_memlog>>24);
+    HMAC(EVP_sha512(), c_salt, 16, sm, passlen + 8, c_seed, &hl);
+
+    { unsigned char fm[64 + 10 + 8];
+      memcpy(fm, c_seed, 64);
+      memcpy(fm + 64, "cmiyc-fill", 10);
+      for (ii = 0; ii < c_N; ii++) {
+          unsigned long long v = ii;
+          for (b = 0; b < 8; b++) fm[74 + b] = (unsigned char)(v >> (8 * b));
+          SHA512(fm, 82, tls_cmiyc_buf + ii * 64);
+          memcpy(fm, tls_cmiyc_buf + ii * 64, 64);
+      }
+    }
+    for (rr = 1; rr <= c_rounds; rr++) {
+        for (b = 0; b < 8; b++) c_msg[128 + b] = (unsigned char)(((unsigned long long)rr) >> (8 * b));
+        for (ii = 0; ii < c_N; ii++) {
+            unsigned long long j = 0, v = ii;
+            unsigned char *bi = tls_cmiyc_buf + ii * 64;
+            memcpy(c_msg, bi, 64);
+            for (b = 7; b >= 0; b--) j = (j << 8) | c_msg[b];
+            j &= c_mask;
+            memcpy(c_msg + 64, tls_cmiyc_buf + j * 64, 64);
+            for (b = 0; b < 8; b++) c_msg[136 + b] = (unsigned char)(v >> (8 * b));
+            c_msg[144] = 0x41;
+            SHA512(c_msg, 145, bi);
+        }
+        for (ii = c_N; ii-- > 0; ) {
+            unsigned long long j = 0, v = ii;
+            unsigned char *bi = tls_cmiyc_buf + ii * 64;
+            memcpy(c_msg, bi, 64);
+            for (b = 15; b >= 8; b--) j = (j << 8) | c_msg[b];
+            j &= c_mask;
+            memcpy(c_msg + 64, tls_cmiyc_buf + j * 64, 64);
+            for (b = 0; b < 8; b++) c_msg[136 + b] = (unsigned char)(v >> (8 * b));
+            c_msg[144] = 0x42;
+            SHA512(c_msg, 145, bi);
+        }
+    }
+    memset(c_acc, 0, 64);
+    for (ii = 0; ii < c_N; ii++) {
+        unsigned char *bi = tls_cmiyc_buf + ii * 64;
+        for (b = 0; b < 64; b++) c_acc[b] ^= bi[b];
+    }
+    SHA512(c_acc, 64, c_dig);
+    return memcmp(c_dig, c_want, 32) == 0;
+}
+
+static int verify_sha1crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sc_kb  = (unsigned char *)WS->ctx3;
+    unsigned char *sc_pad = (unsigned char *)WS->ctx4;
+    unsigned char *sc_dig = (unsigned char *)WS->ctx5;
+    unsigned char *sc_want = (unsigned char *)WS->ctx6;
+    char *sc_msg = (char *)WS->gp1;
+    SHA_CTX ictx0, octx0, wctx;
+    unsigned long sc_iter, it;
+    int ki, msglen;
+
+    if (hashlen < 14 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, "$sha1$", 6) != 0) return 0;
+
+    const char *iter_start = hashstr + 6;
+    const char *salt_start = strchr(iter_start, '$');
+    if (!salt_start || salt_start == iter_start) return 0;
+    for (const char *q = iter_start; q < salt_start; q++)
+        if (!isdigit((unsigned char)*q)) return 0;
+    sc_iter = strtoul(iter_start, NULL, 10);
+    if (sc_iter < 1) return 0;
+    salt_start++;
+    const char *dig_start = strchr(salt_start, '$');
+    if (!dig_start) return 0;
+    int sc_saltlen = (int)(dig_start - salt_start);
+    if (sc_saltlen < 1 || sc_saltlen > 64) return 0;
+    if (hashlen - (int)(dig_start + 1 - hashstr) != 28) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)sc_iter)) return 0;
+
+    /* decode the stored 28 chars: 7 groups of 4 chars -> 21 bytes.
+     * value is packed big-endian within the 24-bit group, characters carry
+     * the LOW 6 bits first -- the classic crypt to64 order, NOT yescrypt's. */
+    { const char *e = dig_start + 1;
+      int g, k;
+      for (g = 0; g < 7; g++) {
+          unsigned int v = 0;
+          for (k = 0; k < 4; k++) {
+              int d = hp_crypt64_val((unsigned char)e[g * 4 + k]);
+              if (d < 0) return 0;
+              v |= (unsigned int)d << (6 * k);
+          }
+          sc_want[g * 3 + 0] = (unsigned char)((v >> 16) & 0xff);
+          sc_want[g * 3 + 1] = (unsigned char)((v >> 8) & 0xff);
+          sc_want[g * 3 + 2] = (unsigned char)(v & 0xff);
+      }
+    }
+
+    if (passlen > 64) { SHA1((const unsigned char *)pass, passlen, sc_kb); memset(sc_kb + 20, 0, 44); }
+    else { memcpy(sc_kb, pass, passlen); memset(sc_kb + passlen, 0, 64 - passlen); }
+    for (ki = 0; ki < 64; ki++) sc_pad[ki] = sc_kb[ki] ^ 0x36;
+    SHA1_Init(&ictx0); SHA1_Update(&ictx0, sc_pad, 64);
+    for (ki = 0; ki < 64; ki++) sc_pad[ki] = sc_kb[ki] ^ 0x5c;
+    SHA1_Init(&octx0); SHA1_Update(&octx0, sc_pad, 64);
+
+    msglen = snprintf(sc_msg, WS_GP_SIZE, "%.*s$sha1$%lu",
+                      sc_saltlen, salt_start, sc_iter);
+    if (msglen < 0 || msglen >= (int)WS_GP_SIZE) return 0;
+
+    wctx = ictx0; SHA1_Update(&wctx, sc_msg, msglen); SHA1_Final(sc_dig, &wctx);
+    wctx = octx0; SHA1_Update(&wctx, sc_dig, 20);     SHA1_Final(sc_dig, &wctx);
+    for (it = 1; it < sc_iter; it++) {
+        wctx = ictx0; SHA1_Update(&wctx, sc_dig, 20); SHA1_Final(sc_dig, &wctx);
+        wctx = octx0; SHA1_Update(&wctx, sc_dig, 20); SHA1_Final(sc_dig, &wctx);
+    }
+
+    /* Deliberately does NOT set WS->verify_iter: the iteration count is part
+     * of the hash string, so there is no "which round matched" to report, and
+     * setting it appends a spurious xNN to the type name that mdxfind does not
+     * emit. MD5CRYPT/SHA256CRYPT/SHA512CRYPT all leave it unset for the same
+     * reason; verify_cost_exceeds() above already consumes the parsed count. */
+    return memcmp(sc_dig, sc_want, 20) == 0;
 }
 
 /* ================================================================= */
@@ -22076,6 +22583,12 @@ static void init_hashtypes(void)
     HTV("WPBCRYPT",          0, verify_wpbcrypt, "$wp$2b$05$RndSa1tRndSa1tRndSa1tugwc9wduHyReZB0wwYpf/1LAbf.pn.Fa:password123");
     HTV("GOST12512CRYPT",   0, verify_gost12512crypt, "$gost12512hash$defaultS$NF.9WTf1BfkSz8fQjCsT9zm6REXDO8/yr50P2tYsFyrOuQJdbqeNdz6qSBaqyWCFciwEpcVIeCY1ZPRYshNd1.:password123");
     HTV("YESCRYPT",          0, verify_yescrypt, "$y$j9T$oJqQoBLMgF5$pBqTJqEvFJtoVI6cTYyiWvIC2SChnMT0afD0GTKETv7:password123");
+    HTV("7ZIP",          0, verify_7zip, "$7z$0$19$0$$16$dd27a479e566dbad28c3b9b31832e75c$1143292405$112$106$f300ed80af9aa74ffd0240a6d9e93ad1662b51635d9b84700ac962e9e98d7b68:Hiems20%");
+    /* cmiyc at rounds=1/memlog=10 -- the live parameters (4/20) would add
+     * ~7 seconds to every -T run. Same code path, sub-second. */
+    HTV("CMIYC",         0, verify_cmiyc, "$cmiyc$2026$1$10$AAAAAAAAAAAAAAAAAAAAAA$YreQXc5mD8bWReTEZqohX4CGrA7xWIXFX_JzDhJkLfo:password123");
+    HTV("SHA1CRYPT",     0, verify_sha1crypt, "$sha1$5000$rndSa1t$ALxwxoUXoLh.IqKoUKiiKctunvFY:password123");
+    HTV("GOST-YESCRYPT", 0, verify_gostyescrypt, "$gy$j9T$..igJoezyNUNJoa0jZYOO/$KvgUPwQibautXy0oj28Skm4nkIM918Fn8m53qZPaNJD:password123");  /* generated by libxcrypt 4.4.27, salt from the CMIYC corpus -- deliberately NOT the salt used elsewhere in testing, so this self-test is independent of our own output */
     HTV("ANSIBLE-VAULT",     0, verify_ansible_vault, "$ansible$0*0*6b761adc6faeb0cc0bf197d3d4a4a7d3f1682e4b169cae8fa6b459b3214ed41e*426d313c5809d4a80a4b9bc7d4823070*5c9c6a909aae4c1eb624a6ae99b952586a9ed57eb938cbe089a950d9213a98aa:password123");
     HTV("APFS",              0, verify_apfs, "$fvde$2$16$58778104701476542047675521040224$20000$c75ba59230e2d14c19eb26a75176d853c88dce8ec8996f745fff5050073987391ac0092d7009b131:password123");
     HTV("OTM-SHA256",        0, verify_otm_sha256, "otm_sha256:1000:1234567890:VXxvkQcU+34QHlMrdScpmdbKTHi8oA41M4VBfy1z3zc=:password123");
@@ -25019,6 +25532,16 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 item->hint = find_type_by_name("DCC2");
             else if (_remaining >= 10 && memcmp(hashstart, "$y$", 3) == 0)
                 item->hint = find_type_by_name("YESCRYPT");
+            else if (_remaining >= 12 && memcmp(hashstart, "$gy$", 4) == 0)
+                item->hint = find_type_by_name("GOST-YESCRYPT");
+            else if (_remaining >= 14 && memcmp(hashstart, "$sha1$", 6) == 0)
+                item->hint = find_type_by_name("SHA1CRYPT");
+            else if (_remaining >= 20 && memcmp(hashstart, "$7z$", 4) == 0)
+                item->hint = find_type_by_name("7ZIP");
+            else if (_remaining >= 20 && memcmp(hashstart, "$cmiyc$", 7) == 0)
+                item->hint = find_type_by_name("CMIYC");
+            else if (_remaining >= 59 && memcmp(hashstart, "$7$", 3) == 0)
+                item->hint = find_type_by_name("SCRYPT");
         }
         else if (_fc == '{') {
             /* All {-prefixed formats */
