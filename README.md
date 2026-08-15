@@ -235,7 +235,7 @@ Hash types use one of three verification strategies:
 
 ### Per-hashlen Candidate Caches
 
-Rather than scanning all 988 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
+Rather than scanning all 1000 types for each input line, hashpipe maintains per-hashlen lookup tables: separate caches for unsalted, salted, and composed types indexed by binary hash length (0-64 bytes).  A 32-byte hex hash (16 binary bytes) only checks MD5, MD4, GOST, RIPEMD-128, and their composed variants.
 
 ## hx Hash Expression Language
 
@@ -279,7 +279,7 @@ Every hash function supports suffixes that control the output encoding:
 
 ### Built-in Functions
 
-All 988 hashpipe hash types are automatically available as hx functions (lowercase names).  In addition, hx provides:
+All 1000 hashpipe hash types are automatically available as hx functions (lowercase names).  In addition, hx provides:
 
 - **Crypt-family**: `md5crypt()`, `apr1()`, `sha256crypt()`, `sha512crypt()`, `sm3crypt()`, `gost12_512crypt()`, `descrypt()`, `phpass()`
 - **KDFs**: `pbkdf2_sha1/sha256/sha512/md5()`, `pbkdf1_sha1()`, `bcrypt()`, `yescrypt()`, `scrypt()`, `argon2id/i/d()`, `pomelo()`
@@ -297,7 +297,7 @@ The full hx language specification is available at [www.mdxfind.com/hx.pdf](http
 
 ## Supported Hash Types
 
-hashpipe supports 988 hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
+hashpipe supports 1000 hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
 
 ### Common types
 
