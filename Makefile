@@ -28,17 +28,20 @@ endif
 ifeq ($(UNAME_S),Darwin)
   OSOPT = -DMACOSX
   ICONV = /opt/local/lib/libiconv.a
+  COMPRESS = /opt/local/lib/libz.a /opt/local/lib/liblzma.a /opt/local/lib/libbz2.a
   LDEXTRA =
   INCEXTRA = -I/opt/local/include
 else ifeq ($(UNAME_S),FreeBSD)
   OSOPT =
   ICONV = /usr/local/lib/libiconv.a
+  COMPRESS = libz.a /usr/lib/liblzma.a /usr/lib/libbz2.a
   LDEXTRA = -Wl,--allow-multiple-definition
   INCEXTRA = -I/usr/local/include
 else
   # Linux and others
   OSOPT =
   ICONV =
+  COMPRESS = libz.a liblzma.a libbz2.a
   LDEXTRA = -ldl
   INCEXTRA = -I/usr/local/include
 endif
@@ -51,10 +54,19 @@ endif
 CFLAGS = -fomit-frame-pointer -pthread -O3 $(ARCHOPT) $(OSOPT) $(INCEXTRA) -I.
 LDFLAGS = -pthread -O3
 
-# Static libraries (expected in current directory or subdirectories)
+# Static libraries (expected in current directory or subdirectories).
+#
+# $(COMPRESS) is zlib, liblzma and libbzip2, used by the 7ZIP (e1000) verifier
+# to decompress an archive stream and check its CRC32. Without that check the
+# verifier can only test AES padding, which at a small pad size is a few bits
+# wide and confirms wrong passwords.
+#
+# These are named as explicit .a paths rather than -lz -llzma -lbz2 ON PURPOSE:
+# -l would prefer the shared object and give the binary a runtime dependency.
+# Every other library here is static for the same reason.
 LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
        gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a \
-       argon2/argon2.a libJudy.a $(ICONV)
+       argon2/argon2.a libJudy.a $(ICONV) $(COMPRESS)
 
 # yescrypt (object files, not a .a archive)
 YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \

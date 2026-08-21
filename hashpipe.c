@@ -8,7 +8,7 @@
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.102 2026/08/15 03:09:36 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.103 2026/08/21 17:44:58 dlr Exp dlr $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +29,9 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.102 20
 #include <openssl/hmac.h>
 #include <openssl/des.h>
 #include <openssl/aes.h>
+#include <zlib.h>
+#include <lzma.h>
+#include <bzlib.h>
 
 #ifndef OPENSSL_NO_MDC2
 #include <openssl/mdc2.h>
@@ -13337,6 +13340,207 @@ static int verify_gostyescrypt(const char *hashstr, int hashlen,
  * midstates are absorbed once and cloned per iteration: 2 SHA-1
  * compressions per iteration instead of 4.
  */
+/* ------------------------------------------------------------------
+ * 7-Zip verification tiers -- kept in step with mdxfind's implementation.
+ * See MDXFIND-7Z-SPEC.md sections 4.4 and 8.
+ *
+ * hashpipe is the verifier of record: a "verified" line from it is a
+ * submission-grade claim. A padding-only check is 8 * padsize bits wide, so at
+ * padsize 1 it confirms roughly one wrong candidate in 256. That is why the
+ * tiers below exist here as well as in mdxfind, and why hashpipe DECLINES
+ * (reports unresolved) rather than confirming when only weak evidence is
+ * available -- an honest "I cannot tell" beats a confident wrong answer.
+ * ------------------------------------------------------------------ */
+#define HP_SZ_MAX_UNPACK (16u * 1024u * 1024u)
+static __thread unsigned char *hp_sz_plain;  static __thread size_t hp_sz_plain_sz;
+static __thread unsigned char *hp_sz_unp;    static __thread size_t hp_sz_unp_sz;
+static __thread unsigned char *hp_sz_work;   static __thread size_t hp_sz_work_sz;
+static __thread unsigned char *hp_sz_raw;    static __thread size_t hp_sz_raw_sz;
+static long HpSevenZipMinBits = 32;
+static int  HpSevenZipInit = 0;
+
+static void hp_sz_init(void) {
+    const char *e = getenv("HASHPIPE_7Z_MIN_BITS");
+    HpSevenZipInit = 1;
+    if (e && *e) {
+        long v = strtol(e, NULL, 10);
+        if (v >= 0 && v <= 128) HpSevenZipMinBits = v;
+    }
+}
+
+static unsigned char *hp_sz_grow(unsigned char **b, size_t *have, size_t want) {
+    if (*b && *have >= want) return *b;
+    { unsigned char *n = realloc(*b, want);
+      if (!n) return NULL;
+      *b = n; *have = want; return n; }
+}
+
+/* Bits of evidence from the first decrypted block, or -1 if it contradicts
+ * the declared type (a definitive reject). */
+static int hp_sz_head_bits(int type, const unsigned char *p) {
+    int lownib = type & 0x0f, prepro = (type >> 4) & 0x07;
+    if (p[0] == 0x01 && (p[1] == 0x04 || p[1] == 0x05)) return 16;  /* 7z header */
+    if (prepro) return 0;
+    switch (lownib) {
+      case 1: return p[0] == 0x00 ? 8 : -1;
+      case 2: return (p[0] == 0x01 || p[0] == 0x02 || p[0] >= 0x80) ? 5 : -1;
+      case 6: return (p[0]=='B' && p[1]=='Z' && p[2]=='h' && p[3]>='1' && p[3]<='9') ? 32 : -1;
+      case 7: return (((p[0] >> 1) & 3) == 3) ? -1 : 2;
+      default: return 0;
+    }
+}
+
+static size_t hp_sz_lzma(int lzma2, const unsigned char *props, int proplen,
+                         const unsigned char *in, size_t inlen,
+                         unsigned char *out, size_t outcap) {
+    lzma_filter filt[2];
+    lzma_stream strm = LZMA_STREAM_INIT;
+    size_t produced = 0;
+    filt[0].id = lzma2 ? LZMA_FILTER_LZMA2 : LZMA_FILTER_LZMA1;
+    filt[0].options = NULL;
+    filt[1].id = LZMA_VLI_UNKNOWN; filt[1].options = NULL;
+    if (lzma_properties_decode(&filt[0], NULL, props, (size_t)proplen) != LZMA_OK)
+        return 0;
+    if (lzma_raw_decoder(&strm, filt) == LZMA_OK) {
+        lzma_ret rc;
+        strm.next_in = in;   strm.avail_in = inlen;
+        strm.next_out = out; strm.avail_out = outcap;
+        rc = lzma_code(&strm, LZMA_FINISH);
+        if (rc == LZMA_OK || rc == LZMA_STREAM_END || rc == LZMA_BUF_ERROR)
+            produced = strm.total_out;
+        lzma_end(&strm);
+    }
+    free(filt[0].options);
+    return produced;
+}
+
+static size_t hp_sz_inflate(const unsigned char *in, size_t inlen,
+                            unsigned char *out, size_t outcap) {
+    z_stream zs; size_t produced = 0;
+    memset(&zs, 0, sizeof(zs));
+    if (inflateInit2(&zs, -MAX_WBITS) != Z_OK) return 0;
+    zs.next_in = (Bytef *)in;   zs.avail_in = (uInt)inlen;
+    zs.next_out = (Bytef *)out; zs.avail_out = (uInt)outcap;
+    { int rc = inflate(&zs, Z_FINISH);
+      if (rc == Z_OK || rc == Z_STREAM_END || rc == Z_BUF_ERROR) produced = zs.total_out; }
+    inflateEnd(&zs);
+    return produced;
+}
+
+static size_t hp_sz_bzip2(const unsigned char *in, size_t inlen,
+                          unsigned char *out, size_t outcap) {
+    bz_stream bs; size_t produced = 0;
+    memset(&bs, 0, sizeof(bs));
+    if (BZ2_bzDecompressInit(&bs, 0, 0) != BZ_OK) return 0;
+    bs.next_in = (char *)in;   bs.avail_in = (unsigned int)inlen;
+    bs.next_out = (char *)out; bs.avail_out = (unsigned int)outcap;
+    { int rc = BZ2_bzDecompress(&bs);
+      if (rc == BZ_OK || rc == BZ_STREAM_END)
+          produced = ((size_t)bs.total_out_hi32 << 32) | bs.total_out_lo32; }
+    BZ2_bzDecompressEnd(&bs);
+    return produced;
+}
+
+/* Inverse branch filters that 7z2john.pl erases from the type field. */
+static void hp_sz_arm64(unsigned char *d, size_t n) {
+    size_t i;
+    for (i = 0; i + 4 <= n; i += 4) {
+        unsigned int v = (unsigned int)d[i] | ((unsigned int)d[i+1] << 8)
+                       | ((unsigned int)d[i+2] << 16) | ((unsigned int)d[i+3] << 24);
+        if ((v >> 26) == 0x25) {
+            unsigned int dest = (v & 0x03FFFFFF) - (unsigned int)(i >> 2);
+            v = 0x94000000u | (dest & 0x03FFFFFF);
+            d[i] = (unsigned char)v; d[i+1] = (unsigned char)(v >> 8);
+            d[i+2] = (unsigned char)(v >> 16); d[i+3] = (unsigned char)(v >> 24);
+        }
+    }
+}
+static void hp_sz_delta(unsigned char *d, size_t n, unsigned dist) {
+    unsigned char hist[256]; size_t i; unsigned j = 0;
+    memset(hist, 0, sizeof(hist));
+    for (i = 0; i < n; i++) { d[i] = (unsigned char)(d[i] + hist[j]); hist[j] = d[i]; j = (j + 1) % dist; }
+}
+
+/* Verdicts:
+ *   +1 CRC reproduced                      -> password CONFIRMED
+ *   +2 a real decompressor produced the full expected length, but no CRC
+ *      matched                             -> the key is almost certainly right
+ *      and a filter was erased from the type field (7z2john has no codec id for
+ *      ARM64, Delta or RISCV). Random bytes do not survive an LZMA2 range
+ *      coder, so reaching full length is itself strong evidence.
+ *    0 nothing decompressed, codec unknown -> no opinion
+ *   -1 nothing decompressed and the declared codec IS implemented -> REFUTED
+ *
+ * The +2 case is why a miss cannot simply be read as a refutation: measured on
+ * an ARM64+LZMA2 archive with the CORRECT password, LZMA2 decompresses cleanly
+ * and the CRC still differs. */
+static int hp_sz_tier2(const unsigned char *data, long datalen, long unpacked,
+                       const unsigned char *iv, unsigned int crc, long crc_len,
+                       const unsigned char *attrs, int attrlen, int type,
+                       const unsigned char key[32]) {
+    unsigned char *plain, *unp, ivcopy[16];
+    AES_KEY ak;
+    size_t aeslen, uselen, outcap;
+    int authoritative, lownib = type & 0x0f, prepro = (type >> 4) & 0x07, ci;
+    int plausible = 0;
+
+    if (!data || datalen < 16) return 0;
+    aeslen = (size_t)datalen & ~(size_t)15;
+    if (!aeslen) return 0;
+    plain = hp_sz_grow(&hp_sz_plain, &hp_sz_plain_sz, aeslen);
+    if (!plain) return 0;
+    memcpy(ivcopy, iv, 16);
+    AES_set_decrypt_key(key, 256, &ak);
+    AES_cbc_encrypt(data, plain, aeslen, &ak, ivcopy, AES_DECRYPT);
+
+    uselen = (unpacked > 0 && (size_t)unpacked <= aeslen) ? (size_t)unpacked : aeslen;
+    authoritative = (prepro == 0) && (lownib==1 || lownib==2 || lownib==6 || lownib==7);
+
+    outcap = crc_len > 0 ? (size_t)crc_len : HP_SZ_MAX_UNPACK;
+    if (outcap > HP_SZ_MAX_UNPACK) outcap = HP_SZ_MAX_UNPACK;
+    unp = hp_sz_grow(&hp_sz_unp, &hp_sz_unp_sz, outcap + 16);
+    if (!unp) return 0;
+
+    for (ci = 0; ci < 5; ci++) {
+        size_t got = 0, clen; int fi; unsigned char *work;
+        (void)0;
+        switch (ci) {
+          case 0: got = uselen < outcap ? uselen : outcap; memcpy(unp, plain, got); break;
+          case 1:
+            /* The declared attribute may not even belong to LZMA2: for a
+             * Delta-filtered archive 7z2john reports Delta's distance byte,
+             * because the filter has no codec id and the attribute of the
+             * coder it did recognise is what gets emitted. A dictionary LARGER
+             * than the encoder used still decodes correctly, so fall back to a
+             * 16 MB window when the declared property fails. */
+            got = hp_sz_lzma(1, attrlen ? attrs : (const unsigned char *)"\x18",
+                             attrlen ? attrlen : 1, plain, uselen, unp, outcap);
+            if (!got) got = hp_sz_lzma(1, (const unsigned char *)"\x18", 1,
+                                       plain, uselen, unp, outcap);
+            break;
+          case 2: if (attrlen == 5) got = hp_sz_lzma(0, attrs, 5, plain, uselen, unp, outcap); break;
+          case 3: got = hp_sz_inflate(plain, uselen, unp, outcap); break;
+          case 4: got = hp_sz_bzip2(plain, uselen, unp, outcap); break;
+        }
+        if (!got) continue;
+        clen = crc_len > 0 ? (size_t)crc_len : got;
+        if (clen > got) continue;
+        work = hp_sz_grow(&hp_sz_work, &hp_sz_work_sz, clen + 16);
+        if (!work) continue;
+        for (fi = 0; fi < 3; fi++) {
+            memcpy(work, unp, clen);
+            if (fi == 1) hp_sz_arm64(work, clen);
+            else if (fi == 2) hp_sz_delta(work, clen, 4);
+            if ((unsigned int)crc32(0L, work, (uInt)clen) == crc) return 1;
+        }
+        /* A genuine decompressor (not the stored passthrough) reaching the
+         * full expected length means the plaintext was real. */
+        if (ci != 0 && got >= clen) plausible = 1;
+    }
+    if (plausible) return 2;
+    return authoritative ? -1 : 0;
+}
+
 /* 7-Zip 7zAES (e1000, hashcat 11600).
  *
  * Stage 1 only, matching mdxfind: derive the AES key, decrypt the FINAL
@@ -13357,10 +13561,14 @@ static int verify_7zip(const char *hashstr, int hashlen,
     unsigned char *u16 = (unsigned char *)WS->u16a;
     unsigned char *stage = (unsigned char *)WS->gp2;
     unsigned char *tail = (unsigned char *)WS->ctx3;
-    unsigned char sz_key[32], sz_salt[64], plain[16];
+    unsigned char sz_key[32], sz_salt[64], plain[16], hplain[16];
+    unsigned char sz_iv[16], sz_attrs[8], *sz_data = NULL;
     char *f[12];
-    int nf = 0, u16len, dlen, padsize, b, ok;
-    long sz_log2, sz_saltlen, sz_packed, sz_unpacked, sz_saltbin = 0;
+    int nf = 0, u16len, dlen, dbytes, padsize, b, ok;
+    int sz_type = 0, sz_attrlen = 0, tier2avail = 0, hbits = 0, t2 = 0, evidence;
+    long sz_log2, sz_saltlen, sz_ivlen = 0, sz_packed, sz_unpacked;
+    long sz_saltbin = 0, sz_crclen = 0;
+    unsigned long sz_crc = 0;
     unsigned int keylen = 32;
 
     if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
@@ -13372,22 +13580,65 @@ static int verify_7zip(const char *hashstr, int hashlen,
       f[nf++] = sp;
       while (*sp && nf < 12) { if (*sp == '$') { *sp = 0; f[nf++] = sp + 1; } sp++; }
     }
-    if (nf < 10) return 0;                     /* 10, or 12 for LZMA coder props */
+    /* Shape must be exact: 10 fields, or 12 when the type carries crc_len and
+     * coder attributes. Anything else is malformed, not merely unusual. */
+    if (nf != 10 && nf != 12) return 0;
+    sz_type     = strtol(f[0], NULL, 10);
     sz_log2     = strtol(f[1], NULL, 10);
     sz_saltlen  = strtol(f[2], NULL, 10);
+    sz_ivlen    = strtol(f[4], NULL, 10);
+    sz_crc      = strtoul(f[6], NULL, 10);
     sz_packed   = strtol(f[7], NULL, 10);
     sz_unpacked = strtol(f[8], NULL, 10);
+    if (nf == 12) sz_crclen = strtol(f[10], NULL, 10);
     padsize     = (int)(sz_packed - sz_unpacked);
     dlen        = (int)strlen(f[9]);
-    if (sz_log2 < 0 || sz_log2 > 40) return 0;
-    if (padsize <= 0 || padsize > 16) return 0;   /* padsize 0 is undecidable */
-    if (dlen < 64 || (dlen & 1)) return 0;
+    dbytes      = dlen / 2;
+    /* 7z2john encodes unpackedlen mod 16 when it truncates, so a stream that
+     * was already block-aligned reports 16, meaning no padding at all. */
+    if (sz_type == 128 && padsize == 16) padsize = 0;
+
+    if (dlen & 1) return 0;
+    if (sz_saltlen < 0 || sz_saltlen > 64) return 0;
+    if ((int)strlen(f[3]) != sz_saltlen * 2) return 0;
+    if (sz_ivlen < 0 || sz_ivlen > 32) return 0;
+    if ((int)strlen(f[5]) != sz_ivlen * 2) return 0;
+    if (sz_log2 < 0 || sz_log2 > 40) return 0;    /* 63 is the unimplemented KDF */
+    if (padsize < 0 || padsize > 16) return 0;
+
+    /* Tier 2 needs the WHOLE stream. 7z2john keeps packedlen in step when it
+     * shortens, so a mismatch is the signature of a tail-only record. Type 128
+     * rewrites both fields to 16, so it never qualifies. */
+    tier2avail = (sz_type != 128) && sz_packed > 0 && (long)dbytes == sz_packed;
+
+    if (sz_type == 128 || (dbytes == 16 && sz_ivlen == 16)) {
+        /* One ciphertext block: its CBC predecessor is the archive IV. */
+        if (sz_ivlen != 16 || dbytes != 16) return 0;
+        if (hex2bin(f[5], 32, tail) != 16) return 0;
+        if (hex2bin(f[9], 32, tail + 16) != 16) return 0;
+    } else {
+        if (dbytes < 32) return 0;
+        if (hex2bin(f[9] + dlen - 64, 64, tail) != 32) return 0;
+    }
     if (sz_saltlen > 0) {
-        if (sz_saltlen > 64) return 0;
         sz_saltbin = hex2bin(f[3], (int)strlen(f[3]), sz_salt);
         if (sz_saltbin < 0) return 0;
     }
-    if (hex2bin(f[9] + dlen - 64, 64, tail) != 32) return 0;
+    if (sz_ivlen == 16 && hex2bin(f[5], 32, sz_iv) != 16) return 0;
+    if (nf == 12) {
+        int al = (int)strlen(f[11]);
+        if (al > 0 && (al & 1) == 0 && al <= 16 &&
+            hex2bin(f[11], al, sz_attrs) == al / 2) sz_attrlen = al / 2;
+    }
+    if (tier2avail) {
+        sz_data = hp_sz_grow(&hp_sz_raw, &hp_sz_raw_sz, (size_t)dbytes);
+        if (!sz_data || hex2bin(f[9], dlen, sz_data) != dbytes) {
+            sz_data = NULL; tier2avail = 0;
+        }
+    }
+    /* Nothing to check at all: no padding and no complete stream. */
+    if (padsize == 0 && !tier2avail) return 0;
+    if (!HpSevenZipInit) hp_sz_init();
 
     if (verify_cost_exceeds(WS->cur_rate, 524288.0, (double)(1ULL << sz_log2))) return 0;
 
@@ -13422,12 +13673,48 @@ static int verify_7zip(const char *hashstr, int hashlen,
 
     { AES_KEY ak;
       AES_set_decrypt_key(sz_key, 256, &ak);
+      /* ---- tier 0: trailing zero pad ---- */
       AES_decrypt(tail + 16, plain, &ak);
       for (b = 0; b < 16; b++) plain[b] ^= tail[b];   /* CBC: XOR preceding ct */
+      ok = 1;
+      for (b = 16 - padsize; ok && b < 16; b++) if (plain[b]) ok = 0;
+      if (!ok) return 0;
+
+      /* ---- tier 1: head structure. Only meaningful when the data field
+       * really starts at stream offset 0, i.e. the stream is complete; on a
+       * tail-only record its first bytes ARE the last two blocks. ---- */
+      if (tier2avail && dbytes >= 32 && sz_ivlen == 16) {
+          AES_decrypt(sz_data, hplain, &ak);
+          for (b = 0; b < 16; b++) hplain[b] ^= sz_iv[b];
+          hbits = hp_sz_head_bits(sz_type, hplain);
+          if (hbits < 0) return 0;
+      }
     }
-    ok = 1;
-    for (b = 16 - padsize; b < 16; b++) if (plain[b]) { ok = 0; break; }
-    return ok;
+
+    /* ---- tier 2: decompress and compare CRC32 ---- */
+    if (tier2avail)
+        t2 = hp_sz_tier2(sz_data, (long)dbytes, sz_unpacked, sz_iv,
+                         (unsigned int)sz_crc, sz_crclen,
+                         sz_attrs, sz_attrlen, sz_type, sz_key);
+    if (t2 == 1) return 1;                /* CRC reproduced: confirmed */
+    if (t2 < 0) return 0;                 /* declared codec implemented: refuted */
+    if (t2 == 2) hbits += 32;             /* decompressed clean, filter erased */
+
+    /* ---- no decisive tier. hashpipe's "verified" is a submission-grade
+     * claim, so weak evidence must read as unresolved, not as a crack. ---- */
+    evidence = 8 * padsize + hbits;
+    if (evidence >= HpSevenZipMinBits) return 1;
+    { static int warned;
+      if (!warned) {
+          warned = 1;
+          fprintf(stderr,
+                  "hashpipe: 7ZIP: declining to verify on %d bits of evidence "
+                  "(padsize %d, no decompress+CRC available). Supply the complete "
+                  "stream, or confirm with: 7zz t -p<password> <archive>\n",
+                  evidence, padsize);
+      }
+    }
+    return 0;
 }
 
 /* CMIYC contest hash (e1001). Mirrors the mdxfind implementation exactly;
