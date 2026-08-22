@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.105 2026/08/22 12:44:58 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.106 2026/08/22 13:26:15 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.106  2026/08/22 13:26:15  dlr
+ * Verify salted user-defined hash types. The user-type verifier passed an empty string in the salt slot for every type, so any hx expression referencing salt was computed over an empty salt and could never match - a salted user type simply never verified, silently, while the same type cracked correctly in mdxfind. The candidate block now retains the raw tail after the first colon, and for a type whose slot_mask carries USERDEF_SLOT_SALT the tail is split at the next colon into salt and password, matching the hash:salt:password form mdxfind emits. The match is also reported with HTF_SALTED and the split fields, so the found line is hash:salt:password rather than the whole tail printed as the plaintext - which, because that tail contains a colon, came back HEX-encoded. New per-thread vpassbuf2 holds the decoded password for the salted path. Unsalted user types, built-in types and the 7ZIP verifier are unaffected. Verified against a real case: md5(sha1(md5(salt . sha1(pass)))) with hash a923f658e74c4a851e625f41db7ffe74 salt 8365ef6d password paramedical7 now produces the same line as mdxfind, and both a wrong password and a wrong salt stay unresolved.
+ *
  * Revision 1.105  2026/08/22 12:44:58  dlr
  * Add the mandatory Log keyword stanza. hashpipe.c carried only Header, so its revision narrative lived solely in the RCS file and not in the source, unlike mdxfind.c mdsplit.c and userdef.c. All 104 prior messages were scanned for comment-terminating sequences before enabling expansion; none contain them, so injecting the history cannot break the comment block.
  *
@@ -416,7 +419,7 @@ struct workspace {
     /* Worker I/O buffers */
     void *outbuf, *errbuf, *fmtbuf;
     /* Verify/format buffers */
-    void *passbuf, *vpassbuf, *decoded;
+    void *passbuf, *vpassbuf, *vpassbuf2, *decoded;
     unsigned char *testvec;  /* malloc'd TESTVECSIZE+16 buffer for $TESTVEC[] */
     /* verify_item buffers */
     void *hashbin, *computed_vi, *iterbuf, *hexiter;
@@ -456,6 +459,7 @@ static void ws_init_rhash(struct workspace *ws)
     ws->outbuf = malloc(MAXLINE * 2); ws->errbuf = malloc(MAXLINE * 2);
     ws->fmtbuf = malloc(MAXLINE * 2);
     ws->passbuf = malloc(WS_GP_SIZE); ws->vpassbuf = malloc(WS_GP_SIZE);
+    ws->vpassbuf2 = malloc(WS_GP_SIZE);
     ws->decoded = malloc(WS_GP_SIZE);
     ws->hashbin = malloc(MAX_INPUT_HASH + 16);
     ws->computed_vi = malloc(MAX_INPUT_HASH + 16);
@@ -485,7 +489,7 @@ static void ws_free_rhash(struct workspace *ws)
     free(ws->gp5); free(ws->gp6); free(ws->gp7); free(ws->gp8);
     free(ws->u16a); free(ws->u16b);
     free(ws->outbuf); free(ws->errbuf); free(ws->fmtbuf);
-    free(ws->passbuf); free(ws->vpassbuf); free(ws->decoded);
+    free(ws->passbuf); free(ws->vpassbuf); free(ws->vpassbuf2); free(ws->decoded);
     free(ws->hashbin); free(ws->computed_vi); free(ws->iterbuf);
     free(ws->hexiter); free(ws->saltbin); free(ws->altsaltbin);
     free(ws->colonsalt);
@@ -27429,6 +27433,12 @@ static int emit_user_matches(struct workitem *item, int *outpos)
     int u;
     const unsigned char *cand;
     int candlen;
+    const char *rest_p = NULL;      /* raw tail, retained for the salt split */
+    int rest_l = 0;
+    const unsigned char *vcand;     /* per-type candidate (salt stripped)    */
+    int vcandlen;
+    const char *vsalt;              /* per-type salt, "" when unsalted       */
+    int vsaltlen;
     /* candidate password buffer for $HEX[] decode (per worker, via WS) */
     unsigned char *passbuf;
 
@@ -27455,16 +27465,22 @@ static int emit_user_matches(struct workitem *item, int *outpos)
      * first colon (item->rest), so passwords that themselves contain ':'
      * still match.  Falls back to item->password when rest is unset.  Decode
      * $HEX[] the same way format_output does.
+     *
+     * A SALTED user type needs that tail split instead: mdxfind emits such a
+     * type as `hash:salt:password`, so the salt is the field up to the next
+     * colon and the password is everything after it.  The split is done per
+     * type inside the loop below, because the registry can hold salted and
+     * unsalted types at once and only the salted ones want it.
      */
-    {
-        const char *rp = item->rest ? item->rest : item->password;
-        int rlen = item->rest ? item->restlen : item->passlen;
-        int dec;
-        if (!rp) return 0;
-        passbuf = (unsigned char *)WS->vpassbuf;
-        dec = decode_hex_password(rp, rlen, passbuf, MAXLINE);
-        if (dec >= 0) { cand = passbuf; candlen = dec; }
-        else          { cand = (const unsigned char *)rp; candlen = rlen; }
+    { const char *rp = item->rest ? item->rest : item->password;
+      int rlen = item->rest ? item->restlen : item->passlen;
+      int dec;
+      if (!rp) return 0;
+      rest_p = rp; rest_l = rlen;
+      passbuf = (unsigned char *)WS->vpassbuf;
+      dec = decode_hex_password(rp, rlen, passbuf, MAXLINE);
+      if (dec >= 0) { cand = passbuf; candlen = dec; }
+      else          { cand = (const unsigned char *)rp; candlen = rlen; }
     }
 
     for (u = 0; u < nuser; u++) {
@@ -27476,8 +27492,28 @@ static int emit_user_matches(struct workitem *item, int *outpos)
         if (ut->diglen_hex != item->hashlen) continue;   /* hashlen filter */
         if (!UserVMs[u].prog) continue;                  /* init failed    */
 
-        r = hx_vm_run(&UserVMs[u], (const char *)cand, candlen,
-                      "", 0, "", 0, "", 0, "", 0);
+        /* Salted types: split the retained tail into salt and password. The
+         * salt was previously passed as "" for every user type, so any
+         * expression referencing `salt` could never verify -- it was silently
+         * computed over an empty salt and never matched. */
+        vsalt = ""; vsaltlen = 0;
+        vcand = cand; vcandlen = candlen;
+        if (ut->slot_mask & USERDEF_SLOT_SALT) {
+            const char *colon = memchr(rest_p, ':', (size_t)rest_l);
+            int dec2;
+            if (!colon) continue;            /* no salt field present */
+            vsalt    = rest_p;
+            vsaltlen = (int)(colon - rest_p);
+            dec2 = decode_hex_password(colon + 1,
+                                       rest_l - vsaltlen - 1,
+                                       (unsigned char *)WS->vpassbuf2, MAXLINE);
+            if (dec2 >= 0) { vcand = (const unsigned char *)WS->vpassbuf2; vcandlen = dec2; }
+            else           { vcand = (const unsigned char *)(colon + 1);
+                             vcandlen = rest_l - vsaltlen - 1; }
+        }
+
+        r = hx_vm_run(&UserVMs[u], (const char *)vcand, vcandlen,
+                      vsalt, vsaltlen, "", 0, "", 0, "", 0);
         if (!r.data || r.len != item->hashlen) continue;
 
         /* The hx VM emits lowercase hex (ROLE_HEX); the input may be upper-
@@ -27502,13 +27538,25 @@ static int emit_user_matches(struct workitem *item, int *outpos)
 
             memset(&synth, 0, sizeof(synth));
             synth.name  = ut->dispname;     /* "USER_<name>" */
-            synth.flags = 0;                /* unsalted */
             item->match_type = &synth;
             item->match_iter = 1;           /* x01 -- one hx evaluation */
-            item->salt       = NULL;
-            item->saltlen    = 0;
-            item->password   = item->rest ? item->rest : save_pass;
-            item->passlen    = item->rest ? item->restlen : save_passlen;
+            if (ut->slot_mask & USERDEF_SLOT_SALT) {
+                /* Report hash:salt:password, matching what mdxfind emits for
+                 * a salted user type. Feeding the unsplit tail here printed
+                 * the salt as part of the plaintext, and because that tail
+                 * contains a colon it came back $HEX[]-encoded. */
+                synth.flags    = HTF_SALTED;
+                item->salt     = (char *)vsalt;
+                item->saltlen  = vsaltlen;
+                item->password = (char *)(rest_p + vsaltlen + 1);
+                item->passlen  = rest_l - vsaltlen - 1;
+            } else {
+                synth.flags = 0;            /* unsalted */
+                item->salt       = NULL;
+                item->saltlen    = 0;
+                item->password   = item->rest ? item->rest : save_pass;
+                item->passlen    = item->rest ? item->restlen : save_passlen;
+            }
 
             format_output(item, WS->fmtbuf, &olen);
 
