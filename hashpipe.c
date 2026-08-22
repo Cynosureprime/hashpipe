@@ -7,8 +7,21 @@
  * Unresolved lines go to stderr.
  *
  * Uses yarn.c for threading and OpenSSL for hash computation.
+ *
+ * User-defined types: $MDXFIND_CACHE/userdef.txt is loaded at startup and its
+ * types are identified as USER_<name>. A stanza that does not parse is now
+ * FATAL -- every bad stanza in the file is reported and then hashpipe exits 1,
+ * rather than skipping it and verifying against fewer types than the file
+ * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.103 2026/08/21 17:44:58 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.105 2026/08/22 12:44:58 dlr Exp dlr $";
+
+/*
+ * $Log: hashpipe.c,v $
+ * Revision 1.105  2026/08/22 12:44:58  dlr
+ * Add the mandatory Log keyword stanza. hashpipe.c carried only Header, so its revision narrative lived solely in the RCS file and not in the source, unlike mdxfind.c mdsplit.c and userdef.c. All 104 prior messages were scanned for comment-terminating sequences before enabling expansion; none contain them, so injecting the history cannot break the comment block.
+ *
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
