@@ -14,10 +14,325 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.106 2026/08/22 13:26:15 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.113 2026/08/29 13:53:50 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.113  2026/08/29 13:53:50  dlr
+ * Resolve USER_<name> input tags, so a user type can verify its own output.
+ *
+ * Another session reported that salted user-defined types never verify and that
+ * their own documented test vector lands in unresolved. The symptom is real and
+ * reproduces on 1.112, not only on the 1.106 it was filed against. Both stated
+ * causes are wrong, and the real one is narrower.
+ *
+ * Not the salt. The salted BWTDT verifies correctly today when the line is
+ * untagged, and the UNSALTED Cust1 fails in exactly the same way when the line is
+ * tagged. Salt is not the variable; the leading tag is.
+ *
+ * Not the loader either. The report states that hashpipe finds userdef.txt
+ * without MDXFIND_CACHE. It does not. With the variable unset, hashpipe -Y loads
+ * nothing at all, so every USER_ line is unresolved for want of any type to check
+ * against, which on its own accounts for the reported run.
+ *
+ * The actual defect: the input parser strips a leading TYPExNN tag only for names
+ * that resolve through find_type_by_name(), which looks names up in Hashtypes[].
+ * User-defined types deliberately live outside that array, so USER_BWTDTx01 never
+ * resolved, the tag was folded back into the hash field, and the digest reaching
+ * the hashlen filter was "USER_BWTDTx01 a923f6..." instead of 32 hex characters.
+ * mdxfind tags every line it prints and so does hashpipe, so piping a harvest from
+ * one into the other broke for every user-defined result while the same triples
+ * verified untagged.
+ *
+ * Fixed by resolving the tag against the loaded user-defined types. It sets no
+ * hint: emit_user_matches() already tries every loaded user type, so the tag needs
+ * stripping, not steering.
+ *
+ * Dave: a user-defined type may not be resolvable at all, consider the case that
+ * there is no user definition. So this deliberately does NOT fall back to
+ * auto-detect on an unknown tag. With nothing loaded the tag stays unrecognised
+ * and the line lands in unresolved, which is the honest answer; guessing a
+ * built-in type for a USER_ tag would risk labelling the line with the wrong
+ * algorithm, and a wrong attribution is worse than no attribution.
+ *
+ * The existing fallback for an unrecognised tag is kept and now carries a note
+ * saying why it is required rather than defensive: a password containing a space
+ * puts a space in the line with no tag present, and re-parsing the whole line is
+ * what handles it. Verified still working.
+ *
+ * New test tools/userdef_roundtrip_test.sh. The regression the report suggested,
+ * extending -T to user types with a salt slot, would NOT have caught this: -T
+ * checks the vector directly and the vector was always fine. What catches it is a
+ * round trip, since the output form must be accepted as an input form. Validated
+ * in both directions -- it FAILS against a rebuilt pre-fix binary, reporting
+ * "emitted ... re-read: unresolved" for both types, and passes after. It skips
+ * cleanly where no user types are configured.
+ *
+ * Verified: the reported vector now verifies tagged; the unsalted type too;
+ * built-in tagged lines unaffected; a password containing a space still parses;
+ * and with MDXFIND_CACHE unset the line still lands in unresolved.
+ *
+ * Regression: hashpipe -T 1001 passed 0 failed 0 skipped; tools/john_mode_test.sh
+ * PASS; tools/userdef_roundtrip_test.sh PASS.
+ *
+ * Revision 1.112  2026/08/29 03:21:04  dlr
+ * Add _uc, a fifth output-role suffix: uppercase hex.
+ *
+ * Dave: look carefully at the _hex _bin and other hash-output-modifiers, that is
+ * likely the right place to add it. It was. The suffix mechanism already existed
+ * and already did exactly the necessary thing, which is to select a
+ * representation of the same digest and set a flag on the CALL instruction, so
+ * _uc is five small edits rather than a language change.
+ *
+ * Two things turned out to be true that reshape what 1b.10 still is.
+ *
+ * First, the iteration operator ALREADY EXISTS. hx.y has the production IDENT ^
+ * NUMBER ( arglist ), md5^3(pass) evaluates, and it agrees with mdxfind -i 3 on
+ * MD5x01 through x03. The eighteen catalog rows that fail to compile do not fail
+ * for want of the feature; they are written with a metavariable, md5^N(pass),
+ * where N stands for the -i count and is not a numeral the grammar can accept.
+ * That is a documentation-convention question, not a missing capability, and it
+ * is now the only thing left in 1b.10 along with one row that wants a binary XOR.
+ *
+ * Second, _uc is NOT cosmetic, and upper() does not substitute for it. mdxfind
+ * MD5UC iterated feeds the UPPERCASE hex back into the next round:
+ *
+ *   mdxfind MD5UCx02   3cfbfa88a225dd3255a6be8c1fa4609d
+ *   md5_uc^2           3CFBFA88A225DD3255A6BE8C1FA4609D   match
+ *   upper(md5^2)       9A16F5A5DF99FB8BAAB9E1981D9104DE   different
+ *
+ * upper(md5^N(pass)) uppercases only the final result. The two agree at N=1,
+ * which is why the 71 UC rows have always looked right, and diverge from N=2
+ * onward, which is why none of them can express their own iterated form. Same
+ * result confirmed on SHA1UC against x02 and x03.
+ *
+ * Changes: ROLE_UC and ROLE_CAP_UC in hx_vm.h; a length-3 arm in the suffix scan
+ * in hx_compile.c, run after the four length-4 candidates so a function whose
+ * name genuinely ends in _uc still resolves through the existing fall-through,
+ * plus role_name and role_caps_str; hex_uc, to_hex_uc and a branch at both
+ * digest dispatch sites in hx_func.c, with ROLES_DIGEST widened; and the three
+ * bridged-type registration sites in hashpipe.c, which carry a literal role mask
+ * rather than the ROLES_DIGEST macro. Missing that last one is why the first
+ * build still rejected the suffix.
+ *
+ * The catalog is untouched. Rewriting the 71 UC rows to use _uc would make them
+ * correct under iteration rather than only at x01, but it changes their compiled
+ * bytecode and therefore their dedup signatures, so it is a separate decision.
+ *
+ * Verified: md5_uc and sha1_uc reproduce the mdxfind MD5UC and SHA1UC chains at
+ * two and three rounds. An unsupported suffix still fails cleanly with the
+ * supported-roles list, checked on bcrypt_uc. Regression: hashpipe -T 1001
+ * passed 0 failed 0 skipped; tools/john_mode_test.sh PASS; catalog unchanged at
+ * total=1000 non_outlier=911 outlier=68 compile_failed=21. hx.1 documents the
+ * fifth suffix and the iteration distinction; the table renders under tbl with
+ * no new troff warnings.
+ *
+ * Revision 1.111  2026/08/29 02:22:44  dlr
+ * e607 SHA1MD5SALTPASSPEPPER: hash the digest, not the salt and half the digest.
+ *
+ * The inner md5(salt . pass) was staged as hex at linebuf+saltlen while the
+ * pepper was written at the fixed offset 32 and the sha1 ran from linebuf for
+ * 32+peplen bytes. The three lines disagreed about where the digest lived, so
+ * for any non-empty salt the pepper landed on top of the tail of the digest and
+ * the hash covered the salt followed by a truncated digest. With a 16-byte salt
+ * the sha1 input was the salt, then only the first 16 hex characters, then the
+ * pepper. The output depended on the salt length, which no other type in the
+ * family does.
+ *
+ * Repaired by staging the hex at linebuf, one line, so that the pepper offset
+ * and the sha1 length that were already written for that layout become correct:
+ *
+ *   prmd5(md5buf.h, linebuf+saltlen, 32);   ->   prmd5(md5buf.h, linebuf, 32);
+ *
+ * Overwriting linebuf is safe. Its contents are dead after the md5 on the
+ * preceding line, and the reporting buffer linebuf2 independently holds the salt
+ * and pepper. prmd5 NUL-terminates at out[32] and the pepper copy immediately
+ * overwrites that byte, so the ordering is right.
+ *
+ * Dave identified the sha1 call as the fault. It is one of the three
+ * inconsistent lines and the place the damage shows, but it and the pepper copy
+ * are already correct for a digest anchored at linebuf; the misplaced write is
+ * the prmd5 destination. Both repairs produce identical output, this one is a
+ * single line.
+ *
+ * The intended form is settled by the type name, not by inference. In this
+ * family a SALT token immediately after SHA1 marks a salt in the outer
+ * concatenation, as in e602 SHA1SALTMD5PASSPEPPER, sha1(salt . md5(pass) .
+ * pepper). e607 has no such token, so the outer hash covers the digest and the
+ * pepper alone. The sibling cases in the same block confirm the discipline: they
+ * anchor the digest at linebuf+MAXLINE, place the salt before it and the pepper
+ * after it, and hash the whole span. hashpipe corroborates it independently. Its
+ * verifier header has always described the type as MD5(salt+pass) then
+ * SHA1(hex + pepper), and the body underneath carried a comment explaining that
+ * it was reproducing mdxfind layout instead. A previous session found this and
+ * mirrored the defect rather than diverge from mdxfind.
+ *
+ * This is the adjacent-slice family recorded for e367, e603, e715 and e440. e596
+ * handles the same hazard correctly a few hundred lines away by saving and
+ * restoring the byte prmd5 terminates.
+ *
+ * Behaviour change, not a documentation change: any hash cracked as e607 before
+ * this revision will not verify against it. hx.8 Note [27] records the old
+ * construction and gives it in hx form, sha1(cut(salt . md5(salt . pass), 0, 32)
+ * . pepper), which was documented as the truth at hx.8 1.30 and verified exact
+ * at salt lengths 2, 10, 16, 36 and 42.
+ *
+ * Changed together: mdxfind.c, the hashpipe verifier and its stored test vector,
+ * which was computed under the old layout, and the hx.8 row.
+ *
+ * Verified: mdxfind -z at salt lengths 2, 10, 16, 36 and 42 agrees with an
+ * independent Python computation and with hashpipe -X evaluating the new row.
+ * The new hashpipe vector was computed in Python, not by the code under test.
+ * mdxfind -z output for a 10-byte salt, a length the stored vector does not
+ * cover, verifies and labels correctly end to end through hashpipe.
+ *
+ * Regression: hashpipe -T 1001 passed 0 failed 0 skipped, e607 Pass.
+ * tools/john_mode_test.sh PASS. Catalog census unchanged at total=1000
+ * non_outlier=902 outlier=77 compile_failed=21.
+ *
+ * Revision 1.110  2026/08/27 05:44:41  dlr
+ * Sync RMD256 (e1002) into hashpipe; Types[] identical with mdxfind again.
+ *
+ * Types[] is copied from mdxfind and the two MUST stay identical, so the name is
+ * added at index 1002 in both. Order matters here: HT resolves a name through
+ * Types[] and a name that is not present is silently ignored as dead code, so
+ * the table entry has to land before the registration.
+ *
+ * compute_rmd256 mirrors compute_rmd320, mhash_init with MHASH_RIPEMD256 and a
+ * 32 byte digest. The 256 bit primitive was already linked for HMAC-RMD256
+ * (e212); only the bare form was missing.
+ *
+ * The registered test vector is a PUBLISHED RIPEMD-256 value, afbd6e22 for the
+ * input abc, rather than one this codebase produced. Generating the vector from
+ * our own implementation would have made the self-test agree with itself; 248 of
+ * 256 vectors were once self-generated and two broken types passed for months.
+ *
+ * Benchmark rate measured on dev1, the canonical host named in the bench_rates.h
+ * header, using the documented incremental path. Local iMac numbers are not
+ * substitutable: sibling ratios against the stored table span 1.07x for RMD320 to
+ * 4.05x for MD5, so there is no single scaling factor. Recorded as
+ * {1002, 5072248LL}.
+ *
+ * Two problems surfaced while doing this and are worth noting. hashpipe-release
+ * SRCFILES did not list john_map.h, which hashpipe.c has included since the -J
+ * work, so the release copies sources into hashpipe-build without it and every
+ * host would have failed to compile; SRCFILES now lists it, proven by a clean
+ * arm64 build on dev1 from exactly that file set. Separately gpu/gen_bench_rates.py
+ * emits a bench_rates[] declaration and closing brace, but init_rates already
+ * supplies both around the include, so its output cannot be used verbatim; the
+ * entries were extracted by hand this time and the script is left as found.
+ *
+ * Regression: hashpipe self-test 1001 passed 0 failed, up from 1000 with the new
+ * type; tools/john_mode_test.sh all checks pass; tools/7z_validate.sh 18
+ * verified, 0 wrong, 1 declined, 0 false positives. Types[] verified identical
+ * between mdxfind.c and hashpipe.c at 1003 entries.
+ *
+ * Revision 1.109  2026/08/27 04:24:28  dlr
+ * hashpipe -J: emit and accept John the Ripper canonical format.
+ *
+ * -J 0 emits mdxfind format for every line, the default and the only behaviour
+ * before this option. -J 1 emits John format for lines that arrived in John
+ * format, mdxfind for the rest. -J 2 emits John format wherever an equivalent
+ * exists, mdxfind where none does, so its output is deliberately mixed and is
+ * not uniformly parseable by a John-only consumer.
+ *
+ * The mode is matched with strcmp against the three legal spellings and never
+ * converted with atoi. getopt consumes the following argument unconditionally,
+ * so hashpipe -J potfile.txt would otherwise hand a filename to the mode parser;
+ * atoi returns 0 for it, a VALID mode, and the run would proceed in mdxfind mode
+ * with the input file eaten as the flag argument and hashpipe left reading
+ * stdin, producing zero output and no diagnostic. HASHPIPE_OUTPUT selects the
+ * same thing for callers that cannot reach the command line, is validated
+ * identically, is overridden by an explicit -J, and is announced on stderr only
+ * when the flag did not win, so the notice never names a mode that is not in
+ * effect.
+ *
+ * Input in John canonical form is now recognised and unwrapped rather than
+ * rejected. The hash and salt boundary is taken from the leading hex run, not
+ * from the type the wrapper names: John salts may contain a dollar sign, its own
+ * documentation using dynamic_6 with a salt of star dot star, so splitting on
+ * the separator silently truncates them and a truncated salt yields a confident
+ * unresolved. This is the same rule the 7z loader follows, trust the field and
+ * not the label beside it. HEX-encoded salts are decoded. A digest whose width
+ * disagrees with the named format drops the hint rather than asserting a wrong
+ * type, and dynamic_1000 and above are refused outright since those are defined
+ * in john.conf and mean whatever the producing machine said.
+ *
+ * The wrappers claim is never passed through: a line tagged dynamic_0 whose
+ * digest is SHA-1 comes back relabelled dynamic_26, corrected rather than
+ * laundered.
+ *
+ * john_map.h is generated by tools/john_map_gen.sh from Johns own test vectors,
+ * 125 formats confirmed by recomputation out of 403 probed with 9672 vectors.
+ * Each row also survives a confirm pass in which hashpipe is restricted to the
+ * single candidate type and must verify every sampled vector of that format;
+ * without it a narrow-focus type such as MD5CAP, which is cap of md5 of pass and
+ * therefore a no-op whenever the digest starts with a digit, masquerades as the
+ * real mapping on any one vector. The iteration suffix is part of the identity
+ * and is retained, MD5x02 being dynamic_2 and MD5x03 dynamic_3. Regeneration is
+ * byte-identical.
+ *
+ * tools/john_mode_test.sh is the acceptance test: 22 checks covering mode
+ * parsing, both output directions, the salted canary whose salt contains a
+ * dollar sign, the three refusals, and a bulk round-trip in which every line
+ * hashpipe emits is fed back through john --show=formats. 246 of 806 wrapped
+ * vectors verify and John accepts all 246 emitted lines.
+ *
+ * Self-test 1000 passed 0 failed. tools/7z_validate.sh unchanged: 18 verified,
+ * 0 wrong, 1 declined, 4 of 4 John dialect vectors. Makefile gains the
+ * john_map.h dependency for hashpipe.o.
+ *
+ * Revision 1.108  2026/08/27 03:52:27  dlr
+ * Add -J output mode selector and HASHPIPE_OUTPUT, with exact-match parsing.
+ *
+ * -J 0 emits mdxfind format for every line, which is the default and the only
+ * behaviour before this option existed. -J 1 emits John format for lines that
+ * arrived in John format, mdxfind for the rest. -J 2 emits John format wherever
+ * an equivalent exists, mdxfind where none does.
+ *
+ * The mode argument is matched with strcmp against the three legal spellings and
+ * is never converted with atoi. getopt consumes the following argument
+ * unconditionally, so hashpipe -J potfile.txt would otherwise hand a filename to
+ * the mode parser; atoi returns 0 for it, which is a valid mode, and the run
+ * would proceed in mdxfind mode with the input file eaten as the flag argument
+ * and hashpipe left reading stdin - zero output and no diagnostic. Anything that
+ * is not exactly 0, 1 or 2 is now fatal and names the offending value.
+ *
+ * HASHPIPE_OUTPUT selects the same thing for callers that cannot reach the
+ * command line. It is read before getopt so an explicit -J always wins, it is
+ * validated the same way, and it is announced on stderr only when the flag did
+ * not override it, so the notice never names a mode that is not in effect. A
+ * changed output format must not be silent: mdsplit consumes this output, and a
+ * silently switched format mis-files or rejects lines in a way that looks exactly
+ * like an honest negative.
+ *
+ * The John label table is generated from Johns own test vectors and is not linked
+ * in yet, so JohnMapCount returns 0 and modes 1 and 2 currently fall back to
+ * mdxfind format for every line. That fallback is the specified behaviour when no
+ * John equivalent exists, but it is stated on stderr rather than left to look
+ * like John output happened; the notice disappears once the table is populated.
+ *
+ * Self-test 1000 passed 0 failed. tools/7z_validate.sh unchanged: 18 verified,
+ * 0 wrong, 1 declined, all 4 John dialect vectors cracked and verified.
+ *
+ * Revision 1.107  2026/08/27 00:56:58  dlr
+ * 7z: accept John the Ripper dialect alongside 7z2john/7z2hashcat.
+ *
+ * Three producer differences were being rejected at load as malformed:
+ * saltlen 0 with a populated salt field, ivlen 8 in a zero-padded 16-byte
+ * iv field, and type 128 on a record carrying the whole stream.
+ *
+ * saltlen and ivlen are now treated as a floor rather than an equality --
+ * saltlen stays authoritative for the KDF (surplus field bytes ignored, and
+ * the group key is built from the effective salt so both dialects share one
+ * KDF group), while the iv field itself is what AES-CBC consumes, taken as
+ * min(field,16) and zero-padded. Truncation is decided structurally from
+ * data length vs packedlen instead of from bit 7 of the type byte.
+ *
+ * Tier 0/1/2, the codec oracle and the load-time triage are unchanged; two
+ * of the four John vectors carry padsize 0 and are recovered by the tier-1
+ * head signature, which John itself cannot decide.
+ *
  * Revision 1.106  2026/08/22 13:26:15  dlr
  * Verify salted user-defined hash types. The user-type verifier passed an empty string in the salt slot for every type, so any hx expression referencing salt was computed over an empty salt and could never match - a salted user type simply never verified, silently, while the same type cracked correctly in mdxfind. The candidate block now retains the raw tail after the first colon, and for a type whose slot_mask carries USERDEF_SLOT_SALT the tail is split at the next colon into salt and password, matching the hash:salt:password form mdxfind emits. The match is also reported with HTF_SALTED and the split fields, so the found line is hash:salt:password rather than the whole tail printed as the plaintext - which, because that tail contains a colon, came back HEX-encoded. New per-thread vpassbuf2 holds the decoded password for the salted path. Unsalted user types, built-in types and the 7ZIP verifier are unaffected. Verified against a real case: md5(sha1(md5(salt . sha1(pass)))) with hash a923f658e74c4a851e625f41db7ffe74 salt 8365ef6d password paramedical7 now produces the same line as mdxfind, and both a wrong password and a wrong salt stay unresolved.
  *
@@ -1500,6 +1815,7 @@ char *Types[] = {
     "SHA1CRYPT",
     "7ZIP",
     "CMIYC",
+    "RMD256",
 
 NULL
 
@@ -6786,6 +7102,21 @@ static void compute_rmd320(const unsigned char *pass, int passlen,
     mhash(td, pass, passlen);
     out = mhash_end(td);
     memcpy(dest, out, 40);
+    free(out);
+}
+
+/* RMD256 — bare RIPEMD-256 of the password.  The 256-bit primitive was
+ * already linked for HMAC-RMD256 (e212); only the bare form was missing. */
+static void compute_rmd256(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    MHASH td;
+    unsigned char *out;
+    (void)salt; (void)saltlen;
+    td = mhash_init(MHASH_RIPEMD256);
+    mhash(td, pass, passlen);
+    out = mhash_end(td);
+    memcpy(dest, out, 32);
     free(out);
 }
 
@@ -13583,6 +13914,7 @@ static int verify_7zip(const char *hashstr, int hashlen,
     char *f[12];
     int nf = 0, u16len, dlen, dbytes, padsize, b, ok;
     int sz_type = 0, sz_attrlen = 0, tier2avail = 0, hbits = 0, t2 = 0, evidence;
+    int truncated = 0, ivb = 0;
     long sz_log2, sz_saltlen, sz_ivlen = 0, sz_packed, sz_unpacked;
     long sz_saltbin = 0, sz_crclen = 0;
     unsigned long sz_crc = 0;
@@ -13613,35 +13945,45 @@ static int verify_7zip(const char *hashstr, int hashlen,
     dbytes      = dlen / 2;
     /* 7z2john encodes unpackedlen mod 16 when it truncates, so a stream that
      * was already block-aligned reports 16, meaning no padding at all. */
-    if (sz_type == 128 && padsize == 16) padsize = 0;
+    truncated = (sz_type == 128 && dbytes == 16 && sz_packed == 16);
+    if (truncated && padsize == 16) padsize = 0;
 
     if (dlen & 1) return 0;
     if (sz_saltlen < 0 || sz_saltlen > 64) return 0;
-    if ((int)strlen(f[3]) != sz_saltlen * 2) return 0;
+    if ((int)strlen(f[3]) & 1) return 0;
+    if ((int)strlen(f[3]) < sz_saltlen * 2) return 0;
     if (sz_ivlen < 0 || sz_ivlen > 32) return 0;
-    if ((int)strlen(f[5]) != sz_ivlen * 2) return 0;
+    if ((int)strlen(f[5]) & 1) return 0;
+    if ((int)strlen(f[5]) < sz_ivlen * 2) return 0;
     if (sz_log2 < 0 || sz_log2 > 40) return 0;    /* 63 is the unimplemented KDF */
     if (padsize < 0 || padsize > 16) return 0;
 
     /* Tier 2 needs the WHOLE stream. 7z2john keeps packedlen in step when it
      * shortens, so a mismatch is the signature of a tail-only record. Type 128
      * rewrites both fields to 16, so it never qualifies. */
-    tier2avail = (sz_type != 128) && sz_packed > 0 && (long)dbytes == sz_packed;
+    tier2avail = !truncated && sz_packed > 0 && (long)dbytes == sz_packed;
 
-    if (sz_type == 128 || (dbytes == 16 && sz_ivlen == 16)) {
-        /* One ciphertext block: its CBC predecessor is the archive IV. */
-        if (sz_ivlen != 16 || dbytes != 16) return 0;
-        if (hex2bin(f[5], 32, tail) != 16) return 0;
+    /* The iv field is zero-padded out to the AES block size by the producer,
+     * so the FIELD -- not the declared ivlen -- is what the cipher consumes.
+     * 7z2john writes ivlen 16; John writes ivlen 8 in the same 32-hex field. */
+    ivb = (int)strlen(f[5]) / 2;
+    if (ivb > 16) ivb = 16;
+    memset(sz_iv, 0, 16);
+    if (ivb > 0 && hex2bin(f[5], ivb * 2, sz_iv) != ivb) return 0;
+
+    if (dbytes == 16) {
+        /* One ciphertext block: its CBC predecessor is the iv field. */
+        memcpy(tail, sz_iv, 16);
         if (hex2bin(f[9], 32, tail + 16) != 16) return 0;
     } else {
         if (dbytes < 32) return 0;
         if (hex2bin(f[9] + dlen - 64, 64, tail) != 32) return 0;
     }
+    /* saltlen is authoritative; a producer may leave stale bytes beyond it. */
     if (sz_saltlen > 0) {
-        sz_saltbin = hex2bin(f[3], (int)strlen(f[3]), sz_salt);
+        sz_saltbin = hex2bin(f[3], (int)sz_saltlen * 2, sz_salt);
         if (sz_saltbin < 0) return 0;
     }
-    if (sz_ivlen == 16 && hex2bin(f[5], 32, sz_iv) != 16) return 0;
     if (nf == 12) {
         int al = (int)strlen(f[11]);
         if (al > 0 && (al & 1) == 0 && al <= 16 &&
@@ -20325,9 +20667,11 @@ static int verify_sha1md5saltpasspepper(const char *hashstr, int hashlen,
     memcpy(buf, salt, saltlen);
     memcpy(buf + saltlen, pass, passlen);
     rhash_msg(RHASH_MD5, (unsigned char *)buf, saltlen + passlen, mh);
-    /* mdxfind layout: buf[0..saltlen-1]=salt, buf[saltlen..saltlen+31]=md5hex,
-     * then pepper at buf[32..32+peplen-1]. SHA1(buf, 32+peplen) */
-    prmd5(mh, buf + saltlen, 32);
+    /* buf[0..31]=md5hex, pepper at buf[32..32+peplen-1]. SHA1(buf, 32+peplen).
+     * Before mdxfind 1.543 the hex was staged at buf+saltlen while the pepper
+     * stayed at the fixed offset 32, so the pepper overwrote the tail of the
+     * digest and the result depended on the salt length. This mirrored that. */
+    prmd5(mh, buf, 32);
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
@@ -22708,6 +23052,7 @@ static void init_hashtypes(void)
     HTV("NTLMH",        0, verify_ntlmh, "a9fdfa038c4b75ebc76dc855dd74f0da:password123");
     HT("SKYPE",        16, HTF_SALTED, compute_skype, "229922b8b59931e6f8bfd223eb006806:chloe01:password123");
     HT("RMD320",       40, 0, compute_rmd320, "e3a8ce82f0e176fd498227b3994bf3b238197c98a9576c7e5741b5a7f22cfab7ef9c2bbf462d2a32:password123");
+    HT("RMD256",       32, 0, compute_rmd256, "afbd6e228b9d8cbbcef5ca2d03e6dba10ac0bc7dcbe4680e1e42d2e975459b65:abc");
     HT("SHA1DRU",      20, 0, compute_sha1dru, "d5e8e759bb5c48d9adb0b0d640ab030cba3e3b01:password123");
     HT("SHA1HESK",     20, HTF_COMPOSED, compute_sha1hesk, "6eae5a30262eba6cad69217528a88c541e22c914:password123");
     /* '+' is the UTF-7 shift character and must be escaped as "+-", so this
@@ -23614,7 +23959,7 @@ static void init_hashtypes(void)
     /* 7D: Other salted */
     HTV("SHA1MD5DSALT", 0, verify_sha1md5dsalt, "0d9e801c8ce150ad07cb69cc220d4cfa2b358d83:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123");
     HTV("SHA1MD5MD5DSALT", 0, verify_sha1md5md5dsalt, "29e4ac58c1233cd331820c19fbd56894c107b4de:1122334455667788:password123");
-    HTV("SHA1MD5SALTPASSPEPPER", 0, verify_sha1md5saltpasspepper, "786aab530907a783e9c25a2c7326ab7907ebf798:1122334455667788 1122334455667788:password123");
+    HTV("SHA1MD5SALTPASSPEPPER", 0, verify_sha1md5saltpasspepper, "0992047fa349ac4e5abb3fef6c0f3f8f8bc6d679:1122334455667788 1122334455667788:password123");
     HTV("SHA1MD5xSALT", 0, verify_sha1md5xsalt, "12d66f224a0fbdf4b7371400f9fece702d4c48a5:1 Salt:password123");
     HTV("SHA1SALTSHA1CAP", 0, verify_sha1saltsha1cap, "963456f4db8d33521a7db3fb42aef0b69fdc346a:1122334455667788:password123");
     HTV("SHA1SALTMD5UCMD5UC", 0, verify_sha1saltmd5ucmd5uc, "f64fcfa112d86a86ae338ea17486b5fdfde00830:1122334455667788:password123");
@@ -24140,6 +24485,7 @@ struct workitem {
     struct hashtype *hint;  /* type hint, or NULL */
     int hint_iter;          /* iteration count from xNN suffix */
     int hash_is_uc;         /* original hex had uppercase */
+    int john_in;            /* line arrived in John $dynamic_N$ form (-J 1) */
     int hash_class;         /* HCLASS_* bitmask for slow queue filtering */
     char *rest;             /* data after hash: (salt:password or just password) */
     int restlen;
@@ -24180,6 +24526,51 @@ static volatile int BatchLimit = BATCH_SIZE;
 static int Numthreads = 1;
 static FILE *Outfp;
 static FILE *Errfp;
+
+/*
+ * -J output mode.  0 = mdxfind format for every line (the default, and the
+ * only behaviour before this option existed).  1 = John format for lines that
+ * arrived in John format, mdxfind for the rest.  2 = John format for every
+ * result that has a John equivalent, mdxfind where none exists.
+ */
+static int JohnOut = 0;
+static int JohnOutFromEnv = 0;   /* mode came from HASHPIPE_OUTPUT */
+static int JohnOutFromFlag = 0;  /* -J was given explicitly; it wins */
+
+/*
+ * John label table, generated by tools/john_map_gen.sh from John's own test
+ * vectors: each row was confirmed by recomputation, and survived a pass in
+ * which hashpipe was restricted to that single type and had to verify every
+ * sampled vector of the format.  Regenerate rather than edit.
+ */
+#include "john_map.h"
+
+static int JohnMapCount(void) { return JOHN_MAP_COUNT; }
+
+/*
+ * hashpipe type label -> John built-in format name, or NULL when the type has
+ * no John equivalent.  The label includes the iteration suffix, because that
+ * is part of the identity: MD5x02 is dynamic_2 and MD5x03 is dynamic_3.
+ *
+ * Linear over 125 rows.  This runs once per emitted line, not per candidate,
+ * so it is nowhere near the hot path.
+ */
+static const char *john_label_for(const char *tname, int iter)
+{
+    char key[80];
+    int i;
+
+    if (iter > 0) {
+        if (snprintf(key, sizeof(key), "%sx%02d", tname, iter) >= (int)sizeof(key))
+            return NULL;
+    } else {
+        if (snprintf(key, sizeof(key), "%s", tname) >= (int)sizeof(key))
+            return NULL;
+    }
+    for (i = 0; i < JOHN_MAP_COUNT; i++)
+        if (!strcmp(JohnMap[i].hptype, key)) return JohnMap[i].john;
+    return NULL;
+}
 static int OutFd;
 static int ErrFd;
 static int *ModeList;                   /* -m: ordered array of type indices */
@@ -25856,6 +26247,32 @@ try_fullpass:
  */
 static int emit_user_matches(struct workitem *item, int *outpos);
 
+/*
+ * Is `name` the display name of a loaded user-defined type?
+ *
+ * The input parser strips a leading "TYPExNN " tag only when it recognises the
+ * type, and recognition went through find_type_by_name(), which resolves names
+ * against Hashtypes[] alone. User-defined types deliberately live outside that
+ * array, so a line tagged USER_<name>xNN never matched, the tag was folded back
+ * into the hash field, and the digest that reached the hashlen filter was
+ * "USER_BWTDTx01 a923f6..." rather than a 32-char digest. The type then could
+ * not verify its own documented test vector, while the SAME triple verified
+ * untagged. Feeding mdxfind output straight into hashpipe is the normal
+ * workflow, and mdxfind tags every line it prints, so this hit every
+ * user-defined result in a harvest.
+ *
+ * This only reports whether the tag names something loaded; it does not set a
+ * hint. emit_user_matches() already tries every loaded user type, so the tag
+ * needs stripping, not steering.
+ *
+ * When nothing is loaded -- no userdef.txt, or MDXFIND_CACHE unset -- this
+ * returns 0, the tag stays unrecognised and the line lands in unresolved. That
+ * is the honest answer: a user-defined type may not be resolvable at all, and
+ * guessing a built-in type for it would risk labelling the line with the wrong
+ * algorithm. Defined after the userdef.h include below; forward-declared here.
+ */
+static int userdef_tag_is_known(const char *name);
+
 static void format_output(struct workitem *item, char *outbuf, int *outlen)
 {
     int pos = 0;
@@ -25863,6 +26280,7 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     const char *pass;
     int passlen;
     int dec_len;
+    const char *johnfmt;
 
     /* Decode $HEX[] on the fly if present; pass through $TESTVEC[] verbatim */
     if (item->passlen >= 9 && strncmp(item->password, "$TESTVEC[", 9) == 0) {
@@ -25879,8 +26297,26 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
         }
     }
 
-    /* Type name + iteration suffix (only when iter > 0, matches mdxfind) */
-    {
+    /*
+     * -J 2 emits John's own canonical form, "$dynamic_N$hash[$salt]:password",
+     * in which the type is carried by the wrapper rather than a leading label.
+     * A type with no John equivalent falls through to mdxfind format, which is
+     * the specified behaviour -- so the output of -J 2 is deliberately mixed
+     * and is NOT uniformly parseable by a John-only consumer.
+     */
+    johnfmt = NULL;
+    if ((JohnOut == 2 || (JohnOut == 1 && item->john_in)) &&
+        item->match_type && item->match_type->name)
+        johnfmt = john_label_for(item->match_type->name, item->match_iter);
+
+    if (johnfmt) {
+        int jl = strlen(johnfmt);
+        outbuf[pos++] = '$';
+        memcpy(outbuf + pos, johnfmt, jl);
+        pos += jl;
+        outbuf[pos++] = '$';
+    } else {
+        /* Type name + iteration suffix (only when iter > 0, matches mdxfind) */
         const char *tname = item->match_type->name;
         int tlen = strlen(tname);
         memcpy(outbuf + pos, tname, tlen);
@@ -25890,21 +26326,22 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
             outbuf[pos++] = '0' + (item->match_iter / 10) % 10;
             outbuf[pos++] = '0' + item->match_iter % 10;
         }
+        outbuf[pos++] = ' ';
     }
 
-    /* Space + hash (preserve original case) */
-    outbuf[pos++] = ' ';
+    /* Hash (preserve original case); the separator was written above */
     memcpy(outbuf + pos, item->hashstr, item->hashlen);
     pos += item->hashlen;
 
-    /* Salt if present (explicit or mode default) */
+    /* Salt if present (explicit or mode default).  John's canonical form
+     * separates the salt with '$'; mdxfind format uses ':'. */
     if (item->salt && item->saltlen > 0) {
-        outbuf[pos++] = ':';
+        outbuf[pos++] = johnfmt ? '$' : ':';
         memcpy(outbuf + pos, item->salt, item->saltlen);
         pos += item->saltlen;
     } else if (ModeDefaultSalt && ModeDefaultSaltLen > 0 &&
              item->match_type && (item->match_type->flags & HTF_SALTED)) {
-        outbuf[pos++] = ':';
+        outbuf[pos++] = johnfmt ? '$' : ':';
         memcpy(outbuf + pos, ModeDefaultSalt, ModeDefaultSaltLen);
         pos += ModeDefaultSaltLen;
     }
@@ -26312,6 +26749,121 @@ static char *batch_strdup(struct batch *b, const char *s, int len)
 
 /* Parse a single line into a workitem.
  * Returns 1 if parsed OK (has colon and valid hex), 0 otherwise. */
+/*
+ * Rewrite John's canonical "$dynamic_N$hash[$salt]" into the bare
+ * "hash[:salt]" this parser already understands, and report the hashpipe type
+ * the wrapper named.
+ *
+ * The hash field is consumed by LENGTH, taken from the mapped type -- not by
+ * splitting on '$'.  John's salts may themselves contain '$' (doc/DYNAMIC's
+ * own example is "$dynamic_6$<hash>$*.*"), so tokenising on the separator
+ * silently truncates them, and a truncated salt produces a confident
+ * unresolved: the exact failure this recogniser exists to prevent.
+ *
+ * A "$HEX$" salt is decoded here, since John uses it precisely to escape the
+ * ':' and whitespace that would otherwise collide with our own line format.
+ *
+ * Returns the mapped type name, or NULL if this is not a John line or names a
+ * format we have no verified mapping for.  1000+ is refused outright: those
+ * are user-defined in john.conf and mean whatever the PRODUCING machine said.
+ */
+static const char *john_unwrap(const char *line, int linelen,
+                               char *out, int outsz, int *outlen)
+{
+    const char *p, *q, *hash, *tail;
+    struct hashtype *ht;
+    char fmt[32], base[80];
+    const char *hptype = NULL;
+    int n = 0, i, hlen, taillen, pos = 0;
+
+    if (linelen < 12 || memcmp(line, "$dynamic_", 9) != 0) return NULL;
+    p = line + 9;
+    for (q = p; q < line + linelen && isdigit((unsigned char)*q); q++)
+        n = n * 10 + (*q - '0');
+    if (q == p || q >= line + linelen || *q != '$') return NULL;
+    if (n >= 1000) return NULL;          /* user-defined; not ours to guess */
+    if (snprintf(fmt, sizeof(fmt), "dynamic_%d", n) >= (int)sizeof(fmt)) return NULL;
+
+    for (i = 0; i < JOHN_MAP_COUNT; i++)
+        if (!strcmp(JohnMap[i].john, fmt)) { hptype = JohnMap[i].hptype; break; }
+    if (!hptype) return NULL;
+
+    /* strip the xNN suffix to find the type, and with it the hash width */
+    if (snprintf(base, sizeof(base), "%s", hptype) >= (int)sizeof(base)) return NULL;
+    { char *xp = base + strlen(base) - 1;
+      while (xp > base && isdigit((unsigned char)*xp)) xp--;
+      if (*xp == 'x' && xp > base) *xp = 0; }
+    ht = find_type_by_name(base);
+    if (!ht || ht->hashlen <= 0) return NULL;
+
+    /*
+     * Find the hash/salt boundary from the DATA, not from the declared type:
+     * dynamic hashes are base-16 (doc/DYNAMIC: "$dynamic_#$base_16_hash"), so
+     * the hash is the leading hex run and the '$' that starts the salt ends it.
+     * This is the same rule the 7z loader follows -- trust the field, not the
+     * label beside it -- and it keeps working when the wrapper names a type
+     * whose width does not match the digest actually present.
+     *
+     * It also handles what splitting on '$' cannot: a salt containing '$',
+     * such as doc/DYNAMIC's own "$dynamic_6$<hash>$*.*" example.
+     */
+    hash = q + 1;
+    for (hlen = 0; hash + hlen < line + linelen; hlen++)
+        if (!isxdigit((unsigned char)hash[hlen])) break;
+    if (hlen == 0 || (hlen & 1)) return NULL;
+    if (ht->hashlen > 0 && hlen != ht->hashlen * 2) {
+        /* digest width disagrees with the format the wrapper named; the
+         * mapping cannot be trusted, so drop the hint and let the full
+         * identification pass decide rather than assert a wrong type. */
+        hptype = NULL;
+    }
+
+    tail    = hash + hlen;
+    taillen = (int)(line + linelen - tail);
+
+    if (hlen + 1 > outsz) return NULL;
+    memcpy(out, hash, hlen);
+    pos = hlen;
+
+    if (taillen > 0 && *tail == '$') {
+        /* salt runs to the last ':' -- everything after that is the password */
+        const char *lc = NULL, *r;
+        for (r = tail; r < line + linelen; r++) if (*r == ':') lc = r;
+        { const char *s = tail + 1;
+          int slen = (int)((lc ? lc : line + linelen) - s);
+          if (slen < 0) return NULL;
+          if (slen >= 5 && memcmp(s, "$HEX$", 5) == 0) {
+              int j;
+              if ((slen - 5) & 1) return NULL;
+              if (pos + 1 + (slen - 5) / 2 >= outsz) return NULL;
+              out[pos++] = ':';
+              for (j = 5; j < slen; j += 2) {
+                  int hi = hexval(s[j]), lo = hexval(s[j + 1]);
+                  if (hi < 0 || lo < 0) return NULL;
+                  out[pos++] = (char)((hi << 4) | lo);
+              }
+          } else {
+              if (pos + 1 + slen >= outsz) return NULL;
+              out[pos++] = ':';
+              memcpy(out + pos, s, slen); pos += slen;
+          }
+          if (lc) {
+              int plen = (int)(line + linelen - lc);
+              if (pos + plen >= outsz) return NULL;
+              memcpy(out + pos, lc, plen); pos += plen;
+          }
+        }
+    } else {
+        if (pos + taillen >= outsz) return NULL;
+        memcpy(out + pos, tail, taillen); pos += taillen;
+    }
+    out[pos] = 0;
+    *outlen = pos;
+    /* "" means: this WAS a John line and was unwrapped, but the named type is
+     * not trustworthy, so no hint.  NULL means: not a John line at all. */
+    return hptype ? hptype : "";
+}
+
 static int parse_line(const char *line, int linelen, struct batch *b, int idx)
 {
     struct workitem *item = &b->items[idx];
@@ -26323,6 +26875,39 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     int ncolons;
 
     memset(item, 0, sizeof(*item));
+
+    /*
+     * John canonical input.  Rewrite "$dynamic_N$hash[$salt]:pass" into the
+     * bare "hash[:salt]:pass" this parser already handles, then parse that.
+     * Recursion is depth 1: the rewritten text never begins with $dynamic_.
+     * The ORIGINAL line is restored afterwards so an unresolved line is echoed
+     * exactly as it arrived.
+     */
+    {
+        char jbuf[MAXLINE];
+        int jlen = 0;
+        const char *jt = john_unwrap(line, linelen, jbuf, sizeof(jbuf), &jlen);
+        if (jt) {
+            int r = parse_line(jbuf, jlen, b, idx);
+            if (r) {
+                char jbase[80];
+                item->john_in = 1;
+                item->line = batch_strdup(b, line, linelen);
+                if (!item->line) return 0;
+                item->linelen = linelen;
+                /* the wrapper named a type: use it as the hint */
+                if (*jt && snprintf(jbase, sizeof(jbase), "%s", jt) < (int)sizeof(jbase)) {
+                    char *xp = jbase + strlen(jbase) - 1;
+                    int it = 0;
+                    while (xp > jbase && isdigit((unsigned char)*xp)) xp--;
+                    if (*xp == 'x' && xp > jbase) { it = atoi(xp + 1); *xp = 0; }
+                    item->hint = find_type_by_name(jbase);
+                    if (item->hint) item->hint_iter = it;
+                }
+            }
+            return r;
+        }
+    }
 
     /* Save full line */
     item->line = batch_strdup(b, line, linelen);
@@ -26366,8 +26951,15 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 item->hint = find_type_by_name(typebuf);
                 if (item->hint) {
                     item->hint_iter = iterval;
+                } else if (userdef_tag_is_known(typebuf)) {
+                    /* A loaded user-defined type. It has no Hashtypes[] entry,
+                     * so there is no hint to set; the tag simply has to come
+                     * off so the digest field is the digest. */
+                    item->hint_iter = iterval;
                 } else {
-                    /* Not a valid type name — treat entire line as hash:pass */
+                    /* Not a valid type name — treat entire line as hash:pass.
+                     * Required, not merely defensive: a password containing a
+                     * space puts a space in the line with no tag present. */
                     p = line;
                 }
             } else {
@@ -27426,6 +28018,20 @@ static const struct { int idx; long long rate; } bench_rates[] = {
 static __thread hx_vm  *UserVMs       = NULL;   /* [userdef_count()] */
 static __thread int     UserVMs_count = 0;      /* allocated length   */
 
+static int userdef_tag_is_known(const char *name)
+{
+    int n, i;
+
+    if (!name || !*name) return 0;
+    n = userdef_count();
+    for (i = 0; i < n; i++) {
+        struct userdef_type *ut = userdef_get_by_index(i);
+        if (ut && ut->dispname[0] && strcasecmp(ut->dispname, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static int emit_user_matches(struct workitem *item, int *outpos)
 {
     int nuser = userdef_count();
@@ -27611,7 +28217,8 @@ static void hx_register_hashpipe_types(void)
 
         hx_func_register(lcname, hx_bridge_hash, ht->hashlen,
                           ht->compute, ht->hashlen,
-                          ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64,
+                          ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64 |
+                          ROLE_CAP_UC,
                           ROLE_HEX);
 
         /* Register underscore variant for hyphenated names (gost-crypto → gost_crypto) */
@@ -27624,7 +28231,8 @@ static void hx_register_hashpipe_types(void)
             if (!hx_func_lookup(altname))
                 hx_func_register(altname, hx_bridge_hash, ht->hashlen,
                                   ht->compute, ht->hashlen,
-                                  ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64,
+                                  ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64 |
+                          ROLE_CAP_UC,
                                   ROLE_HEX);
         }
     }
@@ -27728,9 +28336,48 @@ int main(int argc, char **argv)
     BenchAll = 0;
     BenchSpec = NULL;
 
+    /*
+     * HASHPIPE_OUTPUT selects the same thing as -J, for callers who cannot
+     * reach the command line (wrappers, pipelines).  Read first so that an
+     * explicit -J always wins, announced on stderr so a changed output format
+     * is never a silent surprise -- mdsplit consumes this output, and a
+     * silently switched format mis-files or rejects lines in a way that looks
+     * exactly like an honest negative.  An unrecognised value is fatal rather
+     * than a quiet fall back to the default, for the same reason.
+     */
+    { const char *jenv = getenv("HASHPIPE_OUTPUT");
+      if (jenv) {
+        if      (!strcmp(jenv, "0")) JohnOut = 0;
+        else if (!strcmp(jenv, "1")) JohnOut = 1;
+        else if (!strcmp(jenv, "2")) JohnOut = 2;
+        else {
+          fprintf(stderr, "HASHPIPE_OUTPUT: bad output mode \"%s\" (expected 0, 1 or 2)\n", jenv);
+          exit(1);
+        }
+        JohnOutFromEnv = 1;             /* announced after getopt, if -J did not win */
+      }
+    }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DY")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DYJ:")) != -1) {
         switch (opt) {
+        case 'J':
+            /*
+             * Exact match, never atoi().  getopt consumes the next argument
+             * unconditionally, so "hashpipe -J potfile.txt" would otherwise
+             * hand a filename to the mode parser; atoi() returns 0 for it,
+             * which is a VALID mode, and the run would proceed in mdxfind mode
+             * with the input file eaten as the flag's argument and hashpipe
+             * left reading stdin.  Zero output, no diagnostic.
+             */
+            if      (!strcmp(optarg, "0")) JohnOut = 0;
+            else if (!strcmp(optarg, "1")) JohnOut = 1;
+            else if (!strcmp(optarg, "2")) JohnOut = 2;
+            else {
+                fprintf(stderr, "-J: bad output mode \"%s\" (expected 0, 1 or 2)\n", optarg);
+                exit(1);
+            }
+            JohnOutFromFlag = 1;
+            break;
         case 't':
             Numthreads = atoi(optarg);
             if (Numthreads < 1) Numthreads = 1;
@@ -27822,6 +28469,24 @@ int main(int argc, char **argv)
             exit(1);
         }
     }
+
+    /*
+     * Announce an environment-selected mode only when -J did not override it,
+     * so the line never names a mode that is not in effect.
+     */
+    if (JohnOutFromEnv && !JohnOutFromFlag)
+        fprintf(stderr, "hashpipe: output mode %d (from HASHPIPE_OUTPUT)\n", JohnOut);
+    /*
+     * Modes 1 and 2 need the John label table, which is not wired yet, so both
+     * currently fall back to mdxfind format for every line.  That fallback IS
+     * the specified behaviour when no John equivalent exists -- but say so,
+     * rather than let a caller believe John output happened.  The notice goes
+     * away on its own once the table is populated.
+     */
+    if (JohnOut > 0 && JohnMapCount() == 0)
+        fprintf(stderr, "hashpipe: -J %d selected but no John label table is built in; "
+                        "emitting mdxfind format\n", JohnOut);
+
 
     /* Initialize hash types (needed for both benchmark and normal mode) */
     yarn_prefix = "hashpipe";
