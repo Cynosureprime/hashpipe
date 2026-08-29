@@ -14,10 +14,120 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.113 2026/08/29 13:53:50 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.116 2026/08/29 18:32:27 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.116  2026/08/29 18:32:27  dlr
+ * Tally unresolved formats at all three exits, not just one.
+ *
+ * 1.115 added the tally at a single exit. Real extractor output showed that was
+ * the wrong one for exactly the lines it exists to explain.
+ *
+ * Containers were built with known passwords and put through John own tools --
+ * zip2john on a ZipCrypto archive and on an AES-256 archive, gpg2john on a
+ * symmetric message. Feeding those three vectors to hashpipe, only $gpg$ appeared
+ * in the tally. The other two were echoed as unresolved and counted nowhere.
+ *
+ * The discriminator is colons. A John container vector carries several of its
+ * own: the real $pkzip$ line has five and the $zip2$ line four, against one for
+ * $gpg$. Probing synthetically, one colon tallied and two or more did not, which
+ * located a second unresolved exit in the worker, the salted path, that 1.115 did
+ * not hook. There is also a third in the reader for lines that fail to parse.
+ * All three now record.
+ *
+ * Both directions verified. The three real vectors are now reported:
+ *
+ *   hashpipe:   $gpg$          1 line(s)
+ *   hashpipe:   $pkzip$        1 line(s)
+ *   hashpipe:   $zip2$         1 line(s)
+ *
+ * and the negative controls still produce nothing: a genuinely wrong password, a
+ * supported container that verifies, and colonless junk.
+ *
+ * The lesson is about the test, not the code. 1.115 was verified with container
+ * strings I made up, which had one colon each because that is what I happened to
+ * type, and it passed. It took vectors from the actual extractors to show that a
+ * whole class of container line was invisible. Reading the argument parser was
+ * not enough either; only running the tools produced input shaped like the real
+ * thing.
+ *
+ * Regression: hashpipe -T 1001 passed 0 failed 0 skipped; john_mode_test PASS;
+ * userdef_roundtrip_test PASS; usage_option_audit PASS.
+ *
+ * Revision 1.115  2026/08/29 18:19:55  dlr
+ * Report container formats no type verified, instead of burying them.
+ *
+ * A line whose format this build cannot verify landed in unresolved looking
+ * exactly like a wrong password: same stream, same shape, no diagnostic. So
+ *
+ *   $odf$*0*0*1024*...:pw          unsupported format
+ *   5f4dcc3b...:wrongpw            genuinely wrong password
+ *
+ * were indistinguishable, and the natural reading of a silent run is "my
+ * passwords are wrong" rather than "this tool has no verifier for that format".
+ * The three named in the plan, $odf$, $pkzip$ and $gpg$, all behave that way, and
+ * none of ODF, PKZIP or GPG is a registered type.
+ *
+ * A run now ends with a tally of the formats that went unresolved:
+ *
+ *   hashpipe: no registered type verified these formats; their lines were
+ *   hashpipe: reported unresolved, which is not the same as a wrong password:
+ *   hashpipe:   $odf$          2 line(s)
+ *   hashpipe:   $pkzip$        1 line(s)
+ *
+ * The unresolved lines themselves are unchanged and still go to the error stream,
+ * so nothing downstream breaks; this is added information, not a changed
+ * contract, and it does not refuse to compute anything.
+ *
+ * The design point worth keeping: it does NOT carry a list of formats believed
+ * unsupported. Such a list goes stale the moment one is implemented, and would
+ * then assert something false. Instead it records the leading $name$ token of
+ * lines that ACTUALLY went unresolved, so implementing a format stops its lines
+ * being counted with no table to remember to update. Verified in that direction
+ * too: the supported 7ZIP vector verifies and produces no tally at all, and a
+ * wrong password produces no tally, only the echoed line.
+ *
+ * Bounded by construction: at most 24 distinct formats and 32 characters of name,
+ * recorded under the existing ErrLock, and only for lines that both begin with a
+ * dollar and have a closing dollar within a sane distance.
+ *
+ * Regression: hashpipe -T 1001 passed 0 failed 0 skipped; john_mode_test PASS;
+ * userdef_roundtrip_test PASS; usage_option_audit PASS.
+ *
+ * Revision 1.114  2026/08/29 18:00:59  dlr
+ * -p now decodes $HEX[]; document the eleven options the usage omitted.
+ *
+ * Two changes.
+ *
+ * -p did not decode a $HEX[] wrapper, so hashpipe and the standalone hx command,
+ * running the same language on the same input, disagreed:
+ *
+ *   hashpipe -X "md5(pass)" -p "$HEX[616c706861]"   md5 of the literal text
+ *   hx       -p "$HEX[616c706861]" "md5(pass)"      md5 of alpha
+ *
+ * Every other password channel here decodes it, including the verify path, using
+ * the decode_hex_password that already existed a few thousand lines away. The
+ * wrapper exists so a password containing a colon, a newline or a non-UTF-8 byte
+ * can be passed safely, which makes the channel that takes a password on the
+ * command line the one that needs it most. All three now agree.
+ *
+ * Usage went from 14 of 25 options to 25 of 25. The missing ones were -D -F -G
+ * -J -L -P -S -X -Y -p and -u, and two mattered on their own. -L governs whether
+ * an expensive verify is attempted at all: below the threshold hashpipe declines
+ * silently and reports the line as unresolved, which is indistinguishable from a
+ * genuine miss, and that behaviour is now stated in the option itself rather than
+ * being folklore. -Y prints the user-defined type load report and was the
+ * diagnostic that identified the USER_ tag defect earlier this week; it was
+ * findable only by reading the source.
+ *
+ * The hx expression options now have their own section, which also makes visible
+ * that -s is dual use, the statistics file in normal mode and the salt in hx
+ * mode. The code has always said so in a comment; the usage never did.
+ *
+ * Regression: hashpipe -T 1001 passed 0 failed 0 skipped; john_mode_test PASS;
+ * userdef_roundtrip_test PASS; usage_option_audit PASS for both programs.
+ *
  * Revision 1.113  2026/08/29 13:53:50  dlr
  * Resolve USER_<name> input tags, so a user type can verify its own output.
  *
@@ -24600,6 +24710,69 @@ static long long Verified;
 static long long Unresolved;
 static long long Nocolon;
 
+/* ---- Unresolved container-format tally ------------------------------------
+ *
+ * A line whose format this build cannot verify lands in unresolved looking
+ * exactly like a wrong password: same stream, same shape, no diagnostic. So
+ * "$odf$...:pw" and a genuinely bad guess were indistinguishable, and the
+ * natural reading of a silent run is "my passwords are wrong" rather than
+ * "this tool has no verifier for that format".
+ *
+ * Rather than carry a list of formats believed unsupported, which goes stale
+ * the moment one is implemented, this records the leading $name$ token of
+ * lines that ACTUALLY went unresolved. It is therefore correct by
+ * construction: implement a format and its lines stop being counted here
+ * without anyone remembering to update a table.
+ */
+#define UFMT_MAX   24
+#define UFMT_NAMEL 32
+static char      UfmtName[UFMT_MAX][UFMT_NAMEL];
+static long long UfmtCount[UFMT_MAX];
+static int       UfmtN;
+
+/* Caller must hold ErrLock. */
+static void record_unresolved_format(const char *line, int len)
+{
+    char tok[UFMT_NAMEL];
+    int i, n;
+
+    if (len < 3 || line[0] != '$')
+        return;
+    for (n = 1; n < len && n < UFMT_NAMEL - 2; n++)
+        if (line[n] == '$')
+            break;
+    if (n >= len || line[n] != '$')
+        return;                      /* no closing $ within a sane distance */
+    memcpy(tok, line, (size_t)n + 1);
+    tok[n + 1] = '\0';
+
+    for (i = 0; i < UfmtN; i++)
+        if (strcmp(UfmtName[i], tok) == 0) {
+            UfmtCount[i]++;
+            return;
+        }
+    if (UfmtN >= UFMT_MAX)
+        return;
+    strcpy(UfmtName[UfmtN], tok);
+    UfmtCount[UfmtN] = 1;
+    UfmtN++;
+}
+
+static void report_unresolved_formats(void)
+{
+    int i;
+
+    if (!UfmtN)
+        return;
+    fprintf(stderr,
+        "hashpipe: no registered type verified these formats; their lines were\n"
+        "hashpipe: reported unresolved, which is not the same as a wrong password:\n");
+    for (i = 0; i < UfmtN; i++)
+        fprintf(stderr, "hashpipe:   %-14s %lld line(s)\n",
+                UfmtName[i], UfmtCount[i]);
+}
+
+
 static FILE *Statfp;            /* -s stats output file, NULL if not requested */
 
 /* Global hot-hit accumulator: atomically tracks hits per (type_idx, salt_len) pair */
@@ -26541,6 +26714,9 @@ static void worker(void *dummy)
                 /* Unresolved → stderr (unless a user-defined type already matched) */
                 if (!umatched[i]) {
                     int elen = b->items[i].linelen;
+                    possess(ErrLock);
+                    record_unresolved_format(b->items[i].line, elen);
+                    release(ErrLock);
                     if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                         possess(ErrLock);
                         write(ErrFd, WS->errbuf, errpos);
@@ -26676,6 +26852,9 @@ static void worker(void *dummy)
             /* Unresolved → stderr (original line), unless a user-defined type matched */
             if (!umatched[hard[i]]) {
                 int elen = item->linelen;
+                possess(ErrLock);
+                record_unresolved_format(item->line, elen);
+                release(ErrLock);
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                     possess(ErrLock);
                     write(ErrFd, WS->errbuf, errpos);
@@ -27465,9 +27644,19 @@ static void process_input(FILE *fp)
 
         /* Try to parse */
         if (!parse_line(linebuf, len, b, b->count)) {
-            /* No colon or invalid → stderr */
+            /* No colon or invalid → stderr.
+             *
+             * Tally the format here as well as in the worker. A container
+             * vector from a John extractor frequently carries several colons
+             * of its own -- a real zip2john $pkzip$ line has five and a $zip2$
+             * line four -- so it never reaches the worker at all; it fails to
+             * parse and leaves through here. Hooking only the worker meant the
+             * tally saw single-colon formats such as $gpg$ and silently missed
+             * exactly the multi-colon container lines it exists to explain.
+             */
             Nocolon++;
             possess(ErrLock);
+            record_unresolved_format(linebuf, len);
             linebuf[len] = '\n';
             write(ErrFd, linebuf, len + 1);
             release(ErrLock);
@@ -27888,8 +28077,27 @@ static void usage(int brief)
         "  -b S   Benchmark selected types (e.g., -b e1-10,e15)\n"
         "  -B     Benchmark all registered types\n"
         "  -T     Run self-tests on all registered types\n"
+        "  -G     As -T, but also emit the generated example vectors\n"
+        "  -L N   Max estimated seconds for a single verify (default 1000).\n"
+        "         Below this, an expensive verify is DECLINED and the line is\n"
+        "         reported unresolved, which looks exactly like a genuine miss\n"
+        "  -J N   Output format: 0 mdxfind, 1 John for John input, 2 John where\n"
+        "         an equivalent exists\n"
+        "  -D     Disassemble the compiled hx program and exit\n"
+        "  -Y     Load userdef.txt, print the load report, and exit. Without -Y\n"
+        "         the same file loads silently. Needs MDXFIND_CACHE set\n"
         "  -V     Print version and exit\n"
         "  -h     Print this help and list all hash types\n"
+        "\n"
+        "hx expression mode:\n"
+        "  -X S   Evaluate expression S against each password\n"
+        "  -F F   Read the hx program from file F (NOT a hash-file option)\n"
+        "  -p S   Evaluate for this single password; without it, passwords are\n"
+        "         read one per line from stdin. $HEX[..] is decoded\n"
+        "  -s S   Bind the salt variable\n"
+        "  -S S   Bind the salt2 variable\n"
+        "  -P S   Bind the pepper variable\n"
+        "  -u S   Bind the user variable\n"
         "\n"
         "Input: lines of [TYPE[xNN] ]hash[:salt]:password\n"
         "Output (stdout): TYPE[xNN] hash[:salt]:password  (verified)\n"
@@ -28270,9 +28478,35 @@ static int run_hx_mode(const char *expr, const char *hx_file,
     hx_vm_init(&vm, prog);
 
     if (hx_pass) {
-        /* single password mode */
+        /* single password mode.
+         *
+         * Decode a $HEX[...] wrapper first. Every other password channel in
+         * this program decodes it -- the verify path does, and so does the
+         * standalone hx command running this same language -- so -p not
+         * decoding made the two disagree on identical input:
+         *
+         *   hashpipe -X 'md5(pass)' -p '$HEX[616c706861]'   md5 of the literal
+         *   hx        -p '$HEX[616c706861]' 'md5(pass)'     md5 of "alpha"
+         *
+         * The wrapper exists precisely so a password containing a colon, a
+         * newline or a non-UTF-8 byte can be passed safely, so the channel
+         * that takes a password on the command line is the one that needs it
+         * most. A password that is genuinely the literal text can still be
+         * given by any means that does not spell $HEX[...].
+         */
+        unsigned char hexbuf[MAXLINE];
+        int hxlen = decode_hex_password(hx_pass, (int)strlen(hx_pass),
+                                        hexbuf, (int)sizeof hexbuf);
+        const char *pass_p = hx_pass;
+        int pass_l = (int)strlen(hx_pass);
+
+        if (hxlen >= 0) {
+            pass_p = (const char *)hexbuf;
+            pass_l = hxlen;
+        }
+
         hx_val result = hx_vm_run(&vm,
-            hx_pass, strlen(hx_pass),
+            pass_p, pass_l,
             hx_salt, strlen(hx_salt),
             hx_salt2, strlen(hx_salt2),
             hx_pepper, strlen(hx_pepper),
@@ -28937,6 +29171,8 @@ int main(int argc, char **argv)
         fprintf(Statfp, "\n");
         fclose(Statfp);
     }
+
+    report_unresolved_formats();
 
     /* Flush output */
     if (Outfp != stdout) fclose(Outfp);
