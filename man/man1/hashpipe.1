@@ -1,0 +1,377 @@
+.\" hashpipe(1) -- man-macro reference page
+.\" $Revision: 1.3 $
+.\" $Log: hashpipe.1,v $
+.\" Revision 1.3  2026/08/29 17:35:32  dlr
+.\" Two additions. Show the $HEX[] wrapper on output with a verified pair of equivalent invocations, plain colon-bearing password and hex-wrapped, both yielding the same line, and state that the password is everything after the preceding field so a colon parses. Separately, record that -X mode does NOT decode $HEX[] on -p, unlike the standalone hx command running the same language: a wrapped argument is hashed as the literal text. Verified -- hashpipe -X md5(pass) -p $HEX[616c706861] returns md5 of the literal string, while hx -p with the same argument returns md5 of alpha.
+.\"
+.\" Revision 1.2  2026/08/29 17:16:00  dlr
+.\" Remove the redundant .PP immediately after .SH EXAMPLES. mandoc reports it as "skipping paragraph macro: PP after SH"; groff does not flag it at all, which is how it survived a groff-only check. macOS and the BSDs render with mandoc, so mandoc is what most readers of these pages actually see. No rendered output changes.
+.\"
+.\" Revision 1.1  2026/08/29 16:30:16  dlr
+.\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
+.\"
+.TH HASHPIPE 1 "2026-08-29" "hashpipe 1.113" "Password Recovery"
+.SH NAME
+hashpipe \- verify and identify hash/password pairs
+.SH SYNOPSIS
+.B hashpipe
+.RI [ options ]
+.RI [ file " ...]"
+.br
+.B hashpipe
+.B \-T
+.RI [ options ]
+.br
+.B hashpipe
+.BI \-X " expression"
+.RI [ options ]
+.br
+.B hashpipe
+.B \-h
+.SH DESCRIPTION
+.B hashpipe
+answers one question per input line: does this password produce this hash,
+and under which algorithm?  It is a verifier and identifier, not a searcher.
+Where
+.BR mdxfind (1)
+runs a candidate list against a hash list,
+.B hashpipe
+takes candidate/hash pairs that are already paired up and confirms or
+refutes them.
+.PP
+Input is read from the named
+.IR file s,
+or from standard input if none are given, as lines of the form
+.PP
+.RS
+.RI [ TYPE [\fBx\fINN\fR]\  ] hash [\fB:\fIsalt\fR] \fB:\fIpassword
+.RE
+.PP
+The leading type label is optional.  When it is absent
+.B hashpipe
+identifies the type itself by trying every registered algorithm whose
+digest length matches, then \(em on the
+.I hard pass
+\(em by iterating the unsalted, non-composed types from depth 2 up to the
+.B \-i
+limit.
+.PP
+Verified lines are written to standard output in the same shape, with the
+type and iteration depth filled in.  Lines that could not be resolved are
+written unchanged to standard error.  The two streams are the result: a
+clean split of solved from unsolved.
+.PP
+The password is everything after the field that precedes it, so a password
+may itself contain a colon and still parse.  On output such a password is
+wrapped in
+.BI $HEX[ ... ]
+so the emitted line stays unambiguous, and the wrapped form is equally
+accepted on input.  These two invocations are equivalent, and both produce
+the same line:
+.PP
+.RS
+.nf
+$ echo '48c83cd71d44bbe192c77258b567c417:pass:word' | hashpipe \-m e1
+MD5x01 48c83cd71d44bbe192c77258b567c417:$HEX[706173733a776f7264]
+
+$ echo '48c83cd71d44bbe192c77258b567c417:$HEX[706173733a776f7264]' \e
+      | hashpipe \-m e1
+MD5x01 48c83cd71d44bbe192c77258b567c417:$HEX[706173733a776f7264]
+.fi
+.RE
+.PP
+.B hashpipe
+is CPU-only.  It has no GPU path and is not intended to acquire one.
+.SH OPTIONS
+.SS "Type selection and search depth"
+.TP
+.BI \-m " spec"
+Restrict the search to the types in
+.IR spec ,
+a comma-separated list of bare
+.BR hashcat (1)
+mode numbers,
+.BI e N
+internal indices, and
+.BI e N \- e M
+ranges.  The token
+.B auto
+anywhere in the list re-enables full auto-detection as a fallback after the
+listed types fail.  Restricting the type set is the single most effective
+way to speed up a large run.
+.TP
+.BI \-i " count"
+Maximum iteration depth for the hard pass.  Default 128.
+.TP
+.BI \-q " count"
+Iteration step size for types that carry their own internal iteration
+function.  Default 128.
+.TP
+.BI \-L " seconds"
+Maximum estimated seconds for a single verify.  Default 1000.
+.IP
+A verify whose estimated cost exceeds this limit is
+.I skipped,
+and a skipped verify is reported exactly like a failed one: the line goes to
+standard error as unresolved and the run reports nothing found.  There is no
+distinguishing diagnostic.  Memory-hard and high-round types \(em scrypt,
+Argon2, high-cost bcrypt, and anything with a parsed cost far above its
+benchmark cost \(em routinely trip the default and need
+.B \-L
+raised explicitly.
+.IP
+The tell is wall-clock time.  If a verify of an expensive hash returns in
+about 0.00 seconds, it did not run.  Time a single candidate before
+believing any negative result on a slow type.
+.BR mdxfind (1)
+has no such guard, so its negative results on these types are real.
+.TP
+.BI \-t " count"
+Worker thread count.  Defaults to the number of CPUs.
+.SS "Output routing"
+.TP
+.BI \-o " file"
+Append verified results to
+.IR file .
+Default is standard output.
+.TP
+.BI \-O " file"
+As
+.BR \-o ,
+but truncate
+.I file
+first.
+.TP
+.BI \-e " file"
+Append unresolved lines to
+.IR file .
+Default is standard error.
+.TP
+.BI \-E " file"
+As
+.BR \-e ,
+but truncate first.
+.TP
+.BI \-s " file"
+Append run statistics to
+.IR file .
+In hx expression mode this same option supplies the salt instead.
+.TP
+.BI \-J " 0|1|2"
+Output format.
+.B 0
+is mdxfind format,
+.B 1
+is John the Ripper format for input that arrived in John format, and
+.B 2
+is John format wherever a John equivalent exists.  The argument is matched
+exactly; anything else is a fatal error rather than a silent fallback to
+mode 0.  When a selected John mode has no label table compiled in,
+.B hashpipe
+says so on standard error and emits mdxfind format.
+.SS "Self-test and benchmark"
+.TP
+.B \-T
+Run the built-in self-tests over every registered type and report pass and
+fail counts.  This is the first thing to run after a build.
+.TP
+.B \-G
+As
+.BR \-T ,
+but also emit the generated example vectors.
+.TP
+.B \-B
+Benchmark every registered type.
+.TP
+.BI \-b " spec"
+Benchmark only the types in
+.IR spec ,
+using the same syntax as
+.BR \-m .
+.SS "hx expression mode"
+These options turn
+.B hashpipe
+into a hash calculator driven by the
+.BR hx (1)
+expression language.  In this mode
+.B hashpipe
+computes and prints; it reads no hash file and performs no comparison.
+.TP
+.BI \-X " expression"
+Evaluate
+.I expression
+against each password.
+.TP
+.BI \-F " file"
+Read the hx program from
+.I file
+instead of the command line.  Note that this is
+.I not
+a hash-file option; it does not correspond to
+.BR "mdxfind \-F" .
+.TP
+.BI \-p " password"
+Evaluate for this single password.  Without
+.BR \-p ,
+passwords are read one per line from standard input.
+.IP
+Unlike the rest of
+.BR hashpipe ,
+and unlike the standalone
+.BR hx (1)
+command, this mode does
+.I not
+decode
+.BI $HEX[ ... ]
+on the password.  A hex-wrapped argument is hashed as the literal text
+.RB \(lq $HEX[...] \(rq,
+brackets and all.  Pass the raw bytes instead, or use
+.BR hx (1)
+if the input has to be hex-wrapped.
+.TP
+.BI \-s " salt"
+Bind the
+.B salt
+variable.
+.TP
+.BI \-S " salt2"
+Bind the
+.B salt2
+variable.
+.TP
+.BI \-P " pepper"
+Bind the
+.B pepper
+variable.
+.TP
+.BI \-u " user"
+Bind the
+.B user
+variable.
+.TP
+.B \-D
+Disassemble the compiled hx program and exit without running it.
+.SS "Information"
+.TP
+.B \-V
+Print the version and exit 0.
+.TP
+.B \-Y
+Load
+.BR userdef.txt ,
+print the load report, and exit.  Without
+.B \-Y
+the same file is loaded silently, so that pipe output is never polluted.
+If
+.B MDXFIND_CACHE
+is unset, nothing is loaded and
+.B \-Y
+says so.
+.TP
+.B \-h
+Print the usage summary followed by the full type table \(em internal
+.BI e N
+index, flags, name, and corresponding
+.BR hashcat (1)
+mode numbers.
+.IP
+Type flags are
+.B s
+salted,
+.B u
+uppercase-hex variant,
+.B n
+NTLM,
+.B c
+composed,
+.B v
+non-hex, and
+.B V
+has a dedicated verify function.
+.SH "USER-DEFINED TYPES"
+.B hashpipe
+reads the same
+.B userdef.txt
+that
+.BR mdxfind (1)
+does, from the directory component of
+.BR MDXFIND_CACHE ,
+and identifies the types it declares.  With
+.B MDXFIND_CACHE
+unset, no user-defined types load at all and lines using them fall through
+to unresolved with no diagnostic.
+.PP
+Bulk validation through user-defined types feeds an empty salt, so only
+unsalted hx expressions can be validated this way.  The
+.B \-X
+and
+.B \-F
+options do not validate at all; they only compute.
+.SH ENVIRONMENT
+.TP
+.B HASHPIPE_OUTPUT
+Selects the output format for callers that cannot pass
+.BR \-J .
+Same values.  An explicit
+.B \-J
+wins; when the environment variable is the one in effect,
+.B hashpipe
+announces it on standard error.
+.TP
+.B MDXFIND_CACHE
+Path whose directory component holds
+.BR userdef.txt .
+.SH "EXIT STATUS"
+0 on normal completion, 1 on a usage or argument error.
+.B \-V
+exits 0.
+.SH EXAMPLES
+Confirm a build is sound:
+.PP
+.RS
+.nf
+hashpipe \-T
+.fi
+.RE
+.PP
+Split a mixed pot file into verified and unverified halves:
+.PP
+.RS
+.nf
+hashpipe \-O verified.txt \-E unresolved.txt potfile.txt
+.fi
+.RE
+.PP
+Identify unlabelled pairs, restricted to three plausible types, with
+auto-detect as a fallback:
+.PP
+.RS
+.nf
+hashpipe \-m e1,e8,1000,auto < pairs.txt
+.fi
+.RE
+.PP
+Verify an expensive memory-hard type.  Without
+.BR \-L ,
+this reports nothing found in no time at all:
+.PP
+.RS
+.nf
+hashpipe \-m e1001 \-L 100000 < cmiyc.txt
+.fi
+.RE
+.PP
+Compute a compound hash for one password:
+.PP
+.RS
+.nf
+hashpipe \-X 'sha1(md5(pass) . salt)' \-s deadbeef \-p password123
+.fi
+.RE
+.SH "SEE ALSO"
+.BR mdxfind (1),
+.BR hx (1),
+.BR mdsplit (1),
+.BR getpass (1)
+.SH AUTHOR
+Waffle.
