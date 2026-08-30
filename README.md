@@ -11,7 +11,9 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 ## Usage
 
 ```
-hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]
+hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-J N] [-o|-O outfile] [-e|-E errfile] [-s statfile]
+         [-b spec] [-B] [-T] [-G] [-D] [-Y] [-V] [-h] [file ...]
+hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u user]
 ```
 
 ### Options
@@ -20,7 +22,7 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [
 
 **`-i N`** — Max iteration count for hard pass (default: 128)
 
-**`-q N`** — Maximum internal hash iteration (default: 128)
+**`-q N`** — Iteration step size (reserved, default: 128)
 
 **`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect
 
@@ -34,7 +36,7 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [
 
 **`-s F`** — Append statistics to file.  Writes three tables at exit: hot list hits (per algorithm/salt-length pair), per-algorithm try counts, and per-algorithm solution counts.  Stats are collected unconditionally; this option controls whether they are written out.
 
-**`-L secs`** — Maximum estimated time (in seconds) for a single iterated verify operation (default: 1000.0, effectively unlimited).  When an input hash specifies an iteration count that would exceed this limit (estimated from benchmark rates), the verify is skipped.  Useful for preventing misidentified hashes with extreme iteration counts from causing long stalls.
+**`-L secs`** — Maximum estimated time, in seconds, for a single iterated verify (default: 1000).  When an input hash specifies an iteration count that would exceed this limit — estimated from the benchmark rates — the verify is skipped.  This prevents a misidentified hash with an extreme iteration count from stalling the run.  Note that a skipped verify is reported as unresolved on stderr with no diagnostic distinguishing it from a genuine non-match, so a run that finds nothing may simply have declined to try; raise the limit when working with deliberately expensive types.
 
 **`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
 
@@ -42,13 +44,19 @@ hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-o|-O outfile] [-e|-E errfile] [
 
 **`-T`** — Run self-tests on all registered types
 
+**`-G`** — As `-T`, but also emit the generated example vectors
+
+**`-D`** — Disassemble the compiled hx program and exit
+
+**`-Y`** — Load `userdef.txt`, print the load report, and exit.  Without `-Y` the same file loads silently.  Requires `MDXFIND_CACHE` to be set
+
 **`-V`** — Print version and exit
 
 **`-h`** — Print help and list all supported hash types
 
 **`-X 'expr'`** — Evaluate an hx (hash expression language) expression.  Reads passwords from stdin and outputs the computed hash for each.  See [hx Language](#hx-hash-expression-language) below.
 
-**`-X -f file`** — Read hx script from file instead of the command line
+**`-F file`** — Read the hx program from a file instead of the command line.  This is not a hash-file option
 
 **`-p pass`** — Single password (used with `-X` instead of reading stdin)
 
@@ -230,7 +238,7 @@ Iterated verify functions (bcrypt, PBKDF2, scrypt, sha256crypt, etc.) estimate t
 Hash types use one of three verification strategies:
 
 - **Direct compute**: compute the hash from the password and compare the binary result against the decoded hex input.  Used for simple types (MD5, SHA1, SHA256, etc.) and composed chains.
-- **Chain compute**: a chain of hash steps defined declaratively (innermost to outermost), supporting UC (uppercase hex), NTLM (UTF-16LE), salt insertion, and raw binary passes.  Covers hundreds of composed types like `SHA1(MD5($pass))`.
+- **Chain compute**: a chain of hash steps defined declaratively (innermost to outermost), supporting UC (uppercase hex), NTLM (UTF-16LE), salt insertion, and raw binary passes.  Covers hundreds of composed types like `sha1(md5(pass))`.
 - **Verify function**: a custom function that takes the hash string and password, returning match/no-match.  Used for non-hex formats where the hash encodes its own parameters: bcrypt (cost factor in hash), PHPBB3, APACHE-SHA, APR1.
 
 ### Per-hashlen Candidate Caches
@@ -248,7 +256,7 @@ hashpipe includes **hx**, a domain-specific language for describing, computing, 
 echo password | hashpipe -X 'md5(pass)'
 5f4dcc3b5aa765d61d8327deb882cf99
 
-# Salted compound hash (mdxfind type e385)
+# Salted compound hash (mdxfind type e587, SHA1MD5SALT)
 echo password | hashpipe -X 'sha1(md5(pass) . salt)' -s 12345
 
 # NTLM
@@ -299,62 +307,86 @@ The full hx language specification is available at [www.mdxfind.com/hx.pdf](http
 
 hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
 
+### Notation
+
+Algorithms below are written as hx expressions.  The bound variables are `pass`, `salt`,
+`salt2`, `user`, and `pepper` — supplied by `-p`, `-s`, `-S`, `-u`, and `-P` respectively.
+
+hashcat and John write the same thing with a `$` sigil, as `md5($pass.$salt)`.  hx has no
+sigil, and the `$` form is worth avoiding rather than merely wrong: the lexer prints
+`hx:1: unexpected character '$'` on standard error, discards the character, and carries on.
+So `md5($pass.$salt)` still exits 0 and still prints the correct hash, and with standard error
+redirected the run looks clean — while `md5($p)` prints a hash too, of the empty string.  In
+this document `$` appears only where it is a literal part of a hash, such as the `$1$` of
+md5crypt or the `$HEX[...]` wrapper.
+
+Anything in backticks in the tables below is a real hx expression that runs as written under
+`hashpipe -X`.  Each was checked by computing a hash with it and feeding the result back
+through `hashpipe -m` for that type.  A type whose definition is a format rather than a
+composition carries a plain-text description instead.  Where an expression takes a cost or a
+round count, a literal is shown; the type itself reads that value out of the hash.
+
 ### Common types
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e1 | MD5 | `md5($pass)` |
-| e2 | MD5UC | `md5($pass)` (uppercase hex) |
-| e3 | MD4 | `md4($pass)` |
-| e4 | MD2 | `md2($pass)` |
-| e8 | SHA1 | `sha1($pass)` |
-| e9 | SHA224 | `sha224($pass)` |
-| e10 | SHA256 | `sha256($pass)` |
-| e11 | SHA384 | `sha384($pass)` |
-| e12 | SHA512 | `sha512($pass)` |
-| e369 | NTLM | `md4(utf16le($pass))` |
+| e1 | MD5 | `md5(pass)` |
+| e2 | MD5UC | `md5_uc(pass)` |
+| e3 | MD4 | `md4(pass)` |
+| e4 | MD2 | `md2(pass)` |
+| e8 | SHA1 | `sha1(pass)` |
+| e9 | SHA224 | `sha224(pass)` |
+| e10 | SHA256 | `sha256(pass)` |
+| e11 | SHA384 | `sha384(pass)` |
+| e12 | SHA512 | `sha512(pass)` |
+| e369 | NTLM | `md4(utf16le(pass))` |
 
 ### Salted types
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e31 | MD5SALT | `md5(hex(md5($pass)).$salt)` |
-| e373 | MD5PASSSALT | `md5($pass.$salt)` |
-| e394 | MD5SALTPASS | `md5($salt.$pass)` |
-| e385 | SHA1SALTPASS | `sha1($salt.$pass)` |
-| e405 | SHA1PASSSALT | `sha1($pass.$salt)` |
-| e412 | SHA256SALTPASS | `sha256($salt.$pass)` |
-| e413 | SHA256PASSSALT | `sha256($pass.$salt)` |
-| e386 | SHA512PASSSALT | `sha512($pass.$salt)` |
-| e388 | SHA512SALTPASS | `sha512($salt.$pass)` |
-| e439 | MSCACHE | `md4(md4(utf16le($pass)).$salt)` |
-| e857 | SKYPE | `md5($pass.\|$salt)` |
+| e31 | MD5SALT | `md5(md5(pass) . salt)` |
+| e373 | MD5PASSSALT | `md5(pass . salt)` |
+| e394 | MD5SALTPASS | `md5(salt . pass)` |
+| e385 | SHA1SALTPASS | `sha1(salt . pass)` |
+| e405 | SHA1PASSSALT | `sha1(pass . salt)` |
+| e587 | SHA1MD5SALT | `sha1(md5(pass) . salt)` |
+| e412 | SHA256SALTPASS | `sha256(salt . pass)` |
+| e413 | SHA256PASSSALT | `sha256(pass . salt)` |
+| e386 | SHA512PASSSALT | `sha512(pass . salt)` |
+| e388 | SHA512SALTPASS | `sha512(salt . pass)` |
+| e439 | MSCACHE | `md4(md4_bin(utf16le(pass)) . utf16le(lower(user)))` |
+| e857 | SKYPE | `md5(user . fromhex("0a") . "skyper" . fromhex("0a") . pass)` |
 
 ### Composed types (selected)
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e160 | SHA1MD5 | `sha1(hex(md5($pass)))` |
-| e178 | MD5SHA1 | `md5(hex(sha1($pass)))` |
-| e123 | MD5MD5PASS | `md5(hex(md5($pass)).$pass)` |
-| e188 | MD5SHA1MD5 | `md5(hex(sha1(hex(md5($pass)))))` |
-| e497 | MD4UTF16MD5 | `md4(utf16le(hex(md5($pass))))` |
-| e368 | MD5NTLM | `md5(hex(md4(utf16le($pass))))` |
-| e251 | SHA256SHA1 | `sha256(hex(sha1($pass)))` |
-| e786 | NTLMH | `md4(utf16le($pass))` (dual-mode, see note below) |
+| e160 | SHA1MD5 | `sha1(md5(pass))` |
+| e178 | MD5SHA1 | `md5(sha1(pass))` |
+| e123 | MD5MD5PASS | `md5(md5(pass) . pass)` |
+| e188 | MD5SHA1MD5 | `md5(sha1(md5(pass)))` |
+| e497 | MD4UTF16MD5 | `md4(utf16le(md5(pass)))` |
+| e368 | MD5NTLM | `md5(md4(utf16le(pass)))` |
+| e251 | SHA256SHA1 | `sha256(sha1(pass))` |
+| e786 | NTLMH | `md4(utf16le(pass))` (dual-mode, see note below) |
+
+A nested digest yields its canonical hex form, so `sha1(md5(pass))` is SHA-1 over the
+32-character hex string, not over the 16 raw bytes.  Append `_bin` where the raw bytes are
+fed forward instead — MSCACHE above is `md4(md4_bin(...))` for exactly that reason.
 
 ### Crypt types
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e500 | DESCRYPT | `crypt($pass, $salt)` (DES) |
-| e511 | MD5CRYPT | `$1$$` md5crypt |
-| e512 | SHA256CRYPT | `$5$$` sha256crypt |
-| e513 | SHA512CRYPT | `$6$$` sha512crypt |
-| e577 | BCRYPT256 | `$2k$$` HMAC-SHA256 + bcrypt |
-| e529 | CISCO8 | `$8$` PBKDF2-SHA256 20000 rounds |
-| e917 | CISCO9 | `$9$` scrypt (hashcat 9300) |
-| e884 | SCRYPT | `$7$$` scrypt |
+| e500 | DESCRYPT | `descrypt(pass, salt)` — 13-character DES crypt, no prefix |
+| e511 | MD5CRYPT | `md5crypt(pass, salt)` — `$1$` |
+| e512 | SHA256CRYPT | `sha256crypt(pass, salt)` — `$5$` |
+| e513 | SHA512CRYPT | `sha512crypt(pass, salt)` — `$6$` |
+| e577 | BCRYPT256 | `bcrypt(sha256(pass), salt, 12)` — `$2a$` / `$2b$` |
+| e529 | CISCO8 | PBKDF2-HMAC-SHA256, 20000 rounds — `$8$` |
+| e917 | CISCO9 | scrypt N=16384 r=1 p=1 — `$9$` (hashcat 9300) |
+| e884 | SCRYPT | scrypt, parameters carried in the hash — `SCRYPT:N:r:p:salt:hash` (hashcat 8900) |
 
 ### PBKDF2 / KDF types
 
@@ -375,28 +407,28 @@ hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the c
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e833 | SSHA1BASE64 | `{SSHA}base64(sha1($pass.$salt).$salt)` |
-| e835 | SSHA256BASE64 | `{SSHA256}base64(sha256($pass.$salt).$salt)` |
-| e836 | SSHA512BASE64 | `{SSHA512}base64(sha512($pass.$salt).$salt)` |
+| e833 | SSHA1BASE64 | `"{SSHA}" . base64(sha1_bin(pass . salt) . salt)` |
+| e835 | SSHA256BASE64 | `"{SSHA256}" . base64(sha256_bin(pass . salt) . salt)` |
+| e836 | SSHA512BASE64 | `"{SSHA512}" . base64(sha512_bin(pass . salt) . salt)` |
 
 ### Non-hex / verify types
 
 | Index | Type | Algorithm |
 |-------|------|-----------|
-| e450 | BCRYPT | `bcrypt($pass)` |
-| e451 | BCRYPTMD5 | `bcrypt(hex(md5($pass)))` |
-| e452 | BCRYPTSHA1 | `bcrypt(hex(sha1($pass)))` |
-| e455 | PHPBB3 | `phpbb3($pass)` |
-| e457 | APACHE-SHA | `{SHA}base64(sha1($pass))` |
-| e461 | APR1 | `apr1($pass)` |
+| e450 | BCRYPT | `bcrypt(pass, salt, 12)` |
+| e451 | BCRYPTMD5 | `bcrypt(md5(pass), salt, 12)` |
+| e452 | BCRYPTSHA1 | `bcrypt(sha1(pass), salt, 12)` |
+| e455 | PHPBB3 | `phpass(pass, salt, 11)` |
+| e457 | APACHE-SHA | `"{SHA}" . base64(sha1_bin(pass))` |
+| e461 | APR1 | `apr1(pass, salt)` |
 | e500 | DESCRYPT | DES crypt (including BSDi Extended DES) |
-| e521 | SHA1SALTCX | `sha1($salt.sha1($pass))` iterated (hashcat 14400) |
-| e819 | MD5-MD5MD5PASSSALT-PEP | `md5(md5(md5($pass).$salt1).$salt2)` (hashcat 31700) |
-| e821 | MD5-MD5MD5PASSSALT-PEP2 | `md5(md5(md5($pass.$salt1)).$salt2)` (hashcat 21900) |
-| e822 | MD5-SALT-SHA1PEPPASS | `md5($salt1.sha1($salt2.$pass))` (hashcat 21310) |
-| e824 | SHA1-SALTSHA1U16 | `sha1($salt.sha1(utf16le($user):utf16le($pass)))` (hashcat 29000) |
-| e861 | CISCOPIX | Cisco PIX `md5($pass)` phpitoa64 |
-| e862 | CISCOASA | Cisco ASA `md5($pass.$salt)` phpitoa64 |
+| e521 | SHA1SALTCX | iterated SHA-1 with `--` delimiters (hashcat 14400) |
+| e819 | MD5-MD5MD5PASSSALT-PEP | `md5(md5(md5(pass) . salt) . pepper)` (hashcat 31700) |
+| e821 | MD5-MD5MD5PASSSALT-PEP2 | `md5(md5(md5(pass . salt)) . pepper)` (hashcat 21900) |
+| e822 | MD5-SALT-SHA1PEPPASS | `md5(salt . sha1(pepper . pass))` (hashcat 21310) |
+| e824 | SHA1-SALTSHA1U16 | `sha1(fromhex(salt) . sha1_bin(utf16le(user) . ":" . utf16le(pass)))` (hashcat 29000) |
+| e861 | CISCOPIX | `cisco_pix_encode(md5_bin(pad(pass, 16)))` (hashcat 2400) |
+| e862 | CISCOASA | `cisco_pix_encode(md5_bin(pad(pass . salt, 16)))` (hashcat 2410) |
 | e876 | DRUPAL7 | `$S$` SHA512 iterated |
 | e884 | SCRYPT | `SCRYPT:N:r:p:salt:hash` (hashcat 8900) |
 | e888 | ISCSI-CHAP | iSCSI CHAP authentication (hashcat 4800) |
@@ -416,7 +448,7 @@ hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the c
 | e935 | QNX-SHA256 | QNX `/etc/shadow` SHA256 (hashcat 19100) |
 | e936 | QNX-SHA512 | QNX `/etc/shadow` SHA512 (hashcat 19200) |
 | e937 | QNX7-SHA512 | QNX 7 `/etc/shadow` SHA512 (hashcat 19210) |
-| e938 | SHA1-S1PS2 | `sha1($salt1.$pass.$salt2)` (hashcat 19300) |
+| e938 | SHA1-S1PS2 | `sha1(salt . pass . salt2)` (hashcat 19300) |
 | e939 | RAILS-RESTFUL | Ruby on Rails Restful-Auth (hashcat 19500) |
 | e940 | KRB5PA-17 | Kerberos 5 etype 17 Pre-Auth (hashcat 19800) |
 | e941 | KRB5PA-18 | Kerberos 5 etype 18 Pre-Auth (hashcat 19900) |
@@ -445,12 +477,12 @@ hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the c
 | e964 | AES192-NOKDF | AES-192-ECB no KDF (hashcat 26402) |
 | e965 | AES256-NOKDF | AES-256-ECB no KDF (hashcat 26403) |
 | e966 | VMWARE-VMX | VMware VMX (hashcat 27400) |
-| e967 | BCRYPTSHA512 | bcrypt(sha512($pass)) (hashcat 28400) |
+| e967 | BCRYPTSHA512 | `bcrypt(sha512(pass), salt, 12)` (hashcat 28400) |
 | e968 | POSTGRESSCRAM256 | PostgreSQL SCRAM-SHA-256 (hashcat 28600) |
 | e969 | AWSSIGV4 | Amazon AWS Signature v4 (hashcat 28700) |
 | e970 | KRB5DB17 | Kerberos 5 etype 17 DB (hashcat 28800) |
 | e971 | KRB5DB18 | Kerberos 5 etype 18 DB (hashcat 28900) |
-| e991 | MD5SALT1SALT2 | `md5($salt1.$pass.$salt2)` (hashcat 33000) |
+| e991 | MD5SALT1SALT2 | `md5(salt . pass . salt2)` (hashcat 33000) |
 | e992 | SYMFONY256 | Symfony Legacy SHA256 (hashcat 35800) |
 | e993 | WPBCRYPT | WordPress bcrypt(hmac-sha384) (hashcat 35500) |
 | e994 | GOST12512CRYPT | `$gost12512hash$` gost12512crypt (hashcat 35600) |
