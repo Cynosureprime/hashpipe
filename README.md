@@ -275,15 +275,31 @@ echo password | hashpipe -X 'md5^1000(pass)'
 
 ### Output Format Suffixes
 
-Every hash function supports suffixes that control the output encoding:
+A suffix on a function name selects a non-default representation of its output:
 
 | Suffix | Meaning |
 |--------|---------|
 | (none) | Canonical form (hex for digests, MCF for crypt) |
 | `_bin` | Raw binary bytes |
 | `_hex` | Lowercase hexadecimal |
+| `_uc`  | Uppercase hexadecimal |
 | `_b64` | RFC 4648 base64 |
-| `_mcf` | Modular Crypt Format (crypt-family only) |
+| `_mcf` | Modular Crypt Format |
+
+Not every suffix applies to every function, and an unsupported one is a compile-time error:
+
+| Family | Accepts | Default |
+|--------|---------|---------|
+| Digests, HMAC, KDFs | `_bin` `_hex` `_uc` `_b64` | `_hex` |
+| Crypt-family (`bcrypt`, `yescrypt`, ...) | `_bin` `_hex` `_b64` `_mcf` | `_mcf` |
+| String transforms and encoders | none | — |
+
+So `md5_uc(pass)` and `bcrypt_mcf(pass, salt, 12)` are valid, while `md5_mcf(...)`,
+`bcrypt_uc(...)` and `base64_bin(...)` are rejected.
+
+`_uc` is not the same as wrapping a call in `upper()`.  The suffix sets the output *role*, which
+is what feeds the next round under iteration, so `md5_uc^N` chains uppercase hex while
+`upper(md5^N)` uppercases only the final result.  They agree at N=1 and diverge from N=2 on.
 
 ### Built-in Functions
 
