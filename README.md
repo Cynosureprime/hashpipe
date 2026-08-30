@@ -198,7 +198,7 @@ hashpipe uses a producer-consumer architecture with [yarn.c](https://github.com/
 
 Fixed batch sizes cause slow hash types (bcrypt at ~5 hashes/sec) to bottleneck on a single thread.  hashpipe uses adaptive batch sizing to distribute work evenly:
 
-- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of 988 pre-measured rates or from runtime `-B`/`-b` benchmarks.
+- Each hash type has a **benchmark rate** (hashes/sec), either from a built-in table of pre-measured rates or from runtime `-B`/`-b` benchmarks.
 - **BatchLimit** = `rate * 0.75` (target 0.75 seconds of work per batch), clamped to [1, 4096].
 - When `-m` specifies types, BatchLimit is pre-set from the slowest selected type.
 - In auto-detect mode, BatchLimit starts at `Numthreads * 4` and the worker feedback loop adjusts it as hash types are identified.
@@ -279,7 +279,7 @@ Every hash function supports suffixes that control the output encoding:
 
 ### Built-in Functions
 
-All 1000 hashpipe hash types are automatically available as hx functions (lowercase names).  In addition, hx provides:
+All hashpipe hash types are automatically available as hx functions (lowercase names).  In addition, hx provides:
 
 - **Crypt-family**: `md5crypt()`, `apr1()`, `sha256crypt()`, `sha512crypt()`, `sm3crypt()`, `gost12_512crypt()`, `descrypt()`, `phpass()`
 - **KDFs**: `pbkdf2_sha1/sha256/sha512/md5()`, `pbkdf1_sha1()`, `bcrypt()`, `yescrypt()`, `scrypt()`, `argon2id/i/d()`, `pomelo()`
@@ -293,11 +293,11 @@ All 1000 hashpipe hash types are automatically available as hx functions (lowerc
 
 ### hx Language Specification
 
-The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all 988 mdxfind types to their hx expressions.
+The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all mdxfind types to their hx expressions.
 
 ## Supported Hash Types
 
-hashpipe supports 1000 hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
+hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
 
 ### Common types
 
@@ -477,7 +477,7 @@ hashpipe also supports GOST, GOST-CRYPTO, Streebog, gost12512crypt, RIPEMD-128/1
 
 ## Benchmarking
 
-`hashpipe -B` benchmarks all 988 registered types and reports hashes/second for each:
+`hashpipe -B` benchmarks all registered types and reports hashes/second for each:
 
 ```
 $ hashpipe -B | head -10
