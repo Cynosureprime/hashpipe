@@ -24,7 +24,7 @@ hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u 
 
 **`-q N`** — Iteration step size (reserved, default: 128)
 
-**`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fallback to auto-detect
+**`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fall back to auto-detect.  Selection is **strict by design**: `-m` is a filter, not a hint — a type that is not listed is never tried, and there is no fallback unless `auto` is present.  If the correct type is not in the list, the line is reported as unresolved on stderr exactly like a failed verify, with nothing to distinguish *the right type was not selected* from *the password does not match*.  This is the same shape of silent negative that `-L` produces: append `auto` whenever the type is uncertain, and whenever measuring coverage over a bundled type list, where an omitted type under-reports silently rather than erroring.
 
 **`-o F`** — Append verified results to file (default: stdout)
 
