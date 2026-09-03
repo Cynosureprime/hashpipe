@@ -5,8 +5,8 @@
  *
  * John:     1.9.0-jumbo-1+bleeding-9a336d800a 2026-08-02 00
  *           commit 9a336d8 (2026-08-01)
- * Vectors:  9672 harvested across 403 formats
- * Verified: 125 formats reproduced by hashpipe and emitted below
+ * Vectors:  11352 harvested across 473 formats
+ * Verified: 184 formats reproduced by hashpipe and emitted below
  *
  * Every row was confirmed by recomputation: John's own test vector, wrapper
  * stripped, digest reproduced by the named hashpipe type.  Formats whose
@@ -40,6 +40,8 @@ static const struct john_map_ent JohnMap[] = {
     { "dynamic_12", "MD5-MD5SALTMD5PASSx01" },
     { "dynamic_13", "MD5-MD5PASSMD5SALTx01" },
     { "dynamic_14", "MD5-SALTMD5PASS-SALTx01" },
+    { "dynamic_15", "MD5USERMD5PASSSALTx01" },
+    { "dynamic_18", "POSTOFFICEx01" },
     { "dynamic_19", "CISCOPIX" },
     { "dynamic_20", "CISCOASA" },
     { "dynamic_22", "MD5SHA1x01" },
@@ -48,8 +50,11 @@ static const struct john_map_ent JohnMap[] = {
     { "dynamic_26", "SHA1x01" },
     { "dynamic_29", "MD5UTF16LEx01" },
     { "dynamic_30", "MD4x01" },
+    { "dynamic_31", "MD4SALTPASSx01" },
+    { "dynamic_32", "MD4PASSSALTx01" },
     { "dynamic_33", "NTLMx01" },
     { "dynamic_34", "MD5MD4x01" },
+    { "dynamic_37", "SHA1SALTPASS" },
     { "dynamic_38", "SHA1SALTSHA1SALTSHA1PASSx01" },
     { "dynamic_50", "SHA224x01" },
     { "dynamic_51", "SHA224SALTPASSx01" },
@@ -89,6 +94,8 @@ static const struct john_map_ent JohnMap[] = {
     { "dynamic_123", "RMD128x02" },
     { "dynamic_130", "RMD160x01" },
     { "dynamic_133", "RMD160x02" },
+    { "dynamic_140", "RMD256x01" },
+    { "dynamic_143", "RMD256x02" },
     { "dynamic_150", "RMD320x01" },
     { "dynamic_153", "RMD320x02" },
     { "dynamic_160", "HAV128x01" },
@@ -153,3 +160,66 @@ static const struct john_map_ent JohnMap[] = {
     { "dynamic_453", "SM3x02" },
 };
 #define JOHN_MAP_COUNT ((int)(sizeof(JohnMap)/sizeof(JohnMap[0])))
+
+/*
+ * Config-defined dynamics, read from John's dynamic.conf on the machine that ran
+ * the generator.  John reports these as "UserFormat"; their NUMBERING is local,
+ * so these rows are consulted on INPUT ONLY, by john_unwrap().  A wrong guess
+ * there costs nothing: the rewritten line still has to verify, and one that does
+ * not simply reports unresolved as it would have anyway.  john_label_for() must
+ * NOT use this table -- stamping a John name on a crack has no such safety net.
+ */
+static const struct john_map_ent JohnMapLocal[] = {
+    { "dynamic_1001", "MD5x04" },
+    { "dynamic_1002", "MD5x05" },
+    { "dynamic_1003", "MD5-2xMD5x01" },
+    { "dynamic_1004", "MD5x06" },
+    { "dynamic_1005", "MD5x07" },
+    { "dynamic_1006", "MD5x08" },
+    { "dynamic_1009", "MD5USERPASSx01" },
+    { "dynamic_1010", "RADMIN2x01" },
+    { "dynamic_1013", "MD5PASSSALTx01" },
+    { "dynamic_1014", "POSTGRESQL" },
+    { "dynamic_1017", "MD5USERPASSx01" },
+    { "dynamic_1018", "MD5SHA1SHA1x01" },
+    { "dynamic_1019", "MD5SHA1SHA1MD5x01" },
+    { "dynamic_1020", "MD5SHA1MD5x01" },
+    { "dynamic_1021", "MD5SHA1MD5SHA1x01" },
+    { "dynamic_1022", "MD5SHA1MD5SHA1MD5x01" },
+    { "dynamic_1023", "SHA1x01" },
+    { "dynamic_1024", "SHA1MD5x01" },
+    { "dynamic_1025", "SHA1MD5MD5x01" },
+    { "dynamic_1026", "SHA1x02" },
+    { "dynamic_1027", "SHA1x03" },
+    { "dynamic_1028", "SQL5x01" },
+    { "dynamic_1029", "SHA256x01" },
+    { "dynamic_1030", "WRLx01" },
+    { "dynamic_1031", "GOSTx01" },
+    { "dynamic_1032", "PEOPLESOFT" },
+    { "dynamic_1034", "MD5PASSSALTx01" },
+    { "dynamic_1300", "MD5RAWx01" },
+    { "dynamic_1350", "MD5HEXSALTx01" },
+    { "dynamic_1400", "SHA1UTF16LEx01" },
+    { "dynamic_1501", "SHA1SALTSHA1PASSx01" },
+    { "dynamic_1502", "SHA1SHA1USERx01" },
+    { "dynamic_1503", "SHA256SHA256SALTx01" },
+    { "dynamic_1504", "SHA1SALTPASSSALTx01" },
+    { "dynamic_1505", "MD5PASSSALTMD5PASSSALTx01" },
+    { "dynamic_1518", "MD5SHA1PASSMD5PASSSHA1PASSx01" },
+    { "dynamic_1560", "MD5SALT1SALT2" },
+    { "dynamic_1588", "COLDFUSION10" },
+    { "dynamic_1592", "WBB3" },
+    { "dynamic_2000", "MD5x01" },
+    { "dynamic_2001", "MD5PASSSALTx01" },
+    { "dynamic_2002", "MD5CAPx01" },
+    { "dynamic_2003", "MD5x03" },
+    { "dynamic_2004", "MD5USERPASSx01" },
+    { "dynamic_2005", "MD5SALTPASSSALTx01" },
+    { "dynamic_2006", "MD5SALT" },
+    { "dynamic_2008", "MD5-MD5SALT-PASSx01" },
+    { "dynamic_2009", "MD5USERIDMD5x01" },
+    { "dynamic_2010", "MD5-SALTMD5SALTPASSx01" },
+    { "dynamic_2011", "MD5-SALTMD5PASSSALTx01" },
+    { "dynamic_2014", "MD5-SALTMD5PASS-SALTx01" },
+};
+#define JOHN_MAP_LOCAL_COUNT ((int)(sizeof(JohnMapLocal)/sizeof(JohnMapLocal[0])))

@@ -14,10 +14,229 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.116 2026/08/29 18:32:27 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 2026/09/02 23:11:35 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.189  2026/09/02 23:11:35  dlr
+ * Restore the inline key derivation for RACF; only RVARY uses the table. Moving a2e_pc above its users was right, but switching BOTH sites to it was not: in mdxfind, RVARY reads a2e_pc while RACF derives the key inline from a2e with XOR 0x55, a left shift and an odd-parity fix, and those two disagree for seven of the 256 byte values. Putting RACF on the table broke the one candidate whose first byte is NUL, which is how it surfaced -- as the single remaining unresolved line in a 7.2 million line pass. Each type now follows its own source. RACF 11 of 11, RVARY 11 of 11, RACF-KDFAES 55 of 55 and AS400-DES 11 of 11. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.188  2026/09/02 21:05:41  dlr
+ * Use the a2e_pc table for the RACF key schedule instead of deriving it inline. Two verify functions built the DES key with an inline XOR, shift and parity fix because the precomputed table was defined further down the file. That derivation disagrees with the table for seven of the 256 byte values, 0x00 among them, so any candidate containing one of those bytes produced a different key and could not verify. The table is now defined above its users and both sites read from it. RVARY goes from 10 to 11 of 11, the single failure being the candidate whose first byte is NUL; RACF and RACF-KDFAES were already correct and stay so. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.187  2026/09/02 21:03:09  dlr
+ * Cover MD5UCMD5 with the same uppercase-chain verify as MD5RAWUC. Both run a chain of md5 over the UPPERCASE hex of the previous value and both enter it already one round in, so no depth is reported for the starting value; they differ only in what that starting value is, MD5UCMD5 feeding the hex of the first digest into the second md5 where MD5RAWUC feeds the raw sixteen bytes. The two now share one engine. MD5UCMD5 goes from 41 to 44 of 44 and MD5RAWUC stays at 44 of 44. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.186  2026/09/02 20:57:24  dlr
+ * Convert YAF-SHA1 to iconv as well. It expanded each candidate byte to a byte and a NUL while mdxfind converts through iconv opened with //IGNORE, so the six non-ASCII regression candidates all failed: 5 of 11 becomes 11 of 11. VEEAM-VBK uses the byte expansion and is correct with it, so it is left alone; the split between the two conventions is recorded in hx.8 Note [51].
+ *
+ * Revision 1.185  2026/09/02 20:51:08  dlr
+ * Convert two more UTF-16LE types through iconv rather than a byte expansion. SHA1-SALTSHA1U16 and SHA1-SALT-UTF16-PEPPER built their UTF-16 by following each byte with a NUL, but mdxfind converts through iconv opened with //IGNORE, which drops sequences that are not valid UTF-8 instead of expanding them. The two agree for ASCII and differ for everything else, so exactly the six non-ASCII regression candidates failed for each type. Both go from 25 to 55 of 55. This is the same split recorded in hx.8 Note [51], now with two more types on the iconv side. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.184  2026/09/02 19:38:33  dlr
+ * Add a verify for MD5RAWUC. Each round is md5 over the UPPERCASE hex of the previous value, not the usual lowercase, and mdxfind enters its loop already one round in, so the starting value is never reported and the first line carries depth two. Neither of those is expressible through the generic iteration, which assumes lowercase hex and a depth-one base. 11 of 44 becomes 44 of 44. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.183  2026/09/02 18:58:45  dlr
+ * Decode a HEX-encoded salt once in the verify dispatch. A salt written as $HEX[] reached the verify functions still encoded, and seventy-nine of them parse the salt straight out of hashstr without decoding it, so every one of those types silently failed whenever the salt was not plain ASCII. hash_verify now rewrites hashstr with the salt decoded before calling the type, which fixes all of them at once instead of patching each. MANGOS and LEET-SHA512-WRL-USER go from 99 to 110 of 110, the eleven failures in each being exactly the lines whose user field was HEX-encoded. Regression-checked across nineteen types spanning plain, salted, user, composed, CAP, chained and structured constructions: all at full coverage. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.182  2026/09/02 18:54:48  dlr
+ * Offer the salted types to a line whose salt field is present but empty. The three salted passes selected candidates only when the decoded salt had non-zero length, so a line of the form hash, empty field, password never reached them. The HMAC KPASS family carries an empty default salt deliberately, and hmac over an empty message is perfectly well defined, so declining to try it was a refusal to compute rather than a missing construction. Sixteen types go from zero to full coverage on their default-salt output: the eight HMAC KPASS variants, the four STREEBOG ones, both NETNTLM types, COLDFUSION10 and HMAC-BLAKE2S. A line with no salt field at all is unaffected, since the gate still requires the field to be present. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.181  2026/09/02 18:36:48  dlr
+ * Add verifies for SHA1-SHA512PASSSHA512SALT and MD5SHA1MD5x. The first sha1s the 128-character sha512 hex of the candidate followed by the same of the salt, then iterates by writing the 40-character digest hex and hashing only the first 32 of it, so the chain runs on a truncated digest; the same shape as SHA1HAV128, deterministic, reproduced rather than corrected. 55 of 275 becomes 275 of 275. The second carries its md5 chain length in the salt field and was registered as a fixed three-step chain, which agreed for three of the five lengths the corpus exercises; it now reads the length and builds md5 to that depth before the sha1 and final md5. 165 of 275 becomes 275 of 275. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.180  2026/09/02 18:34:55  dlr
+ * Add verifies for SHA1lsb32 and SHA1HAV128, both of which chain on a value wider or narrower than the one they report. SHA1lsb32 sha1s the running value, zeroes the first four digest bytes, reports the first sixteen as 32 hex, and chains on the full 40-character hex, so the chain input is wider than anything reported. SHA1HAV128 does the reverse: it reports the full 40-character sha1 hex but writes only 32 characters of it when building the next round input, so the chain runs on a truncated digest. Both are deterministic and are reproduced rather than corrected. Each goes from 11 of 55 to 55 of 55. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.179  2026/09/02 18:32:13  dlr
+ * Verify both shapes of SHA1MD5MD5PASS. The type emits two digests per candidate, the second inserting a colon, and iterates both with sha1 over the hex; registered as a plain compute it produced only the first, so it verified 55 of 110 and now verifies 110 of 110. The second shape hashes 33 bytes of a 32-character hex buffer, which includes the NUL that prmd5 writes at out[len]. That is deterministic, so it is reproduced rather than corrected, and hx.8 now shows the trailing byte instead of implying the hex alone.
+ *
+ * Revision 1.178  2026/09/02 18:31:04  dlr
+ * Stop excluding NTLM types from the unsalted iteration passes, and give three more types their outermost hash. HTF_NTLM was filtered out of every iteration path, but those types iterate like any other: the chain step for MD4UTF16 is md4 of the utf16 of the hex, which is exactly its own compute applied to the hex, so the generic loop handles it once it is allowed to see it. MD4UTF16 and MD4UTF16UC go from 11 of 55 to 55 of 55; plain NTLM and MD4UTF16MD5x are unchanged at full coverage. outer_tab also gains MD4UTF16, MD4UTF16UC and SHA1MD5MD5PASS. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.177  2026/09/02 18:15:02  dlr
+ * Give NULL its iteration. The type copies the candidate into a zeroed 16-byte buffer and reports it, overwriting byte zero with the depth number each round; the compute produced only the base form, so it resolved 3 of 55 and now resolves 15. The remainder cannot be reproduced: for a HEX-encoded candidate the value mdxfind reports also carries bytes of the undecoded input string, so those lines represent nothing a verifier can recompute. The type is a passthrough diagnostic rather than an algorithm and is now excluded from corpus generation for that reason.
+ *
+ * Revision 1.176  2026/09/02 18:13:22  dlr
+ * Add a verify for the SQL5 loop, covering SQL5 and MYSQL5MD5. In mdxfind both run a loop whose chain state is the UPPERCASE hex of the inner sha1, while the digest it emits is sha1 of that inner value. The chain state is therefore never emitted, so no generic iteration over the previous reported digest can reproduce the next depth; it has to be recomputed from the password. Both types sat at 11 of 55, base depth only, and are now 55 of 55. MD5SQL5 was already correct and stays so. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.175  2026/09/02 18:09:22  dlr
+ * Give the three plain RADMIN2 types their iteration step. RADMIN2 pads its input to 100 bytes with NULs before the final md5, and the chain re-applies that whole step, so iterating is md5 of the padded hex rather than md5 of the hex. The chain-registered RADMIN2 variants inherit this from their chain definition, but RADMIN2BASE64, RADMIN2SQL3 and RADMIN2SQL5-40 are plain registrations and had nothing, so each resolved only at base depth: 11 of 55. All three are now 55 of 55. The assignment runs after every registration, because the HT macros clear iter_fn and because find_type_index returns -1 for a type not yet registered, which would have indexed the type table at -1. Verified that no other direct assignment in the file has that ordering hazard. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.174  2026/09/02 17:30:49  dlr
+ * Move the two verify_sunmd5 working buffers off the stack into workspace slots, per the rule that verify functions do not use stack buffers.
+ *
+ * Revision 1.173  2026/09/02 17:29:51  dlr
+ * Bound the salt scan in verify_sunmd5 to hashlen, and the four @ scans beside it. strrchr runs to the terminating NUL, but hashstr points into the input line and is only hashlen bytes long, so the scan walked past the hash into the password field and found the dollar sign of a HEX-encoded password. Every $HEX candidate then parsed its salt at the wrong offset and failed the length check, whatever the password contained: even a plain ASCII password rewritten in $HEX form failed, while the same password written raw verified. That is why the type sat at 4 of 11, the four survivors being exactly the passwords the corpus writes literally. It now verifies 11 of 11. The four strchr calls looking for an @ in neighbouring types had the same hazard and would have broken on any password containing one; they are now memchr bounded by hashlen. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.172  2026/09/02 17:25:03  dlr
+ * Use the naive UTF-16LE expansion for the KRB5 types, matching mdxfind. KRB5PA23 and KRB5TGS23 derive the RC4-HMAC key from the NTLM hash, and mdxfind builds that with its byte-expansion to_utf16le rather than iconv, so both disagreed for every non-ASCII password. Each goes from 5 of 11 to 11 of 11, as do KRB5PA-17 and KRB5PA-18. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.171  2026/09/02 17:21:58  dlr
+ * Match mdxfind on how each type turns a password into UTF-16LE. mdxfind is not consistent about this: its to_utf16le is a naive byte expansion, each byte followed by a NUL, and DCC2 and AZURESYNC use that, while MSONLINE and plain NTLM go through iconv. hashpipe used iconv everywhere, so DCC2 and AZURESYNC disagreed for every non-ASCII password, and MSONLINE used a hand-rolled expansion and disagreed the other way. A latin1_to_utf16le helper now serves the first two and MSONLINE uses the iconv path; all three go from 5 of 11 to 11 of 11, the six failures in each case being exactly the non-ASCII regression passwords. Determined empirically by computing both encodings against a known-good line rather than by reading the case, since the two conventions are mixed within one program. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.170  2026/09/02 17:16:29  dlr
+ * Open the UTF-16BE and UTF-7 iconv descriptors with //IGNORE, as mdxfind does. Without it a password that is not valid UTF-8 made the conversion fail outright and the type verified nothing for that candidate, while mdxfind skipped the invalid sequences and hashed the rest. The UTF-16LE descriptor already carried the suffix, which is why only the BE and UTF-7 paths were affected. SHA1UTF16BE goes from 50 to 55 of 55 on the regression passwords, which include a five-byte binary candidate that is not valid UTF-8. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.169  2026/09/02 17:07:16  dlr
+ * Search the salt split for MD5DSALT. The two salts are reported concatenated with no separator, so the split point cannot be recovered from the line; compute_md5dsalt assumed a half-split, which is correct only when both salts are the same length and covered 5 of the 9 pairs in the regression salt list. A verify now tries every split, bounded at three characters per salt as mdxfind bounds them, and walks the iteration itself. 55 of 495 becomes 495 of 495. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.168  2026/09/02 16:53:05  dlr
+ * Give SHA256SALTSHA256PASS its raw-bytes iteration flag. mdxfind iterates that type with sha256 over the 32 raw digest bytes, not over the hex, which hashpipe already models with HTF_ITER_RAW but the type did not carry it, so every depth below the first failed: 55 of 275 becomes 275 of 275. Found by classifying the x01 to x02 relation empirically rather than reading the case, since the same case block mixes hex-iterating and raw-iterating jobs.
+ *
+ * Revision 1.167  2026/09/02 16:39:50  dlr
+ * Three identification fixes. The unsalted hard pass iterated by re-running the entire construction over the hex, which for a composite type applies every inner step again and diverges from mdxfind at the second depth, and it seeded the chain only from the primary compute; both corrections already existed in the composed and hinted paths and are now applied here too. MAX_CANDIDATES was 512 while a 16-byte digest can reach 729 types, so get_candidates_by_hashlen silently dropped 217 of them and they were never tried in any hard pass; the cap is now 1200 with a comment explaining what it must exceed. Five HT_ALT types had no outermost iteration hash at all and are now listed. Finally MD5MD5PASS and MD5-DBL-PASS emit two digests per password, the second inserting a colon before the appended field, and mdxfind iterates both; as HT_ALT only the primary seeded the chain, leaving 66 and 22 of 110. A shared pass2_engine walks both shapes and their chains, taking both to 110 of 110. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.166  2026/09/02 16:10:31  dlr
+ * Fix three more identification defects found by working the unresolved stream live. SHA1MD5xSALT compared only its base digest and never walked the chain, so every depth past the first failed: 275 of 1375 became 1375 of 1375. SHA1MD5UC1LC uppercases the md5 hex and then lowers ONE position at a time, emitting a digest per position, but the compute lowered position zero only and so could match at most one of them and only when that character was a letter; it is now a position-enumerating verify and goes from 5 to 635 of 635. Its self-test vector was replaced, because the old one encoded the position-zero-only reading that mdxfind never emits. Third, the last-resort fullpass retry truncates the hash and repoints password, salt and both alt fields before jumping back through the whole identification; when that merged reading also failed the item was left mutated, so the unresolved report showed a truncated hash and a password that had swallowed the salt, and the reading as written was never tried again. Those fields are now saved and restored. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.165  2026/09/02 15:59:11  dlr
+ * Undo the second speculative fullpass rewrite on failure. The non-hex retry truncates hashstr and repoints the password at the whole salt-and-password field before rescanning the verify types. It returns either way, so on failure the caller received an item holding a truncated hash and a password that had swallowed the salt, and reported that as the unresolved line. The three fields are now restored when no type matches, matching the fix already applied to the sibling path. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.164  2026/09/02 15:39:46  dlr
+ * Stop the fullpass retry from reporting a merged reading, and honour the chain length in three x types. The fullpass retry rewrites hashlen, password and salt in place to try the whole salt-and-password field as one password. It never undid that on failure, and on success it reported the merged form even when the line as written also verified, so a salted line came back as hash and a single HEX blob holding salt, colon and password. Which reading a line got depended on whether the hot list had already satisfied it, so the same line resolved correctly alone and merged in a long run: 15140 lines in 14 contiguous blocks, including whole HMAC families that looked entirely unsupported. The retry now prefers the line as written when that verifies for the same type, restores the item when nothing matches, and records the hot entry with the real salt length instead of always unsalted. Separately, MD4UTF16SHA256x, MD5SHA1x and SHA1SHA256UCxSHA256 computed only the single-round form while mdxfind reports the round number in the salt field; all three now chain, taking each from 55 to 275 of 275. SHA1MD5UC1LC gains its outermost iteration hash. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.163  2026/09/02 12:57:35  dlr
+ * Simplify the CAP verifies to the clean constructions now that mdxfind no longer corrupts its own buffers. verify_sha1sha1capsalt replayed the newbuf clobber and the prmd5 NUL that ate the salt first byte; x1cap_engine replayed the in-place letter-class mutation and its non-md5 chain. Both are gone: the first enumerates cap positions over an intact buffer, the second walks a plain md5 chain and builds each letter-class variant in its own workspace slot instead of mutating the running hex. verify_sha1sha1capsalt also decodes a HEX-encoded salt rather than hashing it literally. All four types verify 100 percent of regenerated mdxfind output, and the self-test remains 1026 passed 0 failed.
+ *
+ * Revision 1.162  2026/09/02 12:06:14  dlr
+ * Fix the SHA1SHA1CAPSALT and MD5-USER families. SHA1SHA1CAPSALT now replays mdxfind exactly, including two buffer defects that are part of the emitted values: the iteration step writes the running digest back over the same buffer that still holds the capped hex and the salt, and prmd5 NUL-terminates at out[len] so the salt loses its first byte. Neither is undone before the next cap position, so from the second position on both the capping and the hashing run over corrupted data. Reproducing that bit for bit took it from 55 to 765 of 765. Note that because the clobber only happens while x is below Maxiter, every emission after the first cap position depends on the -i of the generating run. The three MD5 USER types shared one defect and one omission: mdxfind capitalises the first hex as well, in the pre-block that falls through, which agrees with the old reading only when that character is a digit; and the pair of emitted shapes was registered as HT_ALT, which verifies both at base depth but seeds the iteration chain from the primary alone, leaving every deeper depth at exactly half. Swapping primary and alt moved the failures to the other shape rather than fixing any, which identified the cause. All three now walk both shapes and their chains in one engine, and decode a HEX-encoded user field rather than hashing it literally. MD5CAPMD5USER, MD5CAPMD5MD5USER and MD5MD5MD5USER each went from 660 to 1100 of 1100. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.161  2026/09/02 11:52:06  dlr
+ * Position-enumerating verifies for the CAP family. SHA1SHA256CAP and SHA1MD51CAPSALT were plain computes that capitalised only the first lowercase hex character, so they could match at most one of the digests mdxfind emits per password and only at its base iteration. Both now enumerate every position and walk the iteration chain. SHA1MD5x1CAP, SHA1MD51CAPMD5 and SHA1MD51CAPMD5MD5 share one new x1cap_engine: mdxfind reaches all three through fallthrough into a single loop whose letter-class pass rewrites the hex buffer in place without restoring it, so the chain is not md5 iterated i times over the password. The three old verifies modelled it as md5^i and so resolved only at the lowest depth. This also removes the stack buffers in the old SHA1MD51CAPMD5MD5 verify, which violated the workspace-slot rule. Fixture results: SHA1SHA256CAP 11 to 1315 of 1315, SHA1MD51CAPSALT 275 to 3175 of 3175, SHA1MD5x1CAP 955 to 4915 of 4915, SHA1MD51CAPMD5 1030 to 4585 of 4585, SHA1MD51CAPMD5MD5 900 to 4695 of 4695. Self-test 1026 passed 0 failed.
+ *
+ * Revision 1.160  2026/09/02 11:36:39  dlr
+ * Fix the iteration of three CAP types. MD5CAP needed two things. Its first emitted value is x02, because mdxfind loops "for (x = 2; x <= Maxiter; x++)" and there is no x01 for this type at all - the regression fixture carries only x02 through x05 - so base_iter is now 2. And every round re-applies the cap before hashing: mdxfind does hex, cap position 0, md5 on each pass, so the generic outer_fn(hex(prev)) is right at the base value and wrong from x03 onward. A dedicated primitive iter_md5cap now caps position 0 of the incoming hex and hashes it. Note the cap considers ONLY position 0, and only when it holds a lowercase hex letter; where it does not the round is indistinguishable from plain iterated MD5, which is what made this look like an ordinary alias rather than a distinct construction. SHA1MD5CAP and SHA1MD5CAPMD5 needed only an outer_fn of compute_sha1. Both cap the FIRST lowercase character once and then jump to mdxfind SHA1_start, so their rounds are plain sha1(hex(prev)) with no re-cap; with no outer_fn at all they fell back to ht->compute, which re-applies the whole construction. Derived from x01 and x02 pairs in the fixture, 11 of 11 agreeing on sha1. Measured: MD5CAP 17 of 44 to 44 of 44, SHA1MD5CAP 11 of 55 to 55 of 55, SHA1MD5CAPMD5 11 of 55 to 55 of 55. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; 0 false positives across 99 CAP lines fed a wrong password at -i 5. The John corpus stays at 4554 with 0 bodies lost and exactly one label change, MD5CAPx01 becoming MD5CAPx02, which is a CORRECTION - that type has no x01 form. Recorded but NOT fixed here: seven CAP types still fail above their base iteration - MD5CAPMD5MD5USER, SHA1MD51CAPMD5, SHA1MD51CAPMD5MD5, SHA1MD51CAPSALT, SHA1MD5x1CAP, SHA1SHA1CAPSALT and SHA1SHA256CAP. None of them derives a simple outer(hex(x01)) rule from the fixture, so each needs its own primitive in the way MD5CAP did, rather than another table entry.
+ *
+ * Revision 1.159  2026/09/02 11:18:37  dlr
+ * Complete the HUM family, and seed hinted iteration from every registered base encoding. The seven HUM types went from about 4 percent to 30800 of 30800 lines across all five depths. Three separate defects, found by reading mdxfind rather than by inference; hx.8 was misleading on two of them. First, the "- x N" in the salt is an INNER-ITERATION INDEX, not a repeat count for the separator bytes. mdxfind computes inner_0 = INNER(pass) then inner_k = INNER(hex(inner_k-1)), emitting at every k and labelling round k as "<sephex>- x k". Reading N as a repeat count cost four rounds of fruitless brute-force search before I went to the source. New helper hum_iter_count parses it and both MAKE_HUM macros plus the six hand-written functions now iterate the inner hash. Second, MD4UTF16MD5HUM and MD4UTF16SHA1HUM carried outer_fn of compute_md5 and compute_sha1. Both are wrong: mdxfind hashes the UTF-16LE expansion with MD4, so the outer is NTLM-shaped, which the outer-first type name already says. hx.8 has the expression INVERTED - it reads emit(md5(md4(utf16le(pass)).S)) where the construction is emit(md4(utf16le(md5(pass).S))) - and the wrong outer_fn was derived from that. Confirmed against mdxfind own output: x02 equals ntlm(hex(x01)). Third, and this one is shared machinery rather than HUM-specific: the hinted iteration path seeded its chain only from ht->compute. A multi-emit type registered with HT_ALT or HT_ALT2 produces more than one digest per password and mdxfind emits them all - HUM emits both hex-then-separator and separator-then-hex - so the alternate encodings could not verify above the base iteration, capping such a type at exactly 1/nbases of its lines at depth. That is precisely why every HUM type sat at 60 percent, which is x01 in full plus half of four deeper rounds. The path now computes the base for each registered encoding in turn, primary then compute_alt then compute_alt2, and runs the iteration loop for each. It is the hinted path copy of the defect fixed for the composed and salted hard passes in 1.147, and it will benefit any multi-emit type reached with a type hint, not only HUM. Worth recording: all seven types were already registered and four already had compute functions written; nothing had to be added to the catalogue. The gap was entirely in iteration support. Measured per type across the full fixture slice: all seven now 4400 of 4400. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4554 verified with a byte-identical diff against the previous run, so 0 lost, 0 gained, 0 attribution changes; 0 false positives across 2000 HUM lines fed a wrong password at -i 5.
+ *
+ * Revision 1.158  2026/09/02 01:36:17  dlr
+ * Fix a global-buffer-overflow that crashed hashpipe on large inputs, and give 94 more types their outermost iteration hash. The crash first: hot_hit_record guards the WRITE into HotHitTable with slot < HOT_LIST_MAX but increments HotHitCount unconditionally, so once 256 distinct type and salt-length pairs have been seen every further miss still bumps the counter, and the search loop above, bounded by that counter, reads progressively further past the end of a 4096-byte global until it leaves the mapping. Found by AddressSanitizer, which names it exactly: global-buffer-overflow, READ of size 4, 0 bytes after HotHitTable, in verify_item. The invariant was already known and defended in the OTHER reader - the stats loop clamps with nh > HOT_LIST_MAX - and was simply missed here. Fixed both ways: the search bound is clamped, and a full table gives the slot back so the counter cannot drift. This accounts for every symptom seen: a threshold at about 2.55 million lines rather than any particular record, a page-aligned fault address, SIGBUS on one run and SIGSEGV on another with a byte-identical code offset, no narrow input window ever reproducing it, and resident memory flat at 145MB throughout, since this is an index runaway and not a leak. It is pre-existing and predates the outer_fn work below; the first crash was on a binary built before it. How it was found is worth recording. A full-fixture run appeared to complete in 36 minutes 53 seconds having processed only 35 percent of the input, because the harness wrote END unconditionally instead of capturing the exit code, so a crash read as a clean benchmark - exactly the shape of failure the verification discipline exists to catch. Second change: 94 entries added to outer_tab. The hinted-iteration path picks its primitive as iter_fn, else outer_fn, else ht->compute for an unsalted type. With no outer_fn that fallback re-applies the WHOLE construction rather than the outermost hash, which is correct only when a type IS its own outer hash; SHA1UTF16LE computed sha1(utf16le(hex)) where the truth is plain sha1(hex). Every entry was DERIVED, not guessed: for each type, x01 and x02 lines from regress/testhash.orig were paired on matching password and the outer hash identified as the primitive reproducing x02 from hex(x01), minimum 4 pairs per type and no single-sample entry. Strictly additive - of the entries already present, 8 agreed with the derived value and none disagreed. Measured on a per-label sample of the new 7.2 million line fixture: types failing at depth fall from 154 to 64, with 362 of 548 previously failing lines recovered. Self-test 1026 passed 0 failed on both the normal and the ASan build. ASan reproducer clean through 1151519 lines where it previously reported the overflow at about 677000. A full-fixture regression run is in flight and will be reported separately; the 64 types still failing are a separate and understood set, spanning the -q internal-iteration class, the multi-emit families, prefixed formats such as SQL5, and structured types.
+ *
+ * Revision 1.157  2026/09/01 20:26:18  dlr
+ * Make the BCRYPT256 $2k$ path able to match. Real samples finally exist: Dave found 5179 of them in contest/history/2024, and KoreLogic own write-up names the algorithm - "$2k$: Hashes generated using Python passlib.hash.bcrypt_sha256". The stored form is 59 characters, not 60: $2k$ plus cost plus 21 salt characters plus a 31-character checksum. It carries only 21 of the 22 salt characters because the 22nd holds just 2 significant bits, so it is dropped and recovered by trying the four canonical values ".euO" - which is what both tools already enumerate. Three separate defects, each alone enough to guarantee no match, so this path had never worked. First, a hashlen < 60 guard rejected every real hash outright, the stored form being 59. Second, the bcrypt setting was built as $2b$ plus cost plus TWENTY-ONE salt characters, terminated at offset 28, and did not vary across the four candidates - only the HMAC key did. mdxfind writes the candidate character into BOTH the key and the salt (mdxfind.c, linebuf2[MAXLINE+7+21] = extrasalt[x]) and is the authority; the setting is now rebuilt inside the loop and carries the full 22. Third, the result was compared against the stored hash as whole strings, which cannot succeed: crypt_rn returns the ordinary 60-character $2b$ form, so the two differ at the prefix and again from offset 28, where one still has a salt character and the other has begun its checksum. The comparison now aligns the checksums, result+29 against hashstr+28 for 31 characters. Validated against vectors generated INDEPENDENTLY with the python bcrypt and hmac modules rather than by either tool, one per candidate character: 4 of 4 verify, 0 false positives on the same hashes fed a wrong password, and a cost-12 vector matching the contest cost verifies at the DEFAULT -L. The independent generation also validates mdxfind: its -z output for this construction is byte-identical to the python round-trip, which is the first confirmation the algorithm itself is right. Self-test 1026 passed 0 failed; userdef round trip PASS; a plain $2a$ bcrypt still declines e577 and resolves as e450, so the deliberate guard against BCRYPT256 swallowing ordinary bcrypt is intact. NOT fixed here, and mdxfind side: -z generates the construction correctly but emits the 60-character $2b$ form, so it does not round-trip to the stored 59-character $2k$ form and mdxfind cannot crack a real $2k$ hash - the loader files the $2k$ line in JudyJ while the generator looks up a $2b$ string.
+ *
+ * Revision 1.156  2026/09/01 18:49:26  dlr
+ * Take the iteration count from the verify function on the hot path, not from an unconditional 1. The hot list carries verify types: the branch at the top of the hot loop calls hash_verify and jumps to hot_match on success. That label then stamped match_iter as 1 for anything without HTF_ITER_X0, discarding whatever the verify reported, while the slow path zeroes verify_iter, calls the same verify and reads the count back. The two disagreed, so the SAME hash could be labelled differently depending on how it was reached - bare on its first sighting, which takes the slow path, and x01 on every later one, which hits the cache. Two changes, both on that path. The hot verify branch now zeroes verify_iter before calling hash_verify, matching the slow path, since a verify that reports no count leaves the slot untouched and would otherwise inherit whatever the thread last verified. And hot_match now reads ht->verify ? WS->verify_iter : the previous expression, so a compute type is still implicitly x01 while a verify type reports its own count. hot_fast_match is deliberately untouched: it skips verify types outright, so the conditional would be dead there. Trigger conditions, which matter because the earlier report understated them: this needed auto-detect AND a repeated hash. Any type hint suppressed it, whether from a leading type token or from -m, so a straight mdxfind pipe into hashpipe never showed it. Dave could not reproduce it from the report for exactly that reason. It surfaced on the John corpus because that corpus carries the same vector under several format names. Measured across all 974 registered example vectors, each fed three times single-threaded: inconsistent labels 10 to 0, with 974 vectors still resolved, 0 lost and 0 first-occurrence labels changed. Types that legitimately report a count keep it and are now consistent across repeats. Affected types were ANDROIDFDE, ARUBAOS, CISCOISE, DOMINO5, HMAILSERVER, MACOSX, MACOSX7, ORACLE11, ORACLE12 and PWSAFE3, all verify types whose function reports no count; mdxfind emits every one of them bare. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; fresh-output sweep over all 74 catalogued HTV types unchanged at 74 of 74 and 111199 of 111199 lines; 0 false positives across 3000 wrong-password lines at -i 3. John corpus 4554 with 0 bodies lost and 0 gained; its 50 label changes are ALL suffix removals on six of the ten types, every one a correction toward mdxfind.
+ *
+ * Revision 1.155  2026/09/01 18:17:47  dlr
+ * Iterate the BLAKE2 types, correcting a scope error. I had classed BLAKE2B512, BLAKE2B256 and BLAKE2S256 as structured-only and therefore exempt from iteration under Dave rule of 2026-09-01. That was wrong, and Dave caught it: mdxfind emits every one of them in TWO shapes, $BLAKE2$<hex> and a bare hex digest, in equal numbers. The bare form is a plain hex result, so it must iterate. The classification came from sampling only the $BLAKE2$ form in work.res and generalising from it, which is the same mistake as reading one shape and assuming it is the only one. Two defects, both pre-existing. First, the bare form could not be verified at ANY depth, x01 included. Each verify already accepted either shape, but HTV overwrites the earlier HT registration - nulling compute and setting HTF_NONHEX - and the auto-classifier then sees only the $BLAKE2$ example, starts with a dollar sign and pins vclass to HCLASS_PREFIX, so a bare hex line was never offered to the type at all. The three now carry HCLASS_PREFIX | HCLASS_HEX. Second, none of them iterated. The rule was derived from mdxfind own x01, x02 and x03 output rather than assumed, and holds for all three widths: x(n+1) = blake2(hex(x n)), the outermost hash as always. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3: 74 of 74 types and 111199 of 111199 lines now verify, up from 71 of 74 and 111184. Both shapes resolve at every depth for all three types. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; 0 false positives across 3000 wrong-password lines at -i 3, with the positive control now 3000 of 3000 where it was 2994, the six being exactly these BLAKE2 lines. John corpus 4553 to 4554 with ZERO hash bodies lost: one genuine gain, a bare-hex BLAKE2B512 vector that could not previously resolve, and five lines gaining the x01 suffix. That suffix is a CORRECTION - work.res carries 11 BLAKE2B512x01 and no bare form at all, so hashpipe now agrees with mdxfind where it did not before.
+ *
+ * Revision 1.154  2026/09/01 18:06:51  dlr
+ * Close the last two verify-type gaps found by a full fresh-output sweep. SHA1SHA11CAP had two compare sites that were never converted to iterate, so it read 29 of 29 at x01 and 1 of 29 at x02 and x03; both now go through hex_iter_match. It calls the helper directly rather than the sha1_hex_iter_match wrapper because the function is defined ahead of that wrapper and only hex_iter_match carries a forward declaration. SHA1MD51CAPMD5MD5 has the same dual output shape as e749: of the lines mdxfind emits, 42 report the md5 count in the salt field and 36 are written as a bare 40-character digest with no field at all, and the verify required the field, so those were rejected at every depth including x01. Unlike e749, where the bare form was letter-class only, here BOTH cap strategies appear in it; the count was confirmed by brute force to be 1 in each case rather than assumed. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3, since work.res and testhash.orig remain stale for the eleven types touched by the recent mdxfind fixes: 71 of 74 types and 111184 of 111199 lines verify. The two fixed here went 45 of 60 and 31 of 87 to 60 of 60 and 87 of 87. The only types left are BLAKE2B256, BLAKE2B512 and BLAKE2S256, each at 1 of 6, which is CORRECT and deliberate - their result is a structured $BLAKE2$ string rather than a hex digest, and per Dave rule of 2026-09-01 a structured type does not need to be iterate-able. That accounts for all 15 unresolved lines. Also verified in this pass, after Dave fixed the pepper length argument in mdxfind: e597, e611, e654 and e677 now carry salt and pepper together at every depth and each reads 5 of 5 through x05, where previously the pepper was dropped from x02 onward. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified; 0 false positives across 3000 wrong-password lines at -i 3 against a 2994 of 3000 positive control, the six being BLAKE2 lines above x01.
+ *
+ * Revision 1.153  2026/09/01 17:18:38  dlr
+ * Accept the second emitted shape of SHA1MD5x1CAP (e749). mdxfind writes this type two ways. The single-position CAP variants report the md5 iteration count in the salt field, giving hash colon N colon password, but the six letter-class variants - one per hex letter a through f - are written with NO salt field at all. The verify function required the field and returned 0 without it, so those six were rejected at EVERY depth, x01 included. This was mis-scoped in 1.152 as a pre-existing verify gap of unknown cause; it is a parse gap with a known cause. A bare 40-character digest is now taken as a letter-class line whose count was not written, with the count defaulting to 1, which is what mdxfind emits. Both CAP strategies were already implemented and are unchanged. Measured: freshly generated e749 output at -i 3 goes from 39 of 57 to 57 of 57, complete at every depth, and the work.res x01 lines go from 0 of 6 to 12 of 12. False positives: 0 against 3000 distinct 40-character hex digests taken from work.res and fed a wrong password, with the correct-password control at 57 of 57 - worth measuring deliberately because accepting a bare digest widens what this verify will consider. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified. Recorded, NOT fixed here, because it is pre-existing and lives in shared dispatch rather than in any one type: identical input lines can receive different iteration labels. Both hot-path labels stamp match_iter as 1 unconditionally, while the slow verify path takes it from WS verify_iter, so a verify type whose function never sets verify_iter reads bare on first sight and x01 on every repeat. Reproducible single-threaded with three identical copies of one line. Affects 11 of the 291 registered verify vectors, and the correct answer differs per type: work.res carries 11 bare MACOSX and 11 bare MACOSX7 with no xNN form, so there the repeats are wrong, while SHA1SHA11CAP appears 1235 times with xNN and never bare, so there the FIRST occurrence is wrong. The other eight are absent from work.res and have no ground truth. This is what made the MACOSX label appear to flip between runs across 1.151 and 1.152; it is deterministic, and a claim in 1.152 that the label had been confirmed order-independent was based on an isolated single-line test that could not reproduce the condition.
+ *
+ * Revision 1.152  2026/09/01 17:02:18  dlr
+ * Iterate SHA1SHA1TRUNC-SHA1PASS-3 (e684), completing the TRUNC family at depth. e684 hand-rolls its own left and right compare rather than sharing verify_sha1_truncnosalt, and sits outside the regions converted in 1.149, so it was the last TRUNC type still matching only at x01. Both compare sites now call sha1_hex_iter_match. This lands together with Dave fixes to the two mdxfind buffer-aliasing sites reported with 1.149 and 1.150 - the sha1trunc label and the md6 TRUNC case scratched their iteration hex into newbuf while newbuf still held the salt string, so the reported N was destroyed from x02 onward for e626, e644, e656, e657, e661, e684, e750 and e755. Fresh mdxfind output now carries a numeric N at every depth where e626 previously gave 22 of 42 at x02. Measured on freshly generated mdxfind output for all 31 TRUNC types at -i 3, since testhash.orig and work.res have not been regenerated and remain stale for these types: 46350 of 46350 lines resolve, every type complete, with 165 lines reporting an alias label. Every alias is a case where mdxfind can generate a byte-identical hash under the reported type - the fixed-N uNN families, the full-width parents whose cut is a no-op, the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair, and SHA1SHA1TRUNC at N=40 reporting as SHA1x02, which is arithmetically the same value. Paired false-positive control on the same corpus fed a wrong password: 0 of 46237, against 46350 of 46350 on the matching correct-password run. e726 SHA1SALTSHA256TRUNCMD5 also resolves against fresh output; its earlier failure was a stale fixture value, not a defect. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified. The John run shows two label changes, MACOSXx01 to MACOSX and MACOSX7x01 to MACOSX7. These are CORRECTIONS: work.res carries 11 bare MACOSX and 11 bare MACOSX7 with no xNN form at all, so hashpipe now agrees with mdxfind where it previously did not, and the 1.146 note asserting that mdxfind emits the x01 suffix for these was wrong. The new labels were confirmed stable and order-independent rather than the result of residual verify_iter state.
+ *
+ * Revision 1.151  2026/09/01 15:32:24  dlr
+ * Iterate SHA11SALTMD5UC (e718) and SHA11SALTMD5SHA256 (e763). Both were held out of the 1.150 conversion because mdxfind could not produce correct iterated values for them: lacking a case in the iteration switch they fell to the default arm, mymd5, which writes 16 bytes into a 20-byte SHA1 digest and left bytes 16 through 19 stale from the previous round. The signature was visible in the data as 960 of 960 x01-to-x02 pairs sharing their last 8 hex characters, where control types showed 0 of 960. Dave has since added both cases in mdxfind and regenerated the fixture, so the two are now convertible. Neither routes through try_1salt_5combo; each hand-unrolls the same five salt-placement combinations, so all ten compare sites are converted individually to hex_iter_match with ITER_SHA1. Measured on Dave regenerated 48000-line fixture, which carries 9600 lines at each of x01 through x05: hashpipe -E /dev/null -m e718,e763 -i 5 goes from 9600 to 48000 of 48000, every depth complete where before only x01 resolved. Label agreement confirmed separately on an independently generated 4800-line fixture, since the regenerated one was withdrawn mid-check: 4800 identical labels, 0 differing, 0 unresolved. False positives on the 48000-line fixture fed a wrong password: 0. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against 1.150.
+ *
+ * Revision 1.150  2026/09/01 15:20:37  dlr
+ * Extend internal xNN iteration to the non-TRUNC verify types. Generalises the 1.149 helper into hex_iter_match with an outer-hash kind - SHA1, MD5, MD4 or NTLM, that last being md4(utf16le(x)) per the rule recorded in 1.146 that md4(utf16le(X)) iterates as NTLM and not as plain md4. The kind for every type was DERIVED FROM MEASUREMENT, not from the name or the hx.8 expression: for each candidate, x01 and x02 lines were paired from work.res on matching salt and password and the outer hash identified by which primitive reproduces x02 from hex(x01). Sample sizes ran to 40960 pairs per type, and the derivation contradicted the naming convention twice - MD4UTF16DESCRYPT is NTLM-outer despite its name reading outer-first, and hx.8 lists it as descrypt-outer. 32 verify functions converted, plus try_1salt_5combo, which is shared by the SHA11SALT and MD51SALT families and picks its kind from its existing use_sha1 argument, so seven more types inherit the fix through it. try_1salt_5combo also built its message, digest and candidate on the STACK and is now on WS slots. Measured on work.res: HTV types verifying at x02 and x03 go from 23 of 76 to 56 of 76. All 20 that remain are accounted for and none is an iteration defect. Three are BLAKE2, whose result is structured rather than a hex digest and which therefore must NOT iterate under Dave rule of 2026-09-01. Eight TRUNC types are blocked by the mdxfind newbuf aliasing bug reported with 1.149. Two, SHA11SALTMD5SHA256 and SHA11SALTMD5UC, carry an mdxfind partial-digest-copy bug: across 960 of 960 x01-to-x02 pairs the last 8 hex characters are IDENTICAL, so only 16 of the 20 SHA1 bytes are updated on iteration, while control types MD51SALTMD5UC and SHA11SALTMD5 show 0 of 960. That is the same signature as the GOSTHEXSALT defect. Four PEPPER types cannot be verified from their emitted line at all, since the expression needs both salt and pepper but only one field is written. Two, SHA1MD5SALTPASSPEPPER and SHA1MD5x1CAP, fail at x01 as well and so are a pre-existing verify gap rather than anything to do with iteration. One, e726, has a work.res value current mdxfind does not reproduce. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the 1.149 run, so 0 lost, 0 gained, 0 attribution changes; 0 false positives across 636 wrong-password lines at -i 3, which matters more here than usual because iteration hands a wrong password Maxiter chances to collide.
+ *
+ * Revision 1.149  2026/09/01 15:07:47  dlr
+ * Let verify types walk the mdxfind xNN chain internally. Dave rule 2026-09-01: if the result is a hex-type hash it must be iterate-able; a structured result does not. The generic iteration paths skip verify types outright, since a verify function returns a boolean rather than a digest, so every HTV type could only ever match at x01 - 76 of them appear in work.res at xNN>=2 across about 1.6M lines. New helper sha1_hex_iter_match walks x(n+1) = sha1(hex40(x n)), the rule mdxfind implements literally, and reports the depth through verify_iter. Wired into the whole TRUNC family: both cut directions of verify_sha1_truncnosalt and verify_sha1_truncsalt, trunc_nosalt_verify, the CAP pair e656 and e657, and the 1SALT pair e638 and e639. The three BLAKE2 types are structured and deliberately excluded. Two further fixes. trunc_nosalt_verify built its digest, hex and candidate on the STACK; it was the last verify function doing so and is now on WS slots, closing the class that 1.141 and 1.142 opened. e601 SHA1PASS-TRUNC was registered with flags 0 although it is sha1(sha1(pass) . cut(pass,0,3)), so the unsalted iteration branch re-applied the WHOLE construction to the hex instead of the outermost hash - it now carries HTF_COMPOSED and an outer_fn of compute_sha1, which is one concrete instance of the mis-flagged-registration class still outstanding. Measured on work.res, mdxfind own output: TRUNC types verifying at x02 and x03 go from 0 of 30 to 21 of 30. The 9 that remain are NOT hashpipe defects. Eight are blocked by an mdxfind buffer aliasing bug reported separately - the sha1trunc label and the md6 TRUNC case use newbuf as BOTH the salt string and the iteration hex scratch, so from x02 the reported salt is the first saltlen characters of the previous hex rather than N. Reproducible in fresh output: e626 emits 42 of 42 numeric salts at x01 but only 22 of 42 at x02, the rest hex fragments such as 8f taken from its own x01 hash 8f357f8a. The control is e622, which scratches into mdbuf instead and emits 88 of 88 numeric at x02, all verifying. The ninth, e726, carries a work.res value current mdxfind does not reproduce and needs the fixture regenerated. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the pre-change run, so 0 lost, 0 gained and 0 attribution changes; 0 false positives across 1397 wrong-password lines run at -i 3, where iteration gives a wrong password Maxiter chances to collide and none does.
+ *
+ * Revision 1.148  2026/09/01 14:39:50  dlr
+ * Complete the TRUNC family: enumerate the truncation length N for the thirteen types that could not. These were registered as fixed 16-byte compute chains with no notion of N, two of them marked placeholder in the source, so they could never match anything mdxfind emits - the same defect fixed for e723/e750/e755 in an earlier pass, and the last of that class. New helper verify_sha1_truncnosalt parses the stored digest:N, hashes the leading N characters of the intermediate hex and, for the ten types that emit it, the trailing N as well. hx.8 Note [24] now documents that two-cut emission. No concat buffer is needed since the cut is a substring, and all buffers are WS slots, never the stack. Converted to HTV: e622 SHA1SHA256TRUNC, e623 SHA1SHA256TRUNCMD5, e626 SHA1SHA1TRUNC, e630 SHA1SHA256UCTRUNC, e635 SHA1WRLTRUNC, e636 SHA1SHA512TRUNC, e644 SHA1MD6TRUNC, e653 SHA1WRLUCTRUNC, e661 SHA1SHA1UCTRUNC, e689 SHA1SHA512UCTRUNC, e710 SHA1SHA3-256TRUNC, e745 SHA1SHA384TRUNC, e746 SHA1RMD160TRUNC. Each test vector is generated by mdxfind at a mid-range N so it exercises real truncation rather than the degenerate full-width case. Also fixes e672 SHA1WRLUCTRUNCSALT, which hex-encoded its whirlpool digest with prmd5 instead of prmd5UC despite the UC in its name; its registered vector had been generated by the matching mdxfind bug and so passed the self-test while both sides were wrong. Replaced with the corrected value from Dave regenerated fixture. Measured over every line mdxfind -z emits for all 31 TRUNC types: 15431 of 15431 verify, up from 200 of 360 on the earlier sample. The 44 lines that report a different label are all legitimate aliases where mdxfind can generate a byte-identical hash with the reported type - the fixed-N uNN families, the full-width parents where the cut is a no-op, and the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair. Self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified, unchanged, with no line attributed to any changed type; 0 false positives across 1397 wrong-password lines.
+ *
+ * Revision 1.147  2026/09/01 13:16:13  dlr
+ * Iterate EVERY registered base encoding for multi-emit families, not just the last one tried. hx.8 Note [24] calls these multi-emit: a type registered with HT_ALT2 computes more than one digest per password and mdxfind emits all of them. GOSTHEXSALT is the case - hexsalt_inner builds its message three ways, with a separator, without one, and with colons on both sides - and mdxfind emits a digest for each. The composed hard pass seeded its iteration base with a memcpy from computed, which at that point holds whichever x01 attempt ran LAST, namely compute_alt2. So exactly one of the three encodings ever became an iteration base and the other two could not verify past x01. Measured on the corrected GOSTHEXSALT fixture: 512 of 768 at x02, which is precisely 2 of 3 missing. Both the composed hard pass and the salted hard pass now compute the base for each registered encoding in turn - primary, compute_alt, compute_alt2 - and run the iteration loop for each. The x01 checks already tried all three; only the iteration base was single-valued. Credit where due: Dave found and fixed the mdxfind side of this, which was the larger bug. GOSTHEXSALT iterations above x01 were computed wrong there, a leftover from when GOST came from rhash, and it copied only 16 of the 32 digest bytes. The tell was visible in the data - across x01 and x02 the first 20 bytes changed while the last 12 were byte-identical, which no real 32-byte digest does - and it was caught because the regression fixture exercises depths the self-test never reaches, the self-test carrying exactly one vector per type at x01. work.res and testhash.orig were regenerated with the corrected values; the isolated fixture is ~/src/mdfind/t. Verified: the whole 38400-line corrected GOSTHEXSALT fixture now resolves 38400 of 38400, where before the fix only the x01 third did. Self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS; per-type pair test 278 of 278 alone and paired; John corpus 0 lost, 0 gained, 0 attribution changes; 0 false positives on the wrong-password corpus. NOT changed, deliberately: mdxfind emits a bare GOSTHEXSALT label where hashpipe emits GOSTHEXSALTx01. Dave judges the regularised form arguably more correct than the historical output and not an error, so it is left alone rather than smuggled into a correctness fix; it belongs with the wider label-suffix decision. Also untouched: the TRUNC family, which enumerates a truncation length N that hashpipe does not currently generate.
+ *
+ * Revision 1.146  2026/09/01 06:59:58  dlr
+ * Populate outer_fn for composed and salted types from hx.8. Work by mdx-debug; verified independently before check-in. 1.145 gave chained types their outermost iteration primitive but only where a chain existed, so HT registrations carrying a monolithic compute still fell through to hash_by_len and its width guess. This adds a 448-row name-to-function table, applied only where outer_fn is still NULL so HTC-derived values keep priority, and scoped to HTF_COMPOSED and HTF_SALTED since those are the only flags that consult it - a plain unsalted type iterates via ht->compute, which already IS its outermost hash. Strictly additive: 506 lines added, none removed. iter_fn and the -q class are untouched and the five -q types are held out of the table entirely. The table is DERIVED, not typed: scratchpad/gen_outer.py reads every hx.8 row, takes the outermost call, unwraps the non-hash wrappers upper, lower, hex and emit, and maps the primitive to this file compute functions. Four things the derivation exposed. First, troff markup hides expressions: a row reading md5(pass . salt) followed by an italic note failed a whole-string parse, and stripping the markup took resolution from 668 to 807 rows; 22 more sit in T-brace continuation cells. Second, unwrapping the outermost call is NOT sufficient - md4(utf16le(X)) iterates as compute_ntlm, not compute_md4, which is exactly what the HTC chains of that family already carry as their tail; cross-checking every chain tail against the hx.8-derived value found 23 disagreements of that shape, 5 of them HT-only and therefore silently wrong had the check not been made. It is distinct from md5(utf16le(pass) . salt), where the argument is a concatenation and the outer hash really is plain md5. Third, hash_by_len has no else arm, so outside 16, 20, 28, 32, 48 and 64 bytes it writes nothing at all and TIGERMD5 at 24 bytes, the HAV192 and HAV224 families and RMD320 were iterating into an uninitialised buffer. Fourth, the hinted and non-hinted paths disagreed: an unsalted composed type with no outer_fn fell to ht->compute in one and hash_by_len in the other. Judgement calls, recorded rather than guessed: 37 HMAC-outer types are excluded because HMAC is keyed and the salted path would call it with a NULL salt, and mdxfind emits no xNN for any HMAC type in work.res so there is no ground truth; 14 types have no single outermost call and are listed in scratchpad/unresolved_final.txt, of which seven are already at 100 percent on the gate so parsing them buys nothing. Measured against regress/work.res, which is mdxfind own output, testing EVERY line rather than one per label: over all 6514106 lines, verified rises from 2503483 to 2516807, a gain of 13324 with zero lines lost in any group, 62 groups improved and 36 reaching 100 percent. Label mismatches are unchanged at 421701 and a dedicated pass confirms every one is suffix-only, with no cross-type answer to round-trip. Independently reproduced here on a 3506-line per-label sample: 2489 to 2629, and MD2MD5 now verifies at x01, x02 and x03 where before it stopped at x01. Regression gates all hold: self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS; per-type pair test 278 of 278 alone and paired; John corpus 0 lost 0 gained with four attribution CORRECTIONS toward mdxfind - three MD5CAPx01 lines become MD5x02, which independent computation confirms is the right answer, and MACOSX gains the x01 suffix mdxfind emits; 42405 wrong-password lines across all changed groups give 0 false positives.
+ *
+ * Revision 1.145  2026/09/01 05:41:31  dlr
+ * Iterate the OUTERMOST hash for chained types instead of guessing from the digest width. mdxfind rule, stated by Dave: the outermost hash is what iterates, always. hashpipe was calling hash_by_len, which maps the digest WIDTH to a fixed primitive - 16 bytes to MD5, 20 to SHA1, 32 to SHA256, 64 to SHA512 - and is therefore correct only by coincidence, whenever the outer hash happens to be that width default. Measured: MD2MD5 is md2(md5(pass)) per hx.8, outer MD2, 16 bytes, so it was iterated as MD5 and diverged from mdxfind at x02. Confirmed against mdxfind own output that MD2MD5x02 equals md2(hex(x01)), the outermost hash iterating, not the whole chain repeating. New hashtype field outer_fn holds that primitive. It is deliberately NOT iter_fn: iter_fn additionally marks the -q internal-iteration class, since maxinner is Iterstep when iter_fn is set and Maxiter otherwise, so reusing it would have swept every chained type into that class. All five iteration dispatch sites now prefer iter_fn, then outer_fn, then hash_by_len, leaving the -q class and its five types untouched. HTC chain types derive outer_fn automatically from chain[nchain-1].fn, which is already known to be the outermost step - the adjacent is_raw test uses the same element. This pass covers the chain types only. HT registrations carrying HTF_COMPOSED hold a monolithic compute function with nothing to introspect and still fall through to hash_by_len; deriving those from MAKE_COMPOSED resolves only 66 of 253, and function names cannot be trusted for it because the type name is outer-first while the function name is inner-first - SHA1MD5 registers compute_md5sha1. hx.8 is the source for the rest and that work is separate. Measured on a 3506-line sample taken one line per distinct label from regress/work.res, which is mdxfind own output: forced-type verification goes from 2397 to 2489, a gain of 92 with no losses. Four previously failing chain types verify at x02 and x03: MD4SHA1MD5, MD4UTF16MD5MD5, MD4UTF16MD5MD5MD5, MD4UTF16MD5MD5MD5MD5. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278 alone and paired; userdef round trip PASS; John corpus unchanged with 0 lost, 0 gained, 0 attribution changes and 0 false positives.
+ *
+ * Revision 1.144  2026/09/01 00:31:42  dlr
+ * Read a John username that arrives in its OWN leading column. John writes several formats as user colon dollar dynamic N dollar hash, marking the name by position rather than with a dollar U token inside the wrapper. Because such a line does not START with dollar dynamic, john_unwrap never recognised the wrapper and the generator skipped the vector outright, so these formats could not be read and could not be mapped. Both sides now split the column off, unwrap the remainder, and splice the name back as the positional field - the same slot dollar U feeds, so the type verifier reads it identically. In hashpipe the unwrap writes straight into the caller buffer and the splice is done in place, so it costs no second buffer; recursion is depth 1 because the remainder begins with dollar dynamic and cannot re-enter the branch. One row gained, dynamic_1034 PostgreSQL MD5, which lands on MD5PASSSALT rather than POSTGRESQL because md5 of pass then user is arithmetically md5 of pass then salt and ties break to the lowest eN, the same situation the header already documents for dynamic_36. Recorded in the generator rather than fixed: when the wrapper ALSO carries a salt field, whether the leading column is the field the type reads is per-format, not general. dynamic_15 needs it kept, because its four sampled vectors mix the two shapes and dropping the name for the leading-column ones failed those vectors and cost the format its row entirely. dynamic_1602 needs the opposite, since QAS-VASAUTH reads hash colon salt and ignores the name. A global rule cannot satisfy both, so the column is used only when the wrapper has no field of its own; dynamic_1602 stays unmapped rather than cost dynamic_15 its row. That tradeoff was found by measuring, not reasoned: the first attempt gained dynamic_1602 and silently lost dynamic_15. Measured: raw John input 4511 to 4553 verified lines, 0 lost, 0 attribution changes, 0 false positives across the 6970-vector corpus fed a wrong password. JohnMap unchanged at 132 rows with zero lost, JohnMapLocal 50 to 51. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278; userdef round trip PASS.
+ *
+ * Revision 1.143  2026/09/01 00:14:28  dlr
+ * Read John config-defined dynamics natively. John distinguishes two kinds of dynamic format in its own subformats listing: Format for an expression compiled into John, and UserFormat for one it read from dynamic.conf. john_unwrap refused everything numbered 1000 or above with the comment user-defined, not ours to guess, and the generator filtered the same range out of its list, so none of the config dynamics could ever be read from a raw John line. That is 70 formats on this machine, and 49 of them now read. The asymmetry that makes this safe: the numbering of a UserFormat belongs to dynamic.conf and not to John, so a row is NOT interchangeable between machines. On INPUT that costs nothing, because john_unwrap only rewrites the line into a candidate shape and the verify still has to reproduce the digest - a machine whose conf numbers differ simply fails to verify, exactly as it did before the table existed. On OUTPUT there is no such safety net, since john_label_for would stamp a John name on a crack on the strength of the table alone. So the generator now emits a SECOND array, JohnMapLocal, that only the input path consults; john_label_for keeps using JohnMap alone and its behaviour is unchanged. The generator needed restructuring, not just a wider filter. Config dynamics are frequently exact aliases of a built-in - dynamic_2001 IS dynamic_1 - and ship the SAME test vectors, while the confirm pass keys its digest-to-format map on the digest alone. Running both sets through one pipeline let the alias overwrite the built-in and silently dropped 12 built-in rows. That was caught by measuring the generated table before installing it, which is the discipline this script already carries in its history after an earlier change produced an empty table. Steps 2 through 6 are now a build_map function run independently per list, and the JohnMap section of the regenerated header is byte-identical to the installed one: 132 rows, zero gained, zero lost, plus 50 new local rows. Measured: raw John input with no pre-processing goes from 3367 verified lines to 4511, with 0 lost, 0 attribution changes and 0 false positives across the 6970-vector corpus fed a wrong password. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278 alone and paired; userdef round trip PASS.
+ *
+ * Revision 1.142  2026/08/31 23:10:04  dlr
+ * Move every remaining length-fed verify buffer off the stack. This is a CORRECTNESS fix, not just hardening. Eleven verify functions built their message in a fixed stack array guarded by a sizeof check; the guard prevented the overrun but did so by RETURNING 0, which reports a correct password as a non-match. With 40000-byte passwords present in the HIBP corpus this is a live silent-negative, not a theoretical one. Measured before the change: a genuine MACOSX hash verifies at passlen 1020 and fails at 1021, because the buffer was 1024 and the guard was 4 plus passlen greater than sizeof. Thresholds ranged from about 992 for CISCOISE up to 1024, and MEDIAWIKI and DAHUA capped their salt at 256. Converted to the pre-allocated per-thread workspace with the bound restated against WS_GP_SIZE, which is MAXLINE plus 16 and therefore larger than any line the parser can hand a verify function: HMAILSERVER, MEDIAWIKI, DAHUA, NETSCALER, MACOSX, MACOSX7, ARUBAOS, JUNIPERSSG, CISCOISE, EPISERVER and SHA1CUSTOMUSERSALT. Slot choice is per function after checking which are already live; DAHUA reuses one slot for two blocks that are sequential and disjoint. EPISERVER and SHA1CUSTOMUSERSALT were missed by the first sweep because they copy a derived length - EPISERVER uses u16len, which is twice passlen after UTF-16 expansion, so its effective cap was around 500 characters. After the change MACOSX and MACOSX7 verify a 39000-byte password that previously did not verify at all. The only fixed array left in a verify function is SIMPLACMS inner_hex, which holds a 16-byte digest as hex and is not length-fed. Together with 1.141 this closes the whole class: no verify function now builds a message on the stack. Validation: long-password stress over all 278 registered verify types with a 30000-byte password gives 0 crashes and no lost verifies; per-type pair test 278 of 278 alone and paired, byte-identical to 1.141; the 6970-vector John corpus under both a strict all-verify -m and bare auto shows 0 lost, 0 gained, 0 attribution changes; self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS.
+ *
+ * Revision 1.141  2026/08/31 22:58:32  dlr
+ * Fix three stack buffer overflows in verify functions. All three were live smashes on ordinary input at the DEFAULT -L, and all three predate this session - 1.138, 1.139 and 1.140 abort identically. Found when a wrapper-stripped BKS line of 2455 bytes aborted with stack_chk_fail inside verify_samsungsha1, which built its iteration-0 message in a 2048-byte STACK buffer from 1 plus passlen plus saltlen with no bound at all. A long-password stress over all 278 registered verify vectors, each with its own type selected and a 30000-byte password, then found two more: verify_drupal7 taking 8 plus passlen into a 1024-byte stack buffer, and verify_nsec3 taking a length byte plus passlen plus the domain labels plus the salt into a 1024-byte stack wire buffer. In every one of the three the iteration loop immediately below ALREADY used WS->gp1 correctly; only the setup block was missed, which is exactly why this survived review. All three now build in the pre-allocated per-thread workspace and are bounded once against WS_GP_SIZE. nsec3 needed gp3 because gp1 is salt_bin and gp2 is its iteration buffer. Twelve verify functions used the fixed-stack-buffer pattern. NINE carried a correct sizeof bound immediately before the copy and are safe; these THREE omitted it. That ratio is the argument against the pattern itself: the guard is invisible when absent and no build check catches it, whereas a WS slot cannot be sized wrong. The nine bounded sites are left alone here as they are not defects, but new verify functions should use WS buffers from the start. Recorded in the memory notes. Validation: the original crashing line now exits 0; the long-password stress across all 278 types gives 0 crashes where it previously gave 2; per-type pair test still 278 of 278 alone and paired, byte-identical to 1.140; the 6970-vector John corpus under both a strict all-verify -m and bare auto shows 0 lost, 0 gained and 0 attribution changes; self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS.
+ *
+ * Revision 1.140  2026/08/31 22:21:34  dlr
+ * Fix the residual verify loss: the bare-separator walk truncating non-hex hashes when no type hint is set. Diagnosis by mdx-debug. This is the other half of the class repaired in 1.139, and it survived that fix because it is a different mechanism: the line is never dropped, it is MIS-SPLIT. When two or more verify types are selected, parse_line sets no hint, hex validation of the field fails, and the bare-separator walk takes the first split whose other side is a complete even-length hex run. WPA-EAPOL had its 403-byte field truncated to a 2-byte hash of 00; POSTGRESSCRAM256 to 4096. The verify function then sees a fragment and cannot match. Affected exactly four types, by measurement over all 278 registered verify vectors run individually: WPA-EAPOL, WEB2PY-SHA512, SQLCIPHER, POSTGRESSCRAM256. The predicate needs all five of: field non-hex to the first colon, not a wrapper, contains one of dollar hash star, the walk finds an even-length hex side, and no shape recogniser. That is why WPA-PMKID and WPA-PMK survive with no recogniser at all, the walk simply declines them, and why WERKZEUG and the SAP pair survive despite the walk being willing, a recogniser fires first. The obvious fix, suppressing the walk when several verify types are selected, REGRESSES and was rejected on measurement: of the John corpus, 169 lines are walk-eligible, 103 take the walk and 70 DEPEND on it - HMAC family, mysql-sha1, leet, FormSpring. It costs 4 leet lines under strict and 70 under auto. No local heuristic separates the two groups; one dependent HMAC key is literally Beppe hash Grillo, structurally identical to a SQLCIPHER field. So the walk is DEFERRED rather than suppressed: a new per-item walk_deferred flag records that the split was withheld, and the walk is retried inside the EXISTING all-verify-types-failed recovery, mirroring the adjacent hex recovery. The deferred branch must also restore salt and password exactly as parse_line would have, or 26 mysql-sha1 stress lines are silently lost. The variant chosen also covers bare auto-detect, where the same truncation was not merely losing matches but GENERATING false ones: WPA-EAPOL auto-resolved to HMAC-HAV128x01 and POSTGRESSCRAM256 to SHA1MD5CAPSHA1SALTx01, both from a hash truncated to two bytes. All four now resolve correctly under bare auto. Measured per-type, each vector alone and then paired with a second verify type: 1.138 gave 188 of 278 paired, 1.139 gave 274, this gives 278 of 278 with zero lost. Over the 6970-vector John corpus: strict bundled -m is 0 lost, 0 gained, 0 attribution changes; bare auto is 0 lost, 0 gained with one cosmetic delta where a MACOSX7 line now reports its iteration suffix as x01. Self-test 1026 passed 0 failed, genbad 103 of 103, userdef round trip PASS, and the exhaustive false-positive sweep of all 278 wrong-password lines against all 278 types found 0. Flagged but deliberately NOT fixed, and recorded in the hashpipe memory doc at Dave request: hash_class is assigned from item hint vclass with the comment trust the hint, but three sites set that hint to a placeholder chosen purely by ModeList ordering. Harmless under strict -m since the earlier return fires first, a real hazard under -m with auto. Pre-existing and untouched here.
+ *
+ * Revision 1.139  2026/08/31 18:59:08  dlr
+ * Fix the ModeList verify pass losing matches when more than one verify type is selected. Diagnosis by mdx-debug; the two HTF_SALTED gates on the hash-colon-salt and hash-colon-alt_salt reconstructions are removed. Chain: parse_line only sets item->hint when EXACTLY one verify type is in -m, so two or more give hint NULL; with hint NULL and a hex-leading hash the parse splits at the FIRST colon, leaving hashstr as the bare digest and moving the salt into item->salt; the verify function then looks for a colon inside hashstr, does not find one, and returns 0. The two reconstruction branches exist to repair precisely this, but were gated on HTF_SALTED, which only 4 of 273 verify types set, so both were effectively dead code. The un-gated slow-queue scan does the same reconstruction correctly, which is why appending auto always worked. HTF_SALTED is meaningless for a verify type since the verify function parses its own hashstr. Both edits sit inside the if (ht->verify) block, so compute types are untouched. Measured on this tree with all 278 registered verify vectors and all 278 verify indices bundled into one -m: stock 189 attributed, fixed 273, so 84 types recovered, ZERO lost and ZERO attribution changes for anything already found. The 3 vectors that resolve to an alias name (SOLARWINDS2 to SOLARWINDS, SHA1MD5x1CAP to SHA1MD51CAP, SHA1SHA1CAPTRUNC to SHA1SHA11CAP) do so identically before and after; those are the intentional historical catalog aliases and are not a regression. False positives: all 84 recovered types re-run with a deliberately wrong password give 0 matches. Self-test 1026 passed 0 failed; genbad 103 of 103; the original reproducer -m e444,e278 now resolves LEET-SHA512-WRL-USER. Cost: verifies that previously short-circuited now actually run, so a bundled 278-type -m goes 2.3s to 3.8s on this fixture; a single-type -m is unchanged at 0.36s. This matters because -m stays STRICT by design per Dave 2026-08-31 - with no auto fallback there is nothing to recover a lost verify, so the gate had to go.
+ *
+ * Revision 1.138  2026/08/31 16:44:32  dlr
+ * Add e1027 SUNMD5, the Solaris crypt, completing the crypt(3) group sourced from John the Ripper. The initial digest is md5 of pass then salt; thereafter 4096 plus the rounds= value are run, each computing md5 of the previous digest, optionally a fixed 1517-byte phrase, and the decimal round number in ASCII. Whether the phrase is included is decided per round by a coin flip derived from bits of the previous digest: two seven-bit indices are assembled from digest bytes and the XOR of the bits they address gives the flip, so roughly half the rounds hash an extra 1517 bytes and the cost is data dependent rather than fixed by rounds= alone. The phrase is 1516 characters of Hamlet PLUS its terminating NUL, because Sun passed sizeof() - dropping the NUL yields a plausible but wrong digest for every candidate. The salt is everything before the LAST dollar sign, which also covers the variant whose salt itself ends in a dollar sign, with no special case. Digest is emitted with the md5crypt transposition, 22 characters. All 8 of John vectors verify in hashpipe and crack in mdxfind, including its 120-character password and the two vectors that share a salt, and mdxfind -z output cracks back in both tools. Two mdxfind-side traps worth recording: Typesalt for these structured types holds the WHOLE stored line, not the salt, so the salt must be re-derived inside the compute case; and the bootstrap FREES JudyJ after copying it into Typesalt, so a JSLG lookup there can never hit - compare the computed encoding against the stored line, as GOST12512CRYPT does. Both mistakes presented identically as a clean 0 of 8 with the hashes correctly loaded. New hx.8 row plus Note [46]; notes contiguous 1 through 46. Types[] APPENDED and verified identical between mdxfind.c and hashpipe.c. Self-test 1026 passed 0 failed; genbad 103 of 103; John corpus sweep shows the new types matching only their own vectors; bench rate measured on dev1.
+ *
+ * Revision 1.137  2026/08/31 16:28:31  dlr
+ * Add e1025 GOST12256CRYPT and e1026 GOST94CRYPT, completing the GOST crypt family alongside e994 GOST12512CRYPT. Both are the Drepper schedule that SHA256CRYPT and SHA512CRYPT use, with the SHA replaced by a GOST digest, defaulting to 5000 rounds and honouring an explicit rounds= field. e1025 substitutes Streebog-256 and e1026 substitutes GOST R 34.11-94; both yield a 32-byte digest and so use the sha256crypt transposition with a 43-character stored hash, where e994 uses the sha512crypt transposition with 86. In mdxfind both reuse the existing shared crypt_round path, setting only the four function pointers, cryptlen 32 and the prefix length, so no new schedule code was written; the cryptlen 32 encode branch already existed for SHA256CRYPT and SM3CRYPT. e1026 uses the TEST parameter S-box, not CryptoPro, matching e13 GOST rather than e14 GOST-CRYPTO: John gost94hash carries a john_gost_cryptopro_init override but leaves it commented out, and the bundled gosthash is the test-parameter build. Streebog output is byte-reversed by the bundled Saarinen implementation, so e1025 reverses each digest exactly as e994 does. All 3 of John vectors for each type verify in hashpipe and crack through mdxfind -M and -F, and the cracked set is exactly the input set with nothing spurious. Also recorded: John streebog512crypt needed NO new type - it was already covered by e994 unchanged, and only appeared missing because the earlier sweep ran with -L too low and the cost guard silently declined the verify. New hx.8 rows plus Note [45]; notes contiguous 1 through 45. Types[] APPENDED and verified identical between mdxfind.c and hashpipe.c. Self-test 1025 passed 0 failed; genbad 103 of 103; bench rates measured on dev1.
+ *
+ * Revision 1.136  2026/08/31 16:13:21  dlr
+ * Add e1021 through e1024, the four DragonFly BSD crypt variants, sourced from John the Ripper. Each is a SINGLE sha256 or sha512 of pass, magic, salt with no round loop, which makes them among the cheapest salted types in the catalogue. The magic is the format tag INCLUDING its NUL terminator; on 64-bit builds its length was taken as 8 rather than 4, so four adjacent rodata bytes ride along after the NUL (sha5 for the 3 tag, /etc for the 4 tag). That is the bug the variant names refer to, and both variants are in the wild. Because the NUL is interior to the hashed string, neither can be expressed as an ordinary salted type with a textual salt. Output uses the sha256crypt and sha512crypt transposition, but the 4 tag encodes only 62 of the 64 digest bytes, so bytes 62 and 63 never appear in the stored form and we encode forward and compare strings rather than decoding. The stored forms of the 32- and 64-bit variants are IDENTICAL, so a line is loaded into both types of its pair and only the correct one verifies. All 24 of John the Ripper vectors were reproduced by an INDEPENDENT Python implementation before this code was written, so the check is not circular; mdxfind -z regenerates John published strings byte for byte, and all 24 crack through -M and -F with no cross-matching and no false positives. Types were APPENDED to the end of Types[] because the index is the type identity. The hx.8 rows spell the NUL as fromhex 00 rather than a troff escape: hx8_to_c copies the expression column verbatim, so a troff escape bakes the literal characters into the generated catalog and silently disables the dedup gate. Self-test 1023 passed 0 failed; genbad 103 of 103; bench rates measured on dev1.
+ *
+ * Revision 1.135  2026/08/31 15:47:21  dlr
+ * Add e1020 ARGON2MD5, Argon2 over the MD5 hex of the password, which is vBulletin 6's scheme and the successor to e451 BCRYPTMD5 for vBulletin 5. hashpipe splits the existing Argon2 body into argon2_core and wraps it twice, so the two types share one parser and differ only in what is fed as the password. mdxfind shares the procjob case on job->op for the same reason. The stored form carries no marker saying whether the password was pre-hashed, so whichever type is selected gets its own JudyJ entry AND its own Typesalt entry; keying the salt only under ARGON2, as the first cut did, left a selected ARGON2MD5 with an empty snapshot computing nothing while still reporting hashes read. Verified both ways: the vBulletin vector is claimed by ARGON2MD5 and refused by ARGON2, and John's nine plain Argon2 vectors still verify under ARGON2 and are refused by ARGON2MD5. Benchmarked on dev1; every registered type still has a rate. Self-test 1019 passed 0 failed.
+ *
+ * Revision 1.134  2026/08/31 15:24:20  dlr
+ * Add e1018 MONGODB and e1019 H3C, sourced from John the Ripper and verified against its own test vectors. Both constructions were reproduced by an INDEPENDENT implementation before this code was written, so neither check is circular. MONGODB is md5 of user, colon mongo colon, and password, loaded and reported in the stored dollar mongodb dollar 0 form; John's type 1 is a sniffed challenge and response and is deliberately not loaded. H3C is sha512 of the password including its terminating NUL, the salt, then the password and NUL again, reported base64 in the dollar h dollar 6 form. Structured loaders, compute cases and -z bootstraps mirror JOB_SAPCODVNH512, and -z regenerates stored forms that crack back. Both types were APPENDED to the end of Types[]; the index is the type identity and inserting anywhere else renumbers everything above it. John's vectors: MongoDB type 0 one of one, h3c three of three.
+ *
+ * Revision 1.133  2026/08/31 15:02:24  dlr
+ * Emit John-native output under -J 2 for the seven John formats we now read. john_label_for drives a generic dollar name dollar hash dollar salt shape, which none of these use: WBB3 and IPB2 put the SALT first, mscash and oracle separate with a hash character, md5ns has no wrapper at all, and the two AS/400 forms order their fields differently again. Each now has an explicit pattern, the exact inverse of the wrapper recogniser that reads it, so a line taken from John comes back out in John's own spelling. Recovering the fields needs one extra step for verify types: a compute type carries its salt in item->salt, but a verify type parses its own hashstr and leaves item->salt NULL, so both fields are still inside hashstr in whatever shape that type registers and have to be split back out. JUNIPERSSG needs a second case there because it ACCEPTS John's user dollar hash directly, so its hashstr is already John-native and carries no colon to split on. Verified on John's own vectors: all seven emit John form and all seven re-read correctly when the emitted line is fed straight back in. -J 0 is unchanged and remains the default. Self-test 1016 passed 0 failed, genbad.pl 103 of 103, dollar conformance 36 of 36, zero false positives across 7134 John vectors, userdef round trip PASS.
+ *
+ * Revision 1.132  2026/08/31 14:51:39  dlr
+ * Close the last two John format gaps by multi-format input, as several types already do. md5ns is handled where the Django precedent points: SHA1SALTPASS carries a verify function that accepts both the plain and the Django spelling, and verify_juniperssg now likewise accepts both our registered 30-char-hash colon user form and John's user dollar hash. Telling the two apart by shape is safe INSIDE a verifier, because a wrong reading simply fails to reproduce the digest and the line is not claimed; the same split at parse time would not be safe, since it would rewrite lines belonging to other types before any digest was computed. mscash turned out not to need that at all: John's dominant spelling is M dollar USER hash HASH, an unambiguous wrapper, and only one of its ten vectors uses the bare user colon hash form, which carries an empty password and cannot be cracked anyway. It is handled with the other wrappers, splitting at the LAST hash character because the username may itself contain one, as John's M dollar hash january hash vector does. An earlier attempt attached a shape-discriminating verifier to MSCACHE for the bare form; it never fired and is not shipped. All seven of the format gaps identified in the core-53 classification now resolve from John's own vectors with no pre-processing: wbb3 7 of 7, ipb2 4 of 4, md5ns 3 of 3, as400-des 12 of 15, oracle 12 of 24, as400-ssha1 5 of 9, mscash 5 of 10. Every shortfall is understood: as400-ssha1's remainder is dollar dynamic 1590, above the 1000 boundary refused by contract, oracle's is a bare user colon hash colon pass form indistinguishable from an ordinary salted line, and mscash's are vectors with empty or non-ASCII passwords. Not one new algorithm was added for any of these; every digest was reproducible by an existing type all along. Self-test 1016 passed 0 failed, genbad.pl 103 of 103, dollar conformance 36 of 36, zero false positives across 7134 John vectors, userdef round trip PASS.
+ *
+ * Revision 1.131  2026/08/31 14:28:43  dlr
+ * Recognise five more John wrappers that carry algorithms we already have. Each was a FORMAT gap and not a construction gap: the digest was reproducible by an existing type all along, and only John's spelling of the line stood in the way. Rewrites are dollar wbb3 star N star SALT star HASH to HASH colon SALT for WBB3; dollar as400ssha1 dollar HASH dollar USER to the dollar as400 dollar ssha1 form AS400SSHA1 registers; dollar as400des dollar USER star HASH likewise for AS400-DES; dollar IPB2 dollar SALT dollar HASH to HASH colon SALT; and O dollar USER hash HASH to HASH colon USER for ORACLE7. Each returns an empty type name rather than naming a type, because naming one sets item->hint and with a hint the hash and salt boundary is taken from the LAST colon, which mangles any password containing one; auto-detect resolves the rewritten line correctly. The hash part of every one of these carries no colon, so the FIRST colon ends it and the remainder is the password, copied verbatim. Results from John's own vectors: wbb3 7 of 7, ipb2 4 of 4, as400-des 12 of 15, oracle 12 of 24, as400-ssha1 5 of 9. The shortfalls are understood and not defects: as400-ssha1's remainder is dollar dynamic 1590, above the 1000 boundary this loader refuses by contract, and oracle's is a bare USER colon HASH colon PASS form that is indistinguishable from an ordinary hash colon salt colon pass line. Two further format gaps, md5ns and mscash, are deliberately NOT handled for that same reason: John writes them as USER dollar HASH and USER colon HASH with no wrapper at all, and guessing would misparse ordinary lines. Self-test 1016 passed 0 failed, genbad.pl 103 of 103, dollar conformance 36 of 36, zero false positives across 7134 John vectors, userdef round trip PASS.
+ *
+ * Revision 1.130  2026/08/31 13:55:36  dlr
+ * Benchmark the 19 types that had no rate, and correct the SAP CODVN H bench cost. Nineteen indices were absent from bench_rates.h: the fifteen added in this John work, e1003 through e1017, and four older ones, e432 MD5AM, e433 MD5AM2, e535 SHA1-CUSTOMUSERSALT and e676 SHA1-MD5sub8-24SALT. With no rate, verify_cost_exceeds sees bench_rate less than or equal to zero, treats it as no data and returns zero, so -L could never decline those types however low it was set. That is the inverse of the usual silent-decline trap and it mattered most for the two new SAP types at three and five thousand iterations. Measured on dev1, the canonical host named in the bench_rates.h header, using the documented incremental path; local iMac numbers are not substitutable, as the sibling-ratio note above this one records. Table goes from 997 to 1016 entries with nothing lost, and every registered type now has a rate. Separately the shared SAP routine passed 1024 as its bench cost, inherited from copying the SHA-512 sibling, but the skill defines that argument as the iteration count of the type's OWN test vector: 3000 for SHA-256 and 5000 for SHA-384. Passing 1024 scaled every estimate by three and five times respectively. Now parameterised, and -L 0.0001 declines SAPCODVNH384 where -L 100000 verifies it, which it could not do before. Self-test 1016 passed 0 failed; saph 14 of 14; genbad.pl 103 of 103; dollar conformance 36 of 36; zero false positives across 7134 John vectors; userdef round trip PASS.
+ *
+ * Revision 1.129  2026/08/31 13:25:18  dlr
+ * Add e1016 SAPCODVNH256 and e1017 SAPCODVNH384 in parity with mdxfind.c. One shared routine handles both widths, differing only in digest function and length; SHA-384 reuses the SHA-512 context as OpenSSL intends. The registered self-test vectors are John's own rather than self-generated. Both were briefly wrong because I read their passwords off a truncated terminal display: the SHA-384 password is booboo and not b, and the second SHA-256 password is GottaGoWhereNeeded and not GottaGoWhereNeede. Take the hash and the password from the same untruncated row. All 14 of John's saph vectors now verify, up from 10, and a wrong password is still rejected for both new types. Self-test 1016 passed 0 failed, genbad.pl 103 of 103, dollar-separator conformance 36 of 36, zero false positives across 7134 John vectors, userdef round trip PASS.
+ *
+ * Revision 1.128  2026/08/31 12:23:03  dlr
+ * Accept John's second-salt marker and a hex-wrapped field whose own dollar was consumed by the split. John marks a SECOND SALT with dollar dollar 2 exactly as it marks a username with dollar dollar U: dynamic_16 ships hash then salt then dollar dollar 2 then salt2. It occupies the same positional slot as a username and the verifier for the type decides how to read it, so both markers now take the same path. Separately, the salt pointer has already stepped past the separator by the time the field is examined, so a hex-wrapped field arrives as HEX dollar rather than dollar HEX dollar; testing only for the latter silently skipped the decode and left an undecoded field that could never verify. Both spellings are accepted and the decode offset is computed rather than assumed, since it differs between them. Not yet enough to map dynamic_16: three of its four vectors verify as MD5-MD5MD5PASSSALT-PEP but the fourth still fails the generator's confirm pass, so the row is deliberately absent rather than half-right. Self-test 1014 passed 0 failed, genbad.pl 103 of 103, dollar-separator conformance 36 of 36 and batch 9 of 9, zero false positives across 7134 John vectors fed a wrong password, userdef round trip PASS, 130 of 132 mapped dynamics resolve from raw John input.
+ *
+ * Revision 1.127  2026/08/31 11:49:33  dlr
+ * Let john_unwrap reach verify types, and split a username out of its own column when the $U marker follows another field. The wrapper handler refused any mapped type whose hashlen is zero, which is every verify type, so a John format whose construction happens to be implemented as one was dropped before a single field was examined: dynamic_15 maps to MD5USERMD5PASSSALT, dynamic_35 to SHA1UCUSERPASS and dynamic_36 to SHA1USERCOLONPASS, all three verify types, all three refused outright. The digest-width check further down is already conditional on hashlen greater than zero so it simply does not apply to them, and the gate was doing nothing else. Separately the $U marker was only recognised at the START of the trailing field, but John also places it AFTER another field: dynamic_15 ships hash then salt then dollar dollar U then user, a salt AND a user, and the whole thing arrived as one salt with the username buried inside it. The marker is now located anywhere in the field and the two parts are emitted as separate columns, mirroring tools/john_map_gen.sh 1.3. dynamic_15 now verifies from a raw John vector as MD5USERMD5PASSSALTx01; 130 of the 132 mapped dynamics now resolve from raw John input with no pre-processing. Note the John coverage harness does not move on this, because its own normalisation already strips wrappers and rewrites separators, so it counted these as covered while hashpipe itself could not read them; the gain is in native capability, not in that number. Self-test 1014 passed 0 failed, genbad.pl 103 of 103, dollar-separator conformance 36 of 36, zero false positives across 7134 John vectors fed a wrong password, userdef round trip PASS.
+ *
+ * Revision 1.126  2026/08/31 10:59:02  dlr
+ * Iterate '$', '#' and '*' as field separators inside the hash field, the way ':' is already iterated. Several John formats put the salt or the user beside the digest with no wrapper: leet is salt then dollar then hash, md5ns is user then dollar then hash. Those fields are not hex as a whole, so they were refused before any type saw them. Like ':', a dollar occurs freely inside salts and passwords, which is exactly why genbad.pl exists, so no single split position can be assumed: walk every separator position and take the first split whose other side is an even-length hex run, trying both orders since the digest is on the right in leet but not in every shape. A split that yields no valid digest is not taken and one that yields the wrong digest still has to verify, so this cannot mis-attribute; all 7134 John vectors fed with a deliberately wrong password still produce zero matches. Structured formats are excluded: a field beginning with a well-formed dollar name dollar wrapper, or with a brace or paren, belongs to a verify type and every one of them contains a dollar by construction. Splitting those hijacked them from the verify path and cost 49 formats including phpass, sha512crypt, Argon2, Drupal7, RACF, mscash2, sapb and sapg; the guard tests for a well-formed wrapper rather than a leading dollar so that all-dollar salts still reach the walk. Both the hash and the salt are recorded as offsets into the batch-owned line copy, not as pointers into the transient input buffer: pointing the salt at the latter verified correctly one line at a time and then dropped 6 of 9 identical lines when they arrived as a batch, because an earlier item's salt had been overwritten by a later line before that item was verified. Conformance: a dollar-flavoured genbad, salt and password both made entirely of dollars, verifies 36 of 36, matching genbad.pl's 103 of 103 for colons, which is unchanged. John coverage 303 to 305; leet now verifies all 4 of its own vectors and mdc2 all 3, from raw John input with no pre-processing. Self-test 1014 passed, 0 failed.
+ *
+ * Revision 1.125  2026/08/31 02:16:58  dlr
+ * Let -m name a type the way callers already know it. mdxfind's -M has always taken names; hashpipe's -m took only eN and hashcat numbers, which made it unusable by any caller holding the type as a NAME. cmiyc-intake is exactly that caller: it reads the type from the solution file's extension, then discarded it and let hashpipe identify across every registered type. For a 32-hex digest with a short salt that shape matches many candidates including expensive KDFs. Measured on 200 EPISERVER-SID lines: 0.161s identifying versus 0.037s named, and appending auto costs nothing because the named type is tried first and hits. That fallback is required rather than optional, since the whole purpose of the verify stage is that a contributor's declared type may be WRONG: a SHA1 line filed under MD5x01 verifies with -m e1,auto and is silently lost with -m e1. Accepts the plain name, the name with its xNN suffix, and USER_<name> for user-defined types, tried first and accepted only on a successful lookup so eN, u<id> and bare hashcat numbers all still reach their own branches. Fixes a defect introduced in 1.123: the u<id> branch matched any token beginning with U, so -m USER_BWTDTx01 was read as an id and rejected as unknown user-defined type uSER_BWTDTx01. Self-test 1014 passed, 0 failed.
+ *
+ * Revision 1.124  2026/08/31 02:07:51  dlr
+ * Honour a user-defined type's declared stored form when verifying, in parity with mdxfind.c 1.552. Without a form the whole field is the digest, which is the historical assumption. With one the field is cut per the declaration and the digest is only part of it: KoreLogic's bwtdt stores an 8-hex salt followed by its 32-hex digest in a single 40-character field, so the plain hashlen filter rejected it as 32 not equal to 40 before the type was ever tried. When the form locates the salt inside the hash field, the tail is the password entire and is no longer also split on a colon, which would eat a password containing one. On output the stored form is reported verbatim followed by the whole tail. The first cut of this printed the salt twice, once inside the field and once as its own column, and truncated the plaintext by the salt width plus one because the emit path assumed the salt was the head of the tail; paramedical7 came out as al7 and the line did not feed back in. Verified: the stored form now verifies, round-trips through hashpipe and from mdxfind, a wrong password still fails, and a genuine SHA1 of the same width is still reported as SHA1. Self-test 1014 passed, 0 failed.
+ *
+ * Revision 1.123  2026/08/31 01:06:07  dlr
+ * Three additions, all verified against test vectors computed outside this tree. First, e1015 ORACLE11 in parity with mdxfind.c 1.551: a verifier for Oracle 11g's stored form, one 60-character field holding a 40-hex SHA1 digest followed by a 20-hex salt, compared case-insensitively because a harvest may carry either case. All 5 unique John oracle11 vectors verify, and the self-test vector was generated by mdxfind -z so it exercises the full mdxfind to hashpipe path. Second, unwrap John's canonical dollar N T and dollar L M prefixes, which appear in real potfiles: 1103 lines of a 1003754 line intake were correct NTLM cracks rejected only because the wrapper kept the digest from reaching the length filter as 32 hex characters. The unwrapper deliberately declines to NAME a type, returning an empty string, because naming one makes the caller set a hint and with a hint the hash and salt boundary is taken from the LAST colon; these passwords very often contain colons, and that reported the harvested vector as NTLMH where the same digest unwrapped by hand reports NTLM. Third, accept -m u id for user-defined types. hashpipe -Y already advertises that syntax, inherited from the shared userdef loader, while -m rejected it. It is ORDERING ONLY and the help text says so: user types cannot join the built-in hot list, whose type index is dereferenced against Hashtypes with no discriminator while user ops live outside that array, and emit_user_matches has no early exit, so a preference cannot select, restrict, or speed anything up. Self-test 1014 passed, 0 failed.
+ *
+ * Revision 1.122  2026/08/30 20:09:49  dlr
+ * john_unwrap: carry a user field. John writes a username as a $U-marked token after the digest, so the whole token including the marker was arriving as the salt and every such format failed as a confident unresolved -- the same failure the salt-truncation rule in this function already exists to prevent. The marker is now stripped and the name passed through in the same positional field, because hashpipe has no separate user column on input and the verifier for the type decides how to read what is there: SHA1UCUSERPASS and MANGOS read it as a user, MD5SALTPASS as a salt. The strip happens AFTER the $HEX$ decode, since John hex-wraps the whole $Uuser token in some vectors -- dynamic_35 ships both $$UU1 and the identical $HEX$24555531, and stripping first would miss the second form.
+ *
+ * Revision 1.121  2026/08/30 13:58:48  dlr
+ * Fix the composed-path raw-iteration test, which decided iteration from the INNERMOST chain step instead of the outermost. Every RAW type in the catalogue is an outer hash over an inner raw digest, so chain[0] is raw while the outer step emits hex; testing chain[0] made all of them iterate on binary and diverge from mdxfind past x01. No chain currently ends in a raw step so the test is false throughout today, but it stays a test rather than a constant so a future chain that does end raw keeps working. With mdxfind.c 1.549 the two tools now agree across the whole RAW family: 27 of 27 generated lines at three depths for nine types.
+ *
+ * Revision 1.120  2026/08/30 13:24:08  dlr
+ * Fix e447 SHA256RAWSALTPASS, which hashpipe could recognize only at x01. Two causes. First, the type was registered without HTF_ITER_RAW, so it hex-iterated where the construction sha256_bin(salt . pass) iterates the raw digest; mdxfind found x01 through x03 while hashpipe found only x01. Second, adding the flag fixed the targeted -m path but not auto-detect, because the raw branch added in 1.119 covered only one of the iteration call sites: the two candidate-scan paths still hex-iterated unconditionally. Both now honour HTF_ITER_RAW. Verified against Daves three vectors: auto-detect now reports x02 and x03, and the -m e447 labels are identical to mdxfind at all three depths. The x01 line reports as SHA256SALTPASS because the two types are numerically identical at x01; only the iteration role differs, so their bytecode is not equal and the pair is not in the catalog duplicate list. NOT changed: MD5RAW through SHA512RAW and MD5RAWMD5RAW show a one-round offset against current mdxfind, but hashpipes definition agrees with the 65 existing crack files in the gp corpus, so the definition apparently shifted in mdxfind at some point and this needs a decision rather than a silent change.
+ *
+ * Revision 1.119  2026/08/30 06:08:19  dlr
+ * Sync the 3 John-sourced types added in mdxfind.c 1.548, plus two fixes to shared machinery that adding them exposed. First: the salted iteration path always hex-encoded the previous digest, so a raw-iterating salted type could not verify past x01. The composed path already had this via is_raw. Adds HTF_ITER_RAW and a raw branch, set only on SHA512RAWPASSSALT. Second: the emitted iteration suffix was built with two hardcoded digits, so match_iter 100 printed as x00, 101 as x01, and so on. Every iteration of 100 or more was silently mislabelled, and mdxfind has always printed these correctly, so the two tools disagreed for any deep iteration. The gp corpus carries crack files as deep as x3992000. Now variable width with a two-digit minimum. Verified both tools emit SHA512RAWPASSSALTx100 for the BlackBerry ES10 vectors and that two-digit labels are unchanged.
+ *
+ * Revision 1.118  2026/08/30 05:36:12  dlr
+ * Sync the iteration change in mdxfind.c 1.547. verify_useridcolonpass and verify_md5usermd5passsalt now compare binary digests via hex2bin instead of a hex string compare, loop to Maxiter re-hashing the hex of the previous digest, and set WS->verify_iter to the matching depth so the emitted label carries the xNN suffix. Without this hashpipe reported a bare label while mdxfind reported xNN, which would have split the two tools and broken mdsplit filing. Verified: both tools now agree at x01 and x02 for all three types, and MANGOS still reports its bare label in both.
+ *
+ * Revision 1.117  2026/08/30 04:42:10  dlr
+ * Sync the 9 John-sourced hash types added in mdxfind.c 1.546: Types[] entries in identical order, 4 rhash compute functions, 4 verify functions, and self-test vectors generated by mdxfind -z with password123. Adds local hp_md5 and hp_sha256 rhash helpers because these functions sit earlier in the file than the OpenSSL declarations. Self-test 1010 passed 0 failed. Index to name mapping verified identical to mdxfind at runtime for e1003 through e1011.
+ *
  * Revision 1.116  2026/08/29 18:32:27  dlr
  * Tally unresolved formats at all three exits, not just one.
  *
@@ -803,7 +1022,11 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 #define MAX_HASH_BYTES 64   /* SHA-512 — max output of any hash function */
 #define MAX_INPUT_HASH (MAXLINE/2 + 16)  /* max binary bytes from input hex string */
 #define MAX_SALT_BYTES 256
-#define MAX_CANDIDATES 512
+/* Must exceed the number of types reachable from the shortest digest width.
+ * get_candidates_by_hashlen walks every hashlen at or above the input and
+ * stops at this cap, so at 512 it silently dropped 217 of the 729 types a
+ * 16-byte hash can reach -- they were never tried in any hard pass. */
+#define MAX_CANDIDATES 1200
 
 int Maxiter = 128;
 int Iterstep = 128;
@@ -845,6 +1068,7 @@ struct workspace {
     void *outbuf, *errbuf, *fmtbuf;
     /* Verify/format buffers */
     void *passbuf, *vpassbuf, *vpassbuf2, *decoded;
+    void *hexsalt;   /* rewritten hashstr with a $HEX[] salt decoded */
     unsigned char *testvec;  /* malloc'd TESTVECSIZE+16 buffer for $TESTVEC[] */
     /* verify_item buffers */
     void *hashbin, *computed_vi, *iterbuf, *hexiter;
@@ -886,6 +1110,7 @@ static void ws_init_rhash(struct workspace *ws)
     ws->passbuf = malloc(WS_GP_SIZE); ws->vpassbuf = malloc(WS_GP_SIZE);
     ws->vpassbuf2 = malloc(WS_GP_SIZE);
     ws->decoded = malloc(WS_GP_SIZE);
+    ws->hexsalt = malloc(WS_GP_SIZE);
     ws->hashbin = malloc(MAX_INPUT_HASH + 16);
     ws->computed_vi = malloc(MAX_INPUT_HASH + 16);
     ws->iterbuf = malloc(MAX_INPUT_HASH + 16);
@@ -902,7 +1127,7 @@ static void ws_init_rhash(struct workspace *ws)
     ws->rctx_sha224 = rhash_init(RHASH_SHA224);
     ws->rctx_sha384 = rhash_init(RHASH_SHA384);
     ws->rctx_whirlpool = rhash_init(RHASH_WHIRLPOOL);
-    ws->cd_utf7 = iconv_open("UTF-7", "UTF-8");
+    ws->cd_utf7 = iconv_open("UTF-7//IGNORE", "UTF-8");
 }
 
 static void ws_free_rhash(struct workspace *ws)
@@ -915,6 +1140,7 @@ static void ws_free_rhash(struct workspace *ws)
     free(ws->u16a); free(ws->u16b);
     free(ws->outbuf); free(ws->errbuf); free(ws->fmtbuf);
     free(ws->passbuf); free(ws->vpassbuf); free(ws->vpassbuf2); free(ws->decoded);
+    free(ws->hexsalt);
     free(ws->hashbin); free(ws->computed_vi); free(ws->iterbuf);
     free(ws->hexiter); free(ws->saltbin); free(ws->altsaltbin);
     free(ws->colonsalt);
@@ -997,6 +1223,7 @@ static void ws_rhash_done(rhash ctx)
 #define HTF_COMPOSED    0x10  /* multi-step: MD5MD5PASS, SHA1MD5, MD5SHA1 */
 #define HTF_ITER_X0     0x20  /* x=0 convention: no xNN suffix for first match */
 #define HTF_NONHEX      0x40  /* hash is not hex (bcrypt, APACHE-SHA, etc.) */
+#define HTF_ITER_RAW    0x80  /* iterate the RAW digest, not its hex */
 
 /* Hash classification for fast dispatch — items and verify functions are
  * tagged so the slow queue only tries compatible combinations. */
@@ -1031,6 +1258,15 @@ struct hashtype {
     hashfn_t compute_alt;      /* alternate compute (e.g. HUM prepend variant) */
     hashfn_t compute_alt2;     /* second alternate (e.g. HEXSALT colon-both-sides) */
     hashfn_t iter_fn;          /* inner iteration function for x-types, or NULL for hash_by_len */
+    /* Primitive to iterate with, which is ALWAYS the OUTERMOST hash of the
+     * construction.  Kept separate from iter_fn because iter_fn additionally
+     * marks the -q internal-iteration class (maxinner = iter_fn ? Iterstep :
+     * Maxiter); setting iter_fn here would silently move every chained type
+     * into that class.  NULL means fall back to hash_by_len, which picks a
+     * primitive from the digest WIDTH and is therefore only ever right by
+     * coincidence -- 16 bytes gives MD5, so MD2MD5 (md2(md5(pass)), outer MD2)
+     * was iterated as MD5 and diverged from mdxfind at x02. */
+    hashfn_t outer_fn;
     verifyfn_t verify;         /* non-hex format verifier (bcrypt, APACHE-SHA, etc.) */
     int vclass;                /* HCLASS_* bitmask: which item classes this verify accepts */
     int nchain;                /* 0 = use compute; >0 = use chain[] */
@@ -1926,6 +2162,31 @@ char *Types[] = {
     "7ZIP",
     "CMIYC",
     "RMD256",
+    "MD4SALTPASS",
+    "MD4PASSSALT",
+    "SHA1UCUSERPASS",
+    "SHA1USERCOLONPASS",
+    "MD5PASSSALTMD5PASSSALT",
+    "QAS-VASAUTH",
+    "POSTOFFICE",
+    "IPB2",
+    "MD5USERMD5PASSSALT",
+    "RVARY",
+    "SHA512RAWPASSSALT",
+    "EPISERVER-SID",
+    "ORACLE11",
+    "SAPCODVNH256",
+    "SAPCODVNH384",
+    "MONGODB",
+    "H3C",
+    "ARGON2MD5",
+    "DRAGONFLY3-32",
+    "DRAGONFLY3-64",
+    "DRAGONFLY4-32",
+    "DRAGONFLY4-64",
+    "GOST12256CRYPT",
+    "GOST94CRYPT",
+    "SUNMD5",
 
 NULL
 
@@ -1941,6 +2202,16 @@ static const char hextab_uc[16] = "0123456789ABCDEF";
 /* Forward declarations (needed by compute functions defined before these) */
 static char *prmd5(const unsigned char *md5, char *out, int len);
 static char *prmd5UC(const unsigned char *md5, char *out, int len);
+
+/* xNN iteration for verify types whose result is a plain hex digest.
+ * Defined below, next to the TRUNC family; declared here because several
+ * verify functions that use it appear earlier in the file. */
+enum { ITER_SHA1 = 0, ITER_MD5 = 1, ITER_MD4 = 2, ITER_NTLM = 3 };
+static int x1cap_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int entry);
+static int decode_hex_password(const char *pass, int passlen,
+    unsigned char *out, int outmax);
+static int hex_iter_match(char *computed, const char *hashstr, int kind);
 static void reverse_str(char *s, int len);
 static int base64_encode(const unsigned char *in, int inlen, char *out, int outmax);
 static int base64_decode(const char *in, int inlen, unsigned char *out, int outmax);
@@ -2687,7 +2958,10 @@ static int utf8_to_utf16be(const unsigned char *src, int srclen,
     size_t inleft, outleft, ret;
 
     if (iconv_utf16be == (iconv_t)-1) {
-        iconv_utf16be = iconv_open("UTF-16BE", "UTF-8");
+        /* //IGNORE matches mdxfind: a password that is not valid UTF-8
+         * is converted with the bad sequences skipped rather than the
+         * conversion failing, which is what mdxfind hashed. */
+        iconv_utf16be = iconv_open("UTF-16BE//IGNORE", "UTF-8");
         if (iconv_utf16be == (iconv_t)-1) return 0;
     }
 
@@ -2703,6 +2977,30 @@ static int utf8_to_utf16be(const unsigned char *src, int srclen,
     }
     iconv(iconv_utf16be, NULL, NULL, NULL, NULL);
     return dstmax - (int)outleft;
+}
+
+/* mdxfind's to_utf16le is a naive byte expansion -- each input byte becomes
+ * that byte followed by a NUL -- not a UTF-8 to UTF-16LE conversion.  Plain
+ * NTLM goes through iconv there, but DCC2 and its relatives use this, so they
+ * disagree with the iconv form for every non-ASCII password.  mdxfind is
+ * authoritative, so the types that use it get this. */
+static int latin1_to_utf16le(const unsigned char *src, int srclen,
+    unsigned char *dst, int dstmax)
+{
+    int i;
+    if (srclen * 2 > dstmax) srclen = dstmax / 2;
+    for (i = 0; i < srclen; i++) { dst[i * 2] = src[i]; dst[i * 2 + 1] = 0; }
+    return srclen * 2;
+}
+
+static void compute_ntlm_latin1(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *utf16 = WS->u16a;
+    int u16len;
+    (void)salt; (void)saltlen;
+    u16len = latin1_to_utf16le(pass, passlen, utf16, WS_U16_SIZE);
+    rhash_msg(RHASH_MD4, utf16, u16len, dest);
 }
 
 static void compute_ntlm(const unsigned char *pass, int passlen,
@@ -2858,6 +3156,186 @@ static void compute_md5passsalt(const unsigned char *pass, int passlen,
     rhash_update(ctx, pass, passlen);
     rhash_update(ctx, salt, saltlen);
     rhash_final(ctx, dest); rhash_free(ctx);
+}
+
+/* Salted MD4: H(salt + pass) and H(pass + salt). John dynamic_31 / _32. */
+static void compute_md4saltpass(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    rhash ctx;
+    ctx = rhash_init(RHASH_MD4);
+    rhash_update(ctx, salt, saltlen);
+    rhash_update(ctx, pass, passlen);
+    rhash_final(ctx, dest); rhash_free(ctx);
+}
+
+static void compute_md4passsalt(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    rhash ctx;
+    ctx = rhash_init(RHASH_MD4);
+    rhash_update(ctx, pass, passlen);
+    rhash_update(ctx, salt, saltlen);
+    rhash_final(ctx, dest); rhash_free(ctx);
+}
+
+/* Local digest helpers for the John-sourced types below. These live earlier in
+ * the file than the OpenSSL declarations, so they use rhash like the
+ * neighbouring compute_md5* functions rather than MD5()/SHA256() directly. */
+static void hp_md5(const void *d, int n, unsigned char *out)
+{
+    rhash ctx = rhash_init(RHASH_MD5);
+    rhash_update(ctx, d, n);
+    rhash_final(ctx, out); rhash_free(ctx);
+}
+
+static void hp_sha1(const void *d, int n, unsigned char *out)
+{
+    rhash ctx = rhash_init(RHASH_SHA1);
+    rhash_update(ctx, d, n);
+    rhash_final(ctx, out); rhash_free(ctx);
+}
+
+static void hp_sha256(const void *d, int n, unsigned char *out)
+{
+    rhash ctx = rhash_init(RHASH_SHA256);
+    rhash_update(ctx, d, n);
+    rhash_final(ctx, out); rhash_free(ctx);
+}
+
+/* EPISERVER-SID (e1014): sha1(salt29 . pass . NUL) -- John "EPI".
+ * The salt arrives as hex and decodes to 30 bytes, but only 29 are hashed, and
+ * the password is hashed WITH its terminating NUL. Both are faithful
+ * reproductions of off-by-ones in the original software. */
+/*
+ * ORACLE11 (e1015): Oracle 11g stored form -- ONE 60-character field holding a
+ * 40-hex SHA1 digest followed by a 20-hex salt.
+ *
+ * The digest is the same one SHA1PASSHEXSALT (e834, hashcat 112) computes, but
+ * e834 takes hash and salt as two fields. This type owns Oracle's concatenated
+ * stored form: it parses the concatenation and reports it back unchanged, so a
+ * found line can be handed straight back to Oracle. 60 hex is unique in the
+ * catalogue -- no other type has a 30-byte digest -- so the width identifies
+ * the format without a wrapper.
+ *
+ * Compared case-insensitively: Oracle stores uppercase and mdxfind emits
+ * uppercase, but a harvest may carry either.
+ */
+static int verify_oracle11(const char *hashstr, int hashlen,
+                           const unsigned char *pass, int passlen)
+{
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    static const char hx[] = "0123456789ABCDEF";
+    int i;
+
+    if (hashlen != 60 || passlen < 0 || passlen > 2048) return 0;
+    for (i = 0; i < 60; i++)
+        if (!isxdigit((unsigned char)hashstr[i])) return 0;
+
+    memcpy(buf, pass, (size_t)passlen);
+    if (hex2bin(hashstr + 40, 20, buf + passlen) != 10) return 0;
+    hp_sha1(buf, passlen + 10, dig);
+
+    for (i = 0; i < 20; i++) {
+        if (toupper((unsigned char)hashstr[i * 2])     != hx[dig[i] >> 4] ||
+            toupper((unsigned char)hashstr[i * 2 + 1]) != hx[dig[i] & 15])
+            return 0;
+    }
+    return 1;
+}
+
+static void compute_episerversid(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char *buf = (char *)WS->gp1;
+    int i, nb = 0;
+    if (passlen + 31 > (int)WS_GP_SIZE) return;
+    for (i = 0; i + 1 < saltlen && nb < 29; i += 2) {
+        int hi = salt[i], lo = salt[i + 1];
+        hi = (hi >= '0' && hi <= '9') ? hi - '0' :
+             ((hi | 32) >= 'a' && (hi | 32) <= 'f') ? (hi | 32) - 'a' + 10 : 0;
+        lo = (lo >= '0' && lo <= '9') ? lo - '0' :
+             ((lo | 32) >= 'a' && (lo | 32) <= 'f') ? (lo | 32) - 'a' + 10 : 0;
+        buf[nb++] = (char)((hi << 4) | lo);
+    }
+    if (nb < 29) return;
+    memcpy(buf + 29, pass, passlen);
+    buf[29 + passlen] = 0;
+    hp_sha1(buf, 29 + passlen + 1, dest);
+}
+
+/* MD5PASSSALTMD5PASSSALT (e1007): md5(pass . salt . md5_hex(pass . salt))
+ * John dynamic_1505. gp1 holds "pass|salt|32 hex"; prmd5 NULs one past the
+ * hex, which is inside the buffer and written by nothing else. */
+static void compute_md5passsaltmd5passsalt(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *inner = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp1;
+    int blen = 0;
+    if (passlen + saltlen + 33 > (int)WS_GP_SIZE) return;
+    memcpy(buf, pass, passlen); blen += passlen;
+    memcpy(buf + blen, salt, saltlen); blen += saltlen;
+    hp_md5(buf, blen, inner);
+    prmd5(inner, buf + blen, 32);
+    hp_md5(buf, blen + 32, dest);
+}
+
+/* QAS-VASAUTH (e1008): sha256("#" . salt . "-" . pass) — John dynamic_1602 */
+static void compute_qasvasauth(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char *buf = (char *)WS->gp1;
+    int blen = 0;
+    if (passlen + saltlen + 2 > (int)WS_GP_SIZE) return;
+    buf[blen++] = '#';
+    memcpy(buf + blen, salt, saltlen); blen += saltlen;
+    buf[blen++] = '-';
+    memcpy(buf + blen, pass, passlen); blen += passlen;
+    hp_sha256(buf, blen, dest);
+}
+
+/* POSTOFFICE (e1009): md5(salt . "Y" . pass . 0xF7 . salt) — John "po" */
+static void compute_postoffice(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char *buf = (char *)WS->gp1;
+    int blen = 0;
+    if (passlen + saltlen * 2 + 2 > (int)WS_GP_SIZE) return;
+    memcpy(buf, salt, saltlen); blen += saltlen;
+    buf[blen++] = 'Y';
+    memcpy(buf + blen, pass, passlen); blen += passlen;
+    buf[blen++] = (char)0xf7;
+    memcpy(buf + blen, salt, saltlen); blen += saltlen;
+    hp_md5(buf, blen, dest);
+}
+
+/* IPB2 (e1010): md5(md5_hex(fromhex(salt)) . md5_hex(pass)) — John "ipb2"
+ * The stored salt is hex-encoded raw bytes and must be decoded first.
+ * ORDER MATTERS: prmd5() NUL-terminates at out[32], so the salt digest must be
+ * written to buf[0..31] BEFORE the password digest lands at buf[32..63] and
+ * overwrites that NUL. See feedback_prmd5_nul_clobber_class. */
+static void compute_ipb2(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *sbin = (unsigned char *)WS->ctx1;
+    unsigned char *d = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+    int i, nb = 0;
+    for (i = 0; i + 1 < saltlen && nb < (int)WS_CTX_SIZE; i += 2) {
+        int hi = salt[i], lo = salt[i + 1];
+        hi = (hi >= '0' && hi <= '9') ? hi - '0' :
+             ((hi | 32) >= 'a' && (hi | 32) <= 'f') ? (hi | 32) - 'a' + 10 : 0;
+        lo = (lo >= '0' && lo <= '9') ? lo - '0' :
+             ((lo | 32) >= 'a' && (lo | 32) <= 'f') ? (lo | 32) - 'a' + 10 : 0;
+        sbin[nb++] = (unsigned char)((hi << 4) | lo);
+    }
+    hp_md5(sbin, nb, d);
+    prmd5(d, buf, 32);
+    hp_md5(pass, passlen, d);
+    prmd5(d, buf + 32, 32);
+    hp_md5(buf, 64, dest);
 }
 
 static void compute_sha1saltpass(const unsigned char *pass, int passlen,
@@ -3341,6 +3819,61 @@ static void compute_mscache(const unsigned char *pass, int passlen, const unsign
 /* (already handled by compute_sha256saltpass, just needs registration) */
 
 /* Composed: rhash_msg(RHASH_MD5, hex(MD5(pass)) + pass) — matches mdxfind JOB_MD5MD5PASS variant 1 */
+/* Two-shape PASS family (e123 MD5MD5PASS, e202 MD5-DBL-PASS).
+ *
+ * Each emits two digests per password -- the second inserts a colon before the
+ * appended field -- and mdxfind iterates BOTH with plain md5 over the hex.
+ * Registered as HT_ALT, only the primary shape ever seeded the chain, so the
+ * colon shape resolved at base depth and nowhere below: 6 of 10 and 2 of 10
+ * per password.  A verify owns its own iteration, so both shapes are walked
+ * here instead.
+ *
+ * mode 0: appended field is the password itself.
+ * mode 1: appended field is md5-hex of the first hex (the DBL form).
+ */
+static int pass2_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int mode)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hx   = (char *)WS->gp1;
+    char *buf  = (char *)WS->gp2;
+    char *run  = (char *)WS->gp3;
+    const unsigned char *tail;
+    int taillen, sh, iter;
+
+    if (hashlen < 32) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, bin);
+    prmd5(bin, hx, 32);
+    if (mode == 0) {
+        tail = pass; taillen = passlen;
+    } else {
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, bin);
+        prmd5(bin, hx + 33, 32);      /* staged past the colon slot */
+        tail = (const unsigned char *)hx + 33; taillen = 32;
+    }
+    if (taillen > MAXLINE - 64) return 0;
+
+    for (sh = 0; sh < 2; sh++) {
+        int n = 32;
+        memcpy(buf, hx, 32);
+        if (sh == 1) buf[n++] = ':';
+        memcpy(buf + n, tail, taillen);
+        rhash_msg(RHASH_MD5, (unsigned char *)buf, n + taillen, bin);
+        prmd5(bin, run, 32);
+        for (iter = 1; iter <= Maxiter; iter++) {
+            if (strncasecmp(run, hashstr, 32) == 0) { WS->verify_iter = iter; return 1; }
+            rhash_msg(RHASH_MD5, (unsigned char *)run, 32, bin);
+            prmd5(bin, run, 32);
+        }
+    }
+    return 0;
+}
+
+static int verify_md5md5pass(const char *h, int hl, const unsigned char *p, int pl)
+{ return pass2_engine(h, hl, p, pl, 0); }
+static int verify_md5dblpass(const char *h, int hl, const unsigned char *p, int pl)
+{ return pass2_engine(h, hl, p, pl, 1); }
+
 static void compute_md5md5pass(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
 {
     unsigned char *md5bin = (unsigned char *)WS->ctx1;
@@ -4041,6 +4574,74 @@ static void compute_sha1md5user_colon(const unsigned char *pass, int passlen,
     rhash_final(ctx, dest); rhash_free(ctx);
 }
 
+/* Shared engine for the three MD5*USER types (e354, e355, e356).
+ *
+ * mdxfind computes one hex value and then emits TWO digests per user, from
+ * hex . user and from hex . ":" . user, iterating each with md5 over its own
+ * hex.  hashpipe registered the pair as HT_ALT, which verifies both at x01 but
+ * seeds the iteration chain only from the primary compute, so exactly half the
+ * lines died from x02 on -- 660 of 1100 on each of the three fixtures, with
+ * x01 complete and every deeper depth at half.  Swapping primary and alt moved
+ * the failures to the other shape rather than fixing any, which is what
+ * identified the seeding as the cause.  Walking both shapes and their chains
+ * here follows the rule that a verify owns its own iteration.
+ *
+ * The types differ only in how the hex is built: e354 one md5 with the leading
+ * hex character capitalised, e355 two md5s capitalised after each, e356 two
+ * md5s and no capitalisation.  mdxfind reaches e354 and e356 by falling
+ * through the e355 pre-block, which is where the first capitalisation lives.
+ */
+static int user2_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int nmd5, int docap)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *run = (char *)WS->gp2;
+    const char *colon;
+    const unsigned char *user;
+    int userlen, k, sh, iter;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    userlen = hashlen - 33;
+    if (userlen < 0 || userlen > 200) return 0;
+    /* The user field arrives as written on the line, so a $HEX[] user reaches
+     * here still encoded and would be hashed literally. */
+    user = (const unsigned char *)colon + 1;
+    { int d = decode_hex_password(colon + 1, userlen, (unsigned char *)WS->gp3, MAXLINE);
+      if (d >= 0) { user = (const unsigned char *)WS->gp3; userlen = d; } }
+
+    rhash_msg(RHASH_MD5, pass, passlen, bin);
+    prmd5(bin, hx, 32);
+    if (docap && hx[0] >= 'a' && hx[0] <= 'f') hx[0] -= 32;
+    for (k = 1; k < nmd5; k++) {
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, bin);
+        prmd5(bin, hx, 32);
+        if (docap && hx[0] >= 'a' && hx[0] <= 'f') hx[0] -= 32;
+    }
+
+    for (sh = 0; sh < 2; sh++) {
+        int n = 32;
+        if (sh == 1) hx[n++] = ':';
+        memcpy(hx + n, user, userlen);
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, n + userlen, bin);
+        prmd5(bin, run, 32);
+        for (iter = 1; iter <= Maxiter; iter++) {
+            if (strncasecmp(run, hashstr, 32) == 0) { WS->verify_iter = iter; return 1; }
+            rhash_msg(RHASH_MD5, (unsigned char *)run, 32, bin);
+            prmd5(bin, run, 32);
+        }
+    }
+    return 0;
+}
+
+static int verify_md5capmd5user(const char *h, int hl, const unsigned char *p, int pl)
+{ return user2_engine(h, hl, p, pl, 1, 1); }
+static int verify_md5capmd5md5user(const char *h, int hl, const unsigned char *p, int pl)
+{ return user2_engine(h, hl, p, pl, 2, 1); }
+static int verify_md5md5md5user(const char *h, int hl, const unsigned char *p, int pl)
+{ return user2_engine(h, hl, p, pl, 2, 0); }
+
 /* MD5CAPMD5USER colon variant: MD5(cap(hex(MD5(pass))) + ":" + user) */
 static void compute_md5capmd5user_colon(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
@@ -4067,6 +4668,10 @@ static void compute_md5capmd5md5user_colon(const unsigned char *pass, int passle
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hexstr, 32);
+    /* mdxfind caps the FIRST hex too, in the JOB_MD5CAPMD5MD5USER block that
+     * falls through into the shared user loop.  Omitting it agrees only when
+     * hexstr[0] happens to be a digit. */
+    if (hexstr[0] >= 'a' && hexstr[0] <= 'f') hexstr[0] -= 32;
     rhash_msg(RHASH_MD5, (unsigned char *)hexstr, 32, md5bin);
     prmd5(md5bin, hexstr, 32);
     if (hexstr[0] >= 'a' && hexstr[0] <= 'f') hexstr[0] -= 32;
@@ -4137,6 +4742,10 @@ static void compute_md5capmd5md5user(const unsigned char *pass, int passlen, con
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hexstr, 32);
+    /* mdxfind caps the FIRST hex too, in the JOB_MD5CAPMD5MD5USER block that
+     * falls through into the shared user loop.  Omitting it agrees only when
+     * hexstr[0] happens to be a digit. */
+    if (hexstr[0] >= 'a' && hexstr[0] <= 'f') hexstr[0] -= 32;
     rhash_msg(RHASH_MD5, (unsigned char *)hexstr, 32, md5bin);
     prmd5(md5bin, hexstr, 32);
     if (hexstr[0] >= 'a' && hexstr[0] <= 'f') hexstr[0] -= 32;
@@ -4620,6 +5229,57 @@ static void compute_md5sha1salt(const unsigned char *pass, int passlen, const un
 
 /* MD5DSALT: rhash_msg(RHASH_MD5, hex(MD5(hex(MD5(pass)) + salt1)) + salt2), double 3-char salts */
 /* Salt format: salt1salt2 concatenated (e.g. "A7GA7G" = salt1="A7G", salt2="A7G") */
+/* MD5DSALT (e408): md5(md5(md5(pass) . salt1) . salt2).
+ *
+ * mdxfind reports the two salts CONCATENATED with no separator, so the split
+ * point is not recoverable from the line and every possibility has to be
+ * tried.  compute_md5dsalt assumed a half-split, which is right only when the
+ * two salts happen to be the same length -- 5 of the 9 pairs in the regression
+ * salt list.  mdxfind bounds each salt at 3 characters, so the search is at
+ * most three positions wide. */
+static int verify_md5dsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *run = (char *)WS->gp2;
+    const unsigned char *salt;
+    const char *colon;
+    int saltlen, s1, s2, iter, dec;
+    rhash c;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    saltlen = hashlen - 33;
+    if (saltlen < 2 || saltlen > 6) return 0;
+    salt = (const unsigned char *)colon + 1;
+    dec = decode_hex_password(colon + 1, saltlen, (unsigned char *)WS->gp4, MAXLINE);
+    if (dec >= 0) { salt = (const unsigned char *)WS->gp4; saltlen = dec; }
+
+    for (s1 = 1; s1 <= 3 && s1 < saltlen; s1++) {
+        s2 = saltlen - s1;
+        if (s2 > 3) continue;
+        rhash_msg(RHASH_MD5, pass, passlen, bin);
+        prmd5(bin, hx, 32);
+        c = rhash_init(RHASH_MD5);
+        rhash_update(c, hx, 32);
+        rhash_update(c, salt, s1);
+        rhash_final(c, bin); rhash_free(c);
+        prmd5(bin, hx, 32);
+        c = rhash_init(RHASH_MD5);
+        rhash_update(c, hx, 32);
+        rhash_update(c, salt + s1, s2);
+        rhash_final(c, bin); rhash_free(c);
+        prmd5(bin, run, 32);
+        for (iter = 1; iter <= Maxiter; iter++) {
+            if (strncasecmp(run, hashstr, 32) == 0) { WS->verify_iter = iter; return 1; }
+            rhash_msg(RHASH_MD5, (unsigned char *)run, 32, bin);
+            prmd5(bin, run, 32);
+        }
+    }
+    return 0;
+}
+
 static void compute_md5dsalt(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -5166,6 +5826,344 @@ static void compute_sha1revbase64x_outer(const unsigned char *pass, int passlen,
 
 /* MD4UTF16MD5x: outer=iterate MD5(lc hex), inner=iterate NTLM.
  * x01 salt=N: NTLM(hex(MD5^N(pass))) */
+/* The "x" family carries its chain length in the salt field: mdxfind loops
+ * i = 1..Maxniter, re-hashing the hex of the previous round, and reports i.
+ * These three computed only the i=1 form, so they verified one fifth of the
+ * fixture and failed every longer chain. */
+/* RADMIN2 pads its input to 100 bytes with NULs before the final md5, and the
+ * iteration re-applies that whole step: the chain is md5(pad(hex, 100)), not
+ * plain md5 over the hex.  The chain-registered RADMIN2 variants get this from
+ * their chain definition, but RADMIN2BASE64, RADMIN2SQL3 and RADMIN2SQL5-40
+ * are plain registrations with nothing, so they resolved at base depth only. */
+/* MYSQL5MD5 (e539) falls into the SQL5 loop in mdxfind, whose chain state is
+ * the UPPERCASE hex of the inner sha1 -- a value that is never emitted.  The
+ * emitted digest is sha1 of that inner sha1, so the next depth cannot be
+ * derived from the previous emitted value at all and has to be recomputed from
+ * the password.  Nothing generic could iterate this, so it sat at base depth. */
+static int sql5_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int md5first)
+{
+    unsigned char *inner = (unsigned char *)WS->ctx1;
+    unsigned char *bin   = (unsigned char *)WS->ctx2;
+    char *cur     = (char *)WS->gp1;
+    char *emitted = (char *)WS->gp2;
+    int x, curlen;
+
+    if (hashlen < 40) return 0;
+    if (md5first) {
+        rhash_msg(RHASH_MD5, pass, passlen, bin);
+        prmd5(bin, cur, 32);
+        curlen = 32;
+    } else {
+        if (passlen > MAXLINE) return 0;
+        memcpy(cur, pass, passlen);
+        curlen = passlen;
+    }
+    for (x = 1; x <= Maxiter; x++) {
+        SHA1((const unsigned char *)cur, curlen, inner);
+        SHA1(inner, 20, bin);
+        prmd5(bin, emitted, 40);
+        if (strncasecmp(emitted, hashstr, 40) == 0) { WS->verify_iter = x; return 1; }
+        prmd5UC(inner, cur, 40);
+        curlen = 40;
+    }
+    return 0;
+}
+
+static int verify_mysql5md5(const char *h, int hl, const unsigned char *p, int pl)
+{ return sql5_engine(h, hl, p, pl, 1); }
+static int verify_sql5(const char *h, int hl, const unsigned char *p, int pl)
+{ return sql5_engine(h, hl, p, pl, 0); }
+
+
+/* NULL (e425) is a passthrough diagnostic: the candidate is copied into a
+ * zeroed 16-byte buffer and reported as-is, and each further depth overwrites
+ * byte 0 with the depth number.  The compute produced only the base form. */
+static int verify_null(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *buf = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    int x, n = passlen < 16 ? passlen : 16;
+
+    if (hashlen != 32) return 0;
+    memset(buf, 0, 16);
+    memcpy(buf, pass, n);
+    for (x = 1; x <= Maxiter; x++) {
+        prmd5(buf, hex, 32);
+        if (strncasecmp(hex, hashstr, 32) == 0) { WS->verify_iter = x; return 1; }
+        buf[0] = (unsigned char)x;
+    }
+    return 0;
+}
+
+/* SHA1MD5MD5PASS (e663) emits two digests per candidate and iterates both with
+ * sha1 over the hex.  The second shape hashes 33 bytes of a 32-character hex
+ * buffer, so it includes the NUL that prmd5 writes at out[len]; that is
+ * deterministic but is not what the expression alone suggests. */
+static int verify_sha1md5md5pass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+    char *run = (char *)WS->gp3;
+    int sh, iter, n;
+
+    if (hashlen < 40) return 0;
+    if (passlen > MAXLINE - 64) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, bin);
+    prmd5(bin, hx, 32);
+
+    for (sh = 0; sh < 2; sh++) {
+        n = 32;
+        memcpy(buf, hx, 32);
+        if (sh == 1) buf[n++] = ':';
+        memcpy(buf + n, pass, passlen);
+        rhash_msg(RHASH_MD5, (unsigned char *)buf, n + passlen, bin);
+        prmd5(bin, run, 32);
+        run[32] = 0;
+        SHA1((const unsigned char *)run, sh == 0 ? 32 : 33, bin);
+        prmd5(bin, run, 40);
+        for (iter = 1; iter <= Maxiter; iter++) {
+            if (strncasecmp(run, hashstr, 40) == 0) { WS->verify_iter = iter; return 1; }
+            SHA1((const unsigned char *)run, 40, bin);
+            prmd5(bin, run, 40);
+        }
+    }
+    return 0;
+}
+
+/* SHA1lsb32 (e398): each round sha1s the running value, zeroes the first four
+ * bytes of the digest, and reports only the first 16 bytes as 32 hex -- but
+ * chains on the FULL 40-character hex.  The chain input is therefore wider
+ * than anything reported, so the next depth cannot be derived from the
+ * previous line and has to be recomputed. */
+static int verify_sha1lsb32(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *d = (unsigned char *)WS->ctx1;
+    char *cur = (char *)WS->gp1;
+    char *hex = (char *)WS->gp2;
+    int x, curlen;
+
+    if (hashlen != 32) return 0;
+    if (passlen > MAXLINE) return 0;
+    memcpy(cur, pass, passlen);
+    curlen = passlen;
+    for (x = 1; x <= Maxiter; x++) {
+        SHA1((const unsigned char *)cur, curlen, d);
+        d[0] = d[1] = d[2] = d[3] = 0;
+        prmd5(d, hex, 40);
+        if (strncasecmp(hex, hashstr, 32) == 0) { WS->verify_iter = x; return 1; }
+        memcpy(cur, hex, 40);
+        curlen = 40;
+    }
+    return 0;
+}
+
+/* SHA1HAV128 (e640): reports the full 40-character sha1 hex but chains on only
+ * the first 32 characters of it, because the iteration writes the digest with
+ * a width of 32 rather than 40.  Deterministic, so it is reproduced here. */
+static int verify_sha1hav128(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    unsigned char *d = (unsigned char *)WS->ctx2;
+    char *hx = (char *)WS->gp1;
+    int x;
+
+    if (hashlen != 40) return 0;
+    compute_hav128_3(pass, passlen, NULL, 0, h);
+    prmd5(h, hx, 32);
+    SHA1((const unsigned char *)hx, 32, d);
+    for (x = 1; x <= Maxiter; x++) {
+        prmd5(d, hx, 40);
+        if (strncasecmp(hx, hashstr, 40) == 0) { WS->verify_iter = x; return 1; }
+        prmd5(d, hx, 32);
+        SHA1((const unsigned char *)hx, 32, d);
+    }
+    return 0;
+}
+
+/* SHA1-SHA512PASSSHA512SALT (e637): sha1 over the 128-character sha512 hex of
+ * the candidate followed by the same of the salt.  The iteration writes the
+ * 40-character digest hex but hashes only the first 32 of it, so the chain
+ * runs on a truncated digest -- the same shape as SHA1HAV128.  Deterministic,
+ * so it is reproduced. */
+static int verify_sha1_sha512passsha512salt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *d = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp1;
+    char *hx  = (char *)WS->gp2;
+    const unsigned char *salt;
+    const char *colon;
+    int saltlen, x, dec;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+    salt = (const unsigned char *)colon + 1;
+    dec = decode_hex_password(colon + 1, saltlen, (unsigned char *)WS->gp3, MAXLINE);
+    if (dec >= 0) { salt = (const unsigned char *)WS->gp3; saltlen = dec; }
+
+    SHA512(pass, passlen, d);
+    prmd5(d, buf, 128);
+    SHA512(salt, saltlen, d);
+    prmd5(d, buf + 128, 128);
+    SHA1((const unsigned char *)buf, 256, d);
+    for (x = 1; x <= Maxiter; x++) {
+        prmd5(d, hx, 40);
+        if (strncasecmp(hx, hashstr, 40) == 0) { WS->verify_iter = x; return 1; }
+        SHA1((const unsigned char *)hx, 32, d);
+    }
+    return 0;
+}
+
+/* MD5SHA1MD5x (e359): the salt field carries the md5 chain length.  Build
+ * md5^q of the candidate as hex, sha1 that, take the 40-character hex of the
+ * result and md5 it; then iterate md5 over the 32-character hex. */
+static int verify_md5sha1md5x(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    unsigned char *sh  = (unsigned char *)WS->ctx2;
+    char *hx  = (char *)WS->gp1;
+    char *run = (char *)WS->gp2;
+    const char *colon;
+    int q, i, x;
+
+    if (hashlen < 32) return 0;
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 32) return 0;
+    q = atoi(colon + 1);
+    if (q < 1 || q > 64) return 0;
+
+    rhash_msg(RHASH_MD5, pass, passlen, bin);
+    prmd5(bin, hx, 32);
+    for (i = 1; i < q; i++) {
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, bin);
+        prmd5(bin, hx, 32);
+    }
+    SHA1((const unsigned char *)hx, 32, sh);
+    prmd5(sh, run, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)run, 40, bin);
+    for (x = 1; x <= Maxiter; x++) {
+        prmd5(bin, run, 32);
+        if (strncasecmp(run, hashstr, 32) == 0) { WS->verify_iter = x; return 1; }
+        rhash_msg(RHASH_MD5, (unsigned char *)run, 32, bin);
+    }
+    return 0;
+}
+
+/* MD5RAWUC (e383): md5 of the raw md5 bytes, then each round is md5 over the
+ * UPPERCASE hex of the previous value, and the first value reported is already
+ * one round in -- mdxfind enters its loop with x = 2.  So no depth is reported
+ * for the starting value, and the chain runs on uppercase hex rather than the
+ * usual lowercase. */
+static int md5uc_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int via_hex)
+{
+    unsigned char *v = (unsigned char *)WS->ctx1;
+    char *hx = (char *)WS->gp1;
+    int x;
+
+    if (hashlen != 32) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, v);
+    if (via_hex) {
+        /* MD5UCMD5 feeds the HEX of the first digest into the second md5;
+         * MD5RAWUC feeds the raw sixteen bytes. */
+        prmd5(v, hx, 32);
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, v);
+    } else {
+        rhash_msg(RHASH_MD5, v, 16, v);
+    }
+    for (x = 2; x <= Maxiter; x++) {
+        prmd5UC(v, hx, 32);
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, v);
+        prmd5(v, hx, 32);
+        if (strncasecmp(hx, hashstr, 32) == 0) { WS->verify_iter = x; return 1; }
+    }
+    return 0;
+}
+
+static int verify_md5rawuc(const char *h, int hl, const unsigned char *p, int pl)
+{ return md5uc_engine(h, hl, p, pl, 0); }
+static int verify_md5ucmd5(const char *h, int hl, const unsigned char *p, int pl)
+{ return md5uc_engine(h, hl, p, pl, 1); }
+
+
+static void compute_md5_pad100(const unsigned char *in, int inlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *buf = (unsigned char *)WS->ctx6;
+    (void)salt; (void)saltlen;
+    if (inlen > 100) inlen = 100;
+    memcpy(buf, in, inlen);
+    memset(buf + inlen, 0, 100 - inlen);
+    rhash_msg(RHASH_MD5, buf, 100, dest);
+}
+
+static void compute_md4utf16sha256x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    if (outer < 1) outer = 1;
+    for (i = 0; i < outer; i++) {
+        SHA256(cur, curlen, bin);
+        prmd5(bin, hex, 64);
+        cur = (const unsigned char *)hex;
+        curlen = 64;
+    }
+    compute_ntlm(cur, curlen, NULL, 0, dest);
+}
+
+static void compute_md5sha1x(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    if (outer < 1) outer = 1;
+    for (i = 0; i < outer; i++) {
+        SHA1(cur, curlen, bin);
+        prmd5(bin, hex, 40);
+        cur = (const unsigned char *)hex;
+        curlen = 40;
+    }
+    rhash_msg(RHASH_MD5, cur, curlen, dest);
+}
+
+/* One lowercase sha256-hex pre-step, then the loop capitalises each round. */
+static void compute_sha1sha256ucxsha256(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *bin = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    const unsigned char *cur = pass;
+    int curlen = passlen, i;
+    int outer = salt_to_int(salt, saltlen);
+    if (outer < 1) outer = 1;
+    SHA256(cur, curlen, bin);
+    prmd5(bin, hex, 64);
+    cur = (const unsigned char *)hex; curlen = 64;
+    for (i = 0; i < outer; i++) {
+        SHA256(cur, curlen, bin);
+        prmd5UC(bin, hex, 64);
+        cur = (const unsigned char *)hex;
+        curlen = 64;
+    }
+    SHA1(cur, curlen, dest);
+}
+
 static void compute_md4utf16md5x(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -5257,7 +6255,7 @@ static int verify_sha1base64custbase64md5(const char *hashstr, int hashlen,
 
         SHA1((unsigned char *)outer, olen, sha1);
         prmd5(sha1, hexhash, 40);
-        if (strncasecmp(hexhash, hashstr, 40) == 0) return 1;
+        if (hex_iter_match(hexhash, hashstr, ITER_SHA1)) return 1;
 
         if (v == 0) {
             tlen = olen - 1;                 /* drop one trailing character */
@@ -5268,7 +6266,7 @@ static int verify_sha1base64custbase64md5(const char *hashstr, int hashlen,
         if (tlen > 0 && tlen != olen) {
             SHA1((unsigned char *)outer, tlen, sha1);
             prmd5(sha1, hexhash, 40);
-            if (strncasecmp(hexhash, hashstr, 40) == 0) return 1;
+            if (hex_iter_match(hexhash, hashstr, ITER_SHA1)) return 1;
         }
     }
     return 0;
@@ -5469,7 +6467,25 @@ static int hum_decode_salt(const unsigned char *salt, int saltlen,
     return n;
 }
 
-/* HUM append macro: outer(hex(inner(pass)) + decoded_salt_bytes) */
+/* The salt also records an inner-iteration index as "- x N". mdxfind computes
+ * inner_0 = INNER(pass) and then inner_k = INNER(hex(inner_k-1)), emitting at
+ * every k; the salt for round k reads "<sephex>- x k". N therefore means the
+ * inner hash is applied N times, each round after the first over the HEX of the
+ * previous digest -- it is NOT a repeat count for the separator bytes. */
+static int hum_iter_count(const unsigned char *salt, int saltlen)
+{
+    int i, n = 0;
+    for (i = 0; i + 2 < saltlen; i++) {
+        if (salt[i] == 'x' && salt[i+1] == ' ') {
+            for (i += 2; i < saltlen && salt[i] >= '0' && salt[i] <= '9'; i++)
+                n = n * 10 + (salt[i] - '0');
+            break;
+        }
+    }
+    return (n >= 1 && n <= 64) ? n : 1;
+}
+
+/* HUM append macro: outer(hex(inner^N(pass)) + decoded_salt_bytes) */
 #define MAKE_HUM(fname, inner_fn, inner_bytes, outer_fn, outer_hash_id) \
 static void compute_##fname(const unsigned char *pass, int passlen, \
     const unsigned char *salt, int saltlen, unsigned char *dest) \
@@ -5480,6 +6496,11 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     rhash _ctx; \
     inner_fn(pass, passlen, NULL, 0, _ib); \
     prmd5(_ib, _hx, (inner_bytes) * 2); \
+    { int _k, _ni = hum_iter_count(salt, saltlen); \
+      for (_k = 1; _k < _ni; _k++) { \
+          inner_fn((const unsigned char *)_hx, (inner_bytes) * 2, NULL, 0, _ib); \
+          prmd5(_ib, _hx, (inner_bytes) * 2); \
+      } } \
     _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
     _ctx = rhash_init(outer_hash_id); \
     rhash_update(_ctx, _hx, (inner_bytes) * 2); \
@@ -5498,6 +6519,11 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     rhash _ctx; \
     inner_fn(pass, passlen, NULL, 0, _ib); \
     prmd5(_ib, _hx, (inner_bytes) * 2); \
+    { int _k, _ni = hum_iter_count(salt, saltlen); \
+      for (_k = 1; _k < _ni; _k++) { \
+          inner_fn((const unsigned char *)_hx, (inner_bytes) * 2, NULL, 0, _ib); \
+          prmd5(_ib, _hx, (inner_bytes) * 2); \
+      } } \
     _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
     _ctx = rhash_init(outer_hash_id); \
     rhash_update(_ctx, _sb, _sn); \
@@ -5534,6 +6560,14 @@ static void compute_md5sha1md5hum(const unsigned char *pass, int passlen,
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hx, 32);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
+          prmd5(md5bin, hx, 32);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ctx = rhash_init(RHASH_SHA1);
     rhash_update(ctx, hx, 32);
@@ -5553,6 +6587,14 @@ static void compute_md5sha1md5hum_pre(const unsigned char *pass, int passlen,
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hx, 32);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
+          prmd5(md5bin, hx, 32);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ctx = rhash_init(RHASH_SHA1);
     rhash_update(ctx, sb, sn);
@@ -5573,6 +6615,14 @@ static void compute_md4utf16md5hum(const unsigned char *pass, int passlen, const
     int sn, i, ulen;
     compute_md5(pass, passlen, NULL, 0, md5bin);
     prmd5(md5bin, hx, 32);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
+          prmd5(md5bin, hx, 32);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     /* Build UTF16LE of hex + salt_bytes */
     ulen = 0;
@@ -5596,6 +6646,14 @@ static void compute_md4utf16md5hum_pre(const unsigned char *pass, int passlen,
     int sn, i, ulen;
     compute_md5(pass, passlen, NULL, 0, md5bin);
     prmd5(md5bin, hx, 32);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
+          prmd5(md5bin, hx, 32);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < sn && ulen + 1 < (int)WS_U16_SIZE; i++) {
@@ -5619,6 +6677,14 @@ static void compute_md4utf16sha1hum(const unsigned char *pass, int passlen, cons
     int sn, i, ulen;
     compute_sha1(pass, passlen, NULL, 0, sha1bin);
     prmd5(sha1bin, hx, 40);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_SHA1, (const unsigned char *)hx, 40, sha1bin);
+          prmd5(sha1bin, hx, 40);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < 40 && ulen + 1 < (int)WS_U16_SIZE; i++) {
@@ -5641,6 +6707,14 @@ static void compute_md4utf16sha1hum_pre(const unsigned char *pass, int passlen,
     int sn, i, ulen;
     compute_sha1(pass, passlen, NULL, 0, sha1bin);
     prmd5(sha1bin, hx, 40);
+    /* "- x N" in the salt is an inner-iteration index: mdxfind
+     * re-hashes the HEX of the digest N-1 further times before
+     * applying the separator. Without this only "x 1" matched. */
+    { int _k, _ni = hum_iter_count(salt, saltlen);
+      for (_k = 1; _k < _ni; _k++) {
+          rhash_msg(RHASH_SHA1, (const unsigned char *)hx, 40, sha1bin);
+          prmd5(sha1bin, hx, 40);
+      } }
     sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < sn && ulen + 1 < (int)WS_U16_SIZE; i++) {
@@ -7457,6 +8531,23 @@ static void compute_sha1hesk(const unsigned char *pass, int passlen,
 }
 
 /* MD5CAP — rhash_msg(RHASH_MD5, capitalize(pass)) */
+/* MD5CAP iteration primitive. Every round re-applies the position-0 cap
+ * before hashing -- mdxfind does hex, cap0, md5 on each pass -- so the
+ * generic outer_fn(hex(prev)) is wrong from x03 onward even though the base
+ * value at x02 is right. Only position 0 is considered, and only when it is
+ * a lowercase hex letter; otherwise the cap is a no-op and the round is
+ * indistinguishable from plain iterated MD5. */
+static void iter_md5cap(const unsigned char *hexin, int len,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char *b = (char *)WS->gp5;
+    (void)salt; (void)saltlen;
+    if (len > (int)WS_GP_SIZE - 1) len = (int)WS_GP_SIZE - 1;
+    memcpy(b, hexin, len);
+    if (b[0] >= 'a' && b[0] <= 'f') b[0] = (char)(b[0] - 32);
+    rhash_msg(RHASH_MD5, (const unsigned char *)b, len, dest);
+}
+
 static void compute_md5cap(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
 {
     unsigned char *cappass = WS->gp1;
@@ -8772,6 +9863,99 @@ static void compute_sha1sha256cap(const unsigned char *pass, int passlen,
     SHA1((unsigned char *)hx, 64, dest);
 }
 
+
+/* SHA1SHA1CAPSALT (e666): emit(sha1(cap(sha1(pass), N) . salt)), N = each
+ * lowercase position.  Every lowercase position of the 40-character hex is
+ * capitalised in turn and a digest emitted for each, so a single compute can
+ * express only one of them. */
+static int verify_sha1sha1capsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sh = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    const unsigned char *salt;
+    const char *colon;
+    int saltlen, y, d;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltlen = hashlen - 41;
+    if (saltlen < 1 || saltlen > 200) return 0;
+    salt = (const unsigned char *)colon + 1;
+    d = decode_hex_password(colon + 1, saltlen, (unsigned char *)WS->gp3, MAXLINE);
+    if (d >= 0) { salt = (const unsigned char *)WS->gp3; saltlen = d; }
+
+    SHA1(pass, passlen, sh);
+    prmd5(sh, buf, 40);
+    memcpy(buf + 40, salt, saltlen);
+
+    for (y = 0; y < 40; y++) {
+        if (!islower((unsigned char)buf[y])) continue;
+        buf[y] = toupper((unsigned char)buf[y]);
+        SHA1((const unsigned char *)buf, 40 + saltlen, sh);
+        prmd5(sh, computed, 40);
+        buf[y] = tolower((unsigned char)buf[y]);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
+    return 0;
+}
+
+/* SHA1MD5UC1LC (e731): the md5 hex is uppercased and then ONE position is
+ * lowered, each in turn, with a digest emitted per position -- the CAP pattern
+ * inverted.  Lowering only position 0 could match at most one of them, and
+ * only when that character was a letter. */
+static int verify_sha1md5uc1lc(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5 = (unsigned char *)WS->ctx1;
+    unsigned char *sh  = (unsigned char *)WS->ctx2;
+    char *hx = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    int y;
+
+    if (hashlen != 40) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, md5);
+    prmd5UC(md5, hx, 32);
+    for (y = 0; y < 32; y++) {
+        if (hx[y] < 'A' || hx[y] > 'F') continue;
+        hx[y] = (char)(hx[y] + 32);
+        SHA1((const unsigned char *)hx, 32, sh);
+        prmd5(sh, computed, 40);
+        hx[y] = (char)(hx[y] - 32);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
+    return 0;
+}
+
+/* SHA1SHA256CAP (e632): mdxfind caps EVERY lowercase position of the sha256
+ * hex in turn and emits a digest for each, iterating each variant with plain
+ * sha1 (mdxfind.c, JOB_SHA1SHA256CAP). A compute function can express only one
+ * of those -- compute_sha1sha256cap caps the first lowercase and stops -- so
+ * only that single variant could ever match, and only at its base iteration.
+ * This enumerates the positions and walks the chain for each. */
+static int verify_sha1sha256cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *sh = (unsigned char *)WS->ctx1;
+    unsigned char *sha1r = (unsigned char *)WS->ctx2;
+    char *hx = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    int y;
+
+    if (hashlen != 40) return 0;
+    SHA256(pass, passlen, sh);
+    prmd5(sh, hx, 64);
+    for (y = 0; y < 64; y++) {
+        if (hx[y] < 'a' || hx[y] > 'f') continue;
+        hx[y] = (char)(hx[y] - 32);
+        SHA1((const unsigned char *)hx, 64, sha1r);
+        prmd5(sha1r, computed, 40);
+        hx[y] = (char)(hx[y] + 32);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
+    return 0;
+}
 
 /* SHA1MD5x1CAP = SHA1(hex(rhash_msg(RHASH_MD5, capitalize(pass)))) with x01 */
 
@@ -10095,6 +11279,25 @@ static const unsigned char a2e[256] = {
     0xdc,0xdd,0xde,0xdf,0xea,0xeb,0xec,0xed,0xee,0xef,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
 };
 
+static const unsigned char a2e_pc[256] = {
+    0x2a,0xa8,0xae,0xad,0xc4,0xf1,0xf7,0xf4,0x86,0xa1,0xe0,0xbc,0xb3,0xb0,0xb6,0xb5,
+    0x8a,0x89,0x8f,0x8c,0xd3,0xd0,0xce,0xe6,0x9b,0x98,0xd5,0xe5,0x92,0x91,0x97,0x94,
+    0x2a,0x34,0x54,0x5d,0x1c,0x73,0x0b,0x51,0x31,0x10,0x13,0x37,0x7c,0x6b,0x3d,0x68,
+    0x4a,0x49,0x4f,0x4c,0x43,0x40,0x46,0x45,0x5b,0x58,0x5e,0x16,0x32,0x57,0x76,0x75,
+    0x52,0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,
+    0x04,0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x3e,0x6b,0x1f,0x15,0x70,
+    0x58,0xa8,0xae,0xad,0xa2,0xa1,0xa7,0xa4,0xba,0xb9,0x89,0x8f,0x8c,0x83,0x80,0x86,
+    0x85,0x9b,0x98,0xef,0xec,0xe3,0xe0,0xe6,0xe5,0xfb,0xf8,0x2a,0x7f,0x0b,0xe9,0xa4,
+    0xea,0xe9,0xef,0xec,0xe3,0x80,0xa7,0x85,0xfb,0xf8,0xfe,0xfd,0xf2,0xb9,0xbf,0x9d,
+    0xcb,0xc8,0x9e,0xcd,0xc2,0xc1,0xc7,0xba,0xda,0xd9,0xdf,0xdc,0xa2,0x83,0xd6,0x68,
+    0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,0x04,
+    0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x4a,0x49,0x4f,0x4c,0x43,0x40,
+    0x46,0x45,0x5b,0xab,0xbf,0xbc,0xb3,0xb0,0xb6,0xb5,0x8a,0x9e,0x9d,0x92,0x91,0x97,
+    0x94,0xea,0xfe,0xfd,0xf2,0xf1,0xf7,0xf4,0xcb,0xc8,0xce,0xcd,0xc2,0xc1,0xc7,0xc4,
+    0xda,0xd9,0xdf,0xdc,0xd3,0xd0,0xd6,0xd5,0x3e,0x3d,0x32,0x31,0x37,0x34,0x1f,0x1c,
+    0x13,0x10,0x16,0x15,0x7f,0x7c,0x73,0x70,0x76,0x75,0x5e,0x5d,0x52,0x51,0x57,0x54
+};
+
 static const unsigned char lotus_magic_table[256] = {
     0xbd,0x56,0xea,0xf2,0xa2,0xf1,0xac,0x2a,0xb0,0x93,0xd1,0x9c,0x1b,0x33,0xfd,0xd0,
     0x30,0x04,0xb6,0xdc,0x7d,0xdf,0x32,0x4b,0xf7,0xcb,0x45,0x9b,0x31,0xbb,0x21,0x5a,
@@ -10652,8 +11855,8 @@ static int verify_hmailserver(const char *hashstr, int hashlen,
 
     if (hashlen != 70) return 0;
     /* salt is first 6 chars (hex string used as-is) */
-    { unsigned char buf[1024];
-      if (6 + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (6 + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, hashstr, 6);
       memcpy(buf + 6, pass, passlen);
       SHA256(buf, 6 + passlen, sha256);
@@ -10687,8 +11890,8 @@ static int verify_mediawiki(const char *hashstr, int hashlen,
     prmd5(md5_inner, hex_inner, 32);
     hex_inner[32] = 0;
 
-    { unsigned char buf[256];
-      if (saltlen + 1 + 32 > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp3;
+      if (saltlen + 1 + 32 > WS_GP_SIZE) return 0;
       memcpy(buf, salt, saltlen);
       buf[saltlen] = '-';
       memcpy(buf + saltlen + 1, hex_inner, 32);
@@ -10723,8 +11926,8 @@ static int verify_dahua(const char *hashstr, int hashlen,
     peplen = hashlen - (pepper - hashstr);
 
     /* md5(pepper + pass) */
-    { unsigned char buf[1024];
-      if (peplen + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (peplen + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, pepper, peplen);
       memcpy(buf + peplen, pass, passlen);
       rhash_msg(RHASH_MD5, buf, peplen + passlen, md5_inner);
@@ -10733,8 +11936,8 @@ static int verify_dahua(const char *hashstr, int hashlen,
     uchex[32] = 0;
 
     /* md5(salt + UC_hex) */
-    { unsigned char buf[256];
-      if (saltlen + 32 > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (saltlen + 32 > WS_GP_SIZE) return 0;
       memcpy(buf, salt, saltlen);
       memcpy(buf + saltlen, uchex, 32);
       rhash_msg(RHASH_MD5, buf, saltlen + 32, md5_outer);
@@ -10754,8 +11957,8 @@ static int verify_netscaler(const char *hashstr, int hashlen,
 
     if (hashlen != 49 || hashstr[0] != '1') return 0;
     /* SHA1(8-char hex salt string + password + NUL byte) */
-    { unsigned char buf[1024];
-      if (8 + passlen + 1 > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (8 + passlen + 1 > WS_GP_SIZE) return 0;
       memcpy(buf, hashstr + 1, 8); /* salt as hex string */
       memcpy(buf + 8, pass, passlen);
       buf[8 + passlen] = 0;
@@ -11345,8 +12548,8 @@ static int verify_macosx(const char *hashstr, int hashlen,
     if (hashlen != 48) return 0;
     if (hex2bin(hashstr, 8, salt_bin) != 4) return 0;
 
-    { unsigned char buf[1024];
-      if (4 + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (4 + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, salt_bin, 4);
       memcpy(buf + 4, pass, passlen);
       SHA1(buf, 4 + passlen, sha1);
@@ -11366,8 +12569,8 @@ static int verify_macosx7(const char *hashstr, int hashlen,
     if (hashlen != 136) return 0;
     if (hex2bin(hashstr, 8, salt_bin) != 4) return 0;
 
-    { unsigned char buf[1024];
-      if (4 + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (4 + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, salt_bin, 4);
       memcpy(buf + 4, pass, passlen);
       SHA512(buf, 4 + passlen, sha512);
@@ -11387,8 +12590,8 @@ static int verify_arubaos(const char *hashstr, int hashlen,
     if (hashlen != 50) return 0;
     if (hex2bin(hashstr, 10, salt_bin) != 5) return 0;
 
-    { unsigned char buf[1024];
-      if (5 + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (5 + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, salt_bin, 5);
       memcpy(buf + 5, pass, passlen);
       SHA1(buf, 5 + passlen, sha1);
@@ -11464,6 +12667,42 @@ static int verify_des3encrypt(const char *hashstr, int hashlen,
 }
 
 /* RACF (e881): DES_ECB(EBCDIC_UC_username, EBCDIC_pass_key) — 16hex ":" username */
+/* RVARY (e1012): DES-ECB of the EBCDIC password, keyed by the RACF key
+ * schedule from that same password. Unlike RACF the plaintext is the password,
+ * and it is NOT uppercased -- John's rvary has no toupper, and its two vectors
+ * both use uppercase passwords so they cannot show the difference. */
+static int verify_rvary(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *rv_pt    = (unsigned char *)WS->ctx2;
+    unsigned char *ct       = (unsigned char *)WS->ctx3;
+    unsigned char *deskey   = (unsigned char *)WS->ctx4;
+    DES_key_schedule *ks    = (DES_key_schedule *)WS->ctx5;
+    int x, plen;
+
+    if (hashlen != 16) return 0;
+    if (hex2bin(hashstr, 16, expected) != 8) return 0;
+
+    plen = passlen > 8 ? 8 : passlen;
+    for (x = 0; x < 8; x++) {
+        unsigned char ebcdic = (x < plen) ? a2e[pass[x]] : 0x40;
+        /* Use the table, not an inline XOR-shift-parity derivation: the
+         * two disagree for seven of the 256 byte values, 0x00 among
+         * them, so a candidate containing one produced a different key. */
+        unsigned char val = (x < plen) ? a2e_pc[pass[x]] : 0x2a;
+        deskey[x] = val;              /* == a2e_pc[], derived inline: that
+                                       * table is defined later in the file */
+        rv_pt[x]  = ebcdic;           /* EBCDIC password, space-padded, NOT
+                                       * uppercased -- this is what separates
+                                       * RVARY from RACF */
+    }
+    DES_set_key_unchecked((DES_cblock *)deskey, ks);
+    DES_ecb_encrypt((DES_cblock *)rv_pt, (DES_cblock *)ct, ks, DES_ENCRYPT);
+    WS->verify_iter = 1;
+    return memcmp(ct, expected, 8) == 0;
+}
+
 static int verify_racf(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -11497,12 +12736,15 @@ static int verify_racf(const char *hashstr, int hashlen,
     { int plen = passlen > 8 ? 8 : passlen;
       for (x = 0; x < 8; x++) {
           unsigned char ebcdic = (x < plen) ? a2e[pass[x]] : 0x40;
+          /* RACF derives the key inline in mdxfind -- a2e, XOR 0x55, shift left
+           * one, odd parity -- and that does NOT agree with the a2e_pc table for
+           * seven byte values.  RVARY beside it uses the table.  The two really
+           * do differ, so each must follow its own source. */
           unsigned char val = (ebcdic ^ 0x55);
           val = (val << 1) & 0xfe;
           { int bits = 0; unsigned char t = val;
             while (t) { bits += t & 1; t >>= 1; }
-            if ((bits & 1) == 0) val |= 1;
-          }
+            if ((bits & 1) == 0) val |= 1; }
           deskey[x] = val;
       }
     }
@@ -11520,6 +12762,7 @@ static int verify_racf(const char *hashstr, int hashlen,
 
 /* JUNIPERSSG (e856): MD5(user + ":Administration Tools:" + pass) → juniper_encode
  * Format: 30-char encoded ":" username */
+
 static int verify_juniperssg(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -11528,16 +12771,35 @@ static int verify_juniperssg(const char *hashstr, int hashlen,
     const char *colon, *username;
     int hpart, ulen;
 
+    /*
+     * Two input forms for one algorithm, as SHA1SALTPASS accepts both the plain
+     * and the Django spelling:
+     *   <30-char hash>:<user>   our registered form
+     *   <user>$<30-char hash>   John's md5ns
+     * Telling them apart by shape is safe HERE, inside the verifier: a wrong
+     * reading simply fails to reproduce the digest and the line is not claimed.
+     * The same split at PARSE time would not be safe, because it would rewrite
+     * lines belonging to other types before any digest was computed.
+     */
     colon = memchr(hashstr, ':', hashlen);
-    if (!colon) return 0;
-    hpart = colon - hashstr;
-    if (hpart != 30) return 0;
-    username = colon + 1;
-    ulen = hashlen - hpart - 1;
+    if (colon && (colon - hashstr) == 30) {
+        hpart = 30;
+        username = colon + 1;
+        ulen = hashlen - hpart - 1;
+    } else {
+        const char *dollar = memchr(hashstr, '$', hashlen);
+        if (!dollar) return 0;
+        ulen = (int)(dollar - hashstr);
+        if (hashlen - ulen - 1 != 30) return 0;
+        username = hashstr;
+        hashstr  = dollar + 1;
+        hpart    = 30;
+    }
+    if (ulen < 1) return 0;
 
-    { unsigned char buf[1024];
+    { unsigned char *buf = (unsigned char *)WS->gp2;
       int total = ulen + 22 + passlen;
-      if (total > (int)sizeof(buf)) return 0;
+      if (total > WS_GP_SIZE) return 0;
       memcpy(buf, username, ulen);
       memcpy(buf + ulen, ":Administration Tools:", 22);
       memcpy(buf + ulen + 22, pass, passlen);
@@ -11636,8 +12898,8 @@ static int verify_ciscoise(const char *hashstr, int hashlen,
     if (hashlen != 128) return 0;
     if (hex2bin(hashstr + 64, 64, salt_bin) != 32) return 0;
 
-    { unsigned char buf[1024];
-      if (32 + passlen > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp2;
+      if (32 + passlen > WS_GP_SIZE) return 0;
       memcpy(buf, salt_bin, 32);
       memcpy(buf + 32, pass, passlen);
       SHA256(buf, 32 + passlen, sha256);
@@ -11667,8 +12929,14 @@ static int verify_samsungsha1(const char *hashstr, int hashlen,
     salt = colon + 1;
     saltlen = hashlen - hpart - 1;
 
+    /* Every message built below is 1 or 20 bytes of prefix, at most 4 digits
+     * of counter, then pass and salt. Bound it once against the workspace
+     * buffer: a salt that cannot fit was never a SAMSUNGSHA1 salt, and the
+     * alternative is a buffer overrun. */
+    if (24 + passlen + saltlen > WS_GP_SIZE) return 0;
+
     /* iter 0: SHA1("0" + pass + salt) */
-    { unsigned char buf[2048];
+    { unsigned char *buf = (unsigned char *)WS->gp1;
       int pos = 0;
       buf[pos++] = '0';
       memcpy(buf + pos, pass, passlen); pos += passlen;
@@ -11722,8 +12990,8 @@ static int verify_episerver(const char *hashstr, int hashlen,
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE);
     if (u16len <= 0) return 0;
 
-    { unsigned char buf[1024];
-      if (salt_len + u16len > (int)sizeof(buf)) return 0;
+    { unsigned char *buf = (unsigned char *)WS->gp1;
+      if (salt_len + u16len > WS_GP_SIZE) return 0;
       memcpy(buf, salt_bin, salt_len);
       memcpy(buf + salt_len, utf16, u16len);
       if (epiver == 1)
@@ -12054,7 +13322,7 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
 
     /* Compute NTLM hash: MD4(UTF16LE(pass)) */
     { unsigned char utf16[1024];
-      int u16len = utf8_to_utf16le(pass, passlen, utf16, sizeof(utf16));
+      int u16len = latin1_to_utf16le(pass, passlen, utf16, sizeof(utf16));
       if (u16len <= 0) return 0;
       rhash_msg(RHASH_MD4, utf16, u16len, ntlm);
     }
@@ -12408,7 +13676,11 @@ static int verify_drupal7(const char *hashstr, int hashlen,
     salt_start = hashstr + 4;
 
     /* h = SHA512(salt + password) */
-    { unsigned char buf[1024];
+    /* Setup and iteration both build 8-or-64 bytes of prefix plus the
+     * password; bound once against the workspace buffer. */
+    if (64 + passlen > WS_GP_SIZE) return 0;
+
+    { unsigned char *buf = (unsigned char *)WS->gp1;
       memcpy(buf, salt_start, 8);
       memcpy(buf + 8, pass, passlen);
       SHA512(buf, 8 + passlen, digest);
@@ -12467,10 +13739,15 @@ static int verify_nsec3(const char *hashstr, int hashlen,
     }
 
     /* DNS wire format: length-prefixed label for password + domain labels */
-    { unsigned char wire[1024];
+    { unsigned char *wire = (unsigned char *)WS->gp3;
       int wlen = 0;
       const char *domain = c1 + 1;
       int dlen = c2 - c1 - 1;
+
+      /* wire holds a length byte plus the password, then the domain labels
+       * (each dot becomes a length byte, so at most dlen + 1 bytes), the root
+       * label and the salt.  gp1 is salt_bin and gp2 is the iteration buffer. */
+      if (4 + passlen + dlen + salt_len > WS_GP_SIZE) return 0;
 
       /* password as first label */
       wire[wlen++] = (unsigned char)passlen;
@@ -13259,7 +14536,7 @@ static int verify_azuresync(const char *hashstr, int hashlen,
     if (hex2bin(hash_hex, 64, expected) != 32) return 0;
 
     /* NTLM = MD4(UTF16LE(pass)) */
-    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+    compute_ntlm_latin1(pass, passlen, NULL, 0, ntlm);
 
     /* UC hex of NTLM -> UTF16LE */
     for (int i = 0; i < 16; i++) {
@@ -13349,7 +14626,7 @@ static int verify_krb5tgs23(const char *hashstr, int hashlen,
     if (hex2bin(edata_hex, edata_hexlen, edata) != edata_len) return 0;
 
     /* NTLM(pass) */
-    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+    compute_ntlm_latin1(pass, passlen, NULL, 0, ntlm);
 
     /* K1 = HMAC-MD5(ntlm, usage=2) */
     unsigned char usage[4] = {2, 0, 0, 0};
@@ -14520,7 +15797,7 @@ static int verify_md5descrypt(const char *hashstr, int hashlen,
     if (!s) return 0;
     rhash_msg(RHASH_MD5, s, strlen(s), md5);
     prmd5(md5, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_MD5);
 }
 
 /* MD4DESCRYPT: MD4(descrypt(pass, salt)) — "32hex:SS:password" */
@@ -14553,7 +15830,7 @@ static int verify_md4descrypt(const char *hashstr, int hashlen,
     if (!s) return 0;
     rhash_msg(RHASH_MD4, (unsigned char *)s, strlen(s), md4);
     prmd5(md4, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_MD4);
 }
 
 /* SHA1DESCRYPT: SHA1(descrypt(pass, salt)) — "40hex:SS:password" */
@@ -14586,7 +15863,7 @@ static int verify_sha1descrypt(const char *hashstr, int hashlen,
     if (!s) return 0;
     SHA1((unsigned char *)s, strlen(s), sha1);
     prmd5(sha1, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* MD4UTF16DESCRYPT: NTLM(descrypt(pass, salt)) — "32hex:SS:password" */
@@ -14622,7 +15899,7 @@ static int verify_md4utf16descrypt(const char *hashstr, int hashlen,
     if (u16len <= 0) return 0;
     rhash_msg(RHASH_MD4, utf16, u16len, md4);
     prmd5(md4, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_NTLM);
 }
 
 /* md5crypt core — used by verify_md5crypt, verify_juniperive */
@@ -15045,32 +16322,45 @@ static int verify_bcrypt256(const char *hashstr, int hashlen,
       unsigned int hmac_len = 32;
       int x;
 
-      if (hashlen < 60) return 0;
+      /* The stored $2k$ form is 59 characters, not 60: it carries 21 salt
+       * characters rather than 22. A < 60 test rejected every real one. */
+      if (hashlen < 59) return 0;
       { int cost = atoi(hashstr + 4);
         if (cost > 0 && cost < 32 &&
             verify_cost_exceeds(WS->cur_rate, 4096.0, (double)(1 << cost)))
             return 0;
       }
-      /* Build setting: $2b$ + cost + $ + salt22 */
+      /* Build setting: $2b$ + cost + $ + salt. The stored $2k$ form carries
+       * only 21 of the 22 salt characters; the 22nd holds 2 significant bits
+       * and is recovered by trying ".euO". That character belongs in BOTH the
+       * HMAC key and the bcrypt salt, so the setting must be rebuilt inside
+       * the loop. It was previously terminated at 28, leaving a 21-character
+       * salt that crypt_rn cannot use, and it did not vary with x -- so this
+       * path could never match. mdxfind writes the same character into both
+       * (mdxfind.c, linebuf2[MAXLINE+7+21] = extrasalt[x]). */
       memcpy(setting, hashstr, 28);
       setting[2] = 'b';
-      setting[28] = 0;
 
-      /* HMAC key = salt22 (positions 7..28) + 1 extra char = 22 chars base */
+      /* HMAC key = salt21 (positions 7..27) + 1 extra char = 22 chars */
       memcpy(hmac_key, hashstr + 7, 21);
 
       for (x = 0; x < 4; x++) {
+          setting[28] = extrasalt[x];
+          setting[29] = 0;
           hmac_key[21] = extrasalt[x];
           HMAC(EVP_sha256(), hmac_key, 22, pass, passlen, hmac_out, &hmac_len);
           b64_encode(hmac_out, 32, b64);
           b64[44] = 0; /* null-terminate */
           if (!crypt_rn(b64, setting, result, WS_GP_SIZE))
               continue;
-          if (strncmp(result, hashstr, hashlen) == 0)
-              return 1;
-          /* Compare with $2k$ restored */
-          result[2] = 'k';
-          if (strncmp(result, hashstr, hashlen) == 0)
+          /* crypt_rn returns the ordinary 60-character $2b$ form: 7 prefix +
+           * 22 salt + 31 checksum. The stored $2k$ form is 59 characters,
+           * because it carries only 21 salt characters. Comparing the two as
+           * whole strings can never succeed -- they differ at the prefix and
+           * again from offset 28 on, where one still has a salt character and
+           * the other has already started the checksum. Compare the CHECKSUMS:
+           * result+29 against hashstr+28, 31 characters. */
+          if (strncmp(result + 29, hashstr + 28, 31) == 0)
               return 1;
       }
     }
@@ -15475,7 +16765,7 @@ static int verify_dcc2(const char *hashstr, int hashlen,
     if (hex2bin(hash_start, 32, expected) != 16) return 0;
 
     /* NTLM = MD4(UTF16LE(pass)) */
-    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+    compute_ntlm_latin1(pass, passlen, NULL, 0, ntlm);
 
     /* DCC1 = MD4(NTLM + UTF16LE(lc(user))) */
     for (i = 0; i < userlen && i < MAXLINE - 1; i++)
@@ -15871,24 +17161,6 @@ static int verify_sap_passcode5(const char *hashstr, int hashlen,
  *            username → EBCDIC (pad to 8 with 0x40, fold if >8), used as plaintext
  *            DES-ECB-encrypt(plaintext=username, key=password) == hash */
 
-static const unsigned char a2e_pc[256] = {
-    0x2a,0xa8,0xae,0xad,0xc4,0xf1,0xf7,0xf4,0x86,0xa1,0xe0,0xbc,0xb3,0xb0,0xb6,0xb5,
-    0x8a,0x89,0x8f,0x8c,0xd3,0xd0,0xce,0xe6,0x9b,0x98,0xd5,0xe5,0x92,0x91,0x97,0x94,
-    0x2a,0x34,0x54,0x5d,0x1c,0x73,0x0b,0x51,0x31,0x10,0x13,0x37,0x7c,0x6b,0x3d,0x68,
-    0x4a,0x49,0x4f,0x4c,0x43,0x40,0x46,0x45,0x5b,0x58,0x5e,0x16,0x32,0x57,0x76,0x75,
-    0x52,0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,
-    0x04,0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x3e,0x6b,0x1f,0x15,0x70,
-    0x58,0xa8,0xae,0xad,0xa2,0xa1,0xa7,0xa4,0xba,0xb9,0x89,0x8f,0x8c,0x83,0x80,0x86,
-    0x85,0x9b,0x98,0xef,0xec,0xe3,0xe0,0xe6,0xe5,0xfb,0xf8,0x2a,0x7f,0x0b,0xe9,0xa4,
-    0xea,0xe9,0xef,0xec,0xe3,0x80,0xa7,0x85,0xfb,0xf8,0xfe,0xfd,0xf2,0xb9,0xbf,0x9d,
-    0xcb,0xc8,0x9e,0xcd,0xc2,0xc1,0xc7,0xba,0xda,0xd9,0xdf,0xdc,0xa2,0x83,0xd6,0x68,
-    0x29,0x2f,0x2c,0x23,0x20,0x26,0x25,0x3b,0x38,0x08,0x0e,0x0d,0x02,0x01,0x07,0x04,
-    0x1a,0x19,0x6e,0x6d,0x62,0x61,0x67,0x64,0x7a,0x79,0x4a,0x49,0x4f,0x4c,0x43,0x40,
-    0x46,0x45,0x5b,0xab,0xbf,0xbc,0xb3,0xb0,0xb6,0xb5,0x8a,0x9e,0x9d,0x92,0x91,0x97,
-    0x94,0xea,0xfe,0xfd,0xf2,0xf1,0xf7,0xf4,0xcb,0xc8,0xce,0xcd,0xc2,0xc1,0xc7,0xc4,
-    0xda,0xd9,0xdf,0xdc,0xd3,0xd0,0xd6,0xd5,0x3e,0x3d,0x32,0x31,0x37,0x34,0x1f,0x1c,
-    0x13,0x10,0x16,0x15,0x7f,0x7c,0x73,0x70,0x76,0x75,0x5e,0x5d,0x52,0x51,0x57,0x54
-};
 
 static int verify_as400des(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -16483,7 +17755,7 @@ static int verify_qnx_md5(const char *hashstr, int hashlen,
     const char *at2;
     if (hashstr[2] == ',') {
         iter = atoi(hashstr + 3);
-        at2 = strchr(hashstr + 3, '@');
+        at2 = (char *)memchr(hashstr + 3, '@', (size_t)(hashlen - 3));
     } else if (hashstr[2] == '@') {
         at2 = hashstr + 2;
     } else return 0;
@@ -16525,7 +17797,7 @@ static int verify_qnx_sha256(const char *hashstr, int hashlen,
     const char *at2;
     if (hashstr[2] == ',') {
         iter = atoi(hashstr + 3);
-        at2 = strchr(hashstr + 3, '@');
+        at2 = (char *)memchr(hashstr + 3, '@', (size_t)(hashlen - 3));
     } else if (hashstr[2] == '@') {
         at2 = hashstr + 2;
     } else return 0;
@@ -16565,7 +17837,7 @@ static int verify_qnx_sha512(const char *hashstr, int hashlen,
     const char *at2;
     if (hashstr[2] == ',') {
         iter = atoi(hashstr + 3);
-        at2 = strchr(hashstr + 3, '@');
+        at2 = (char *)memchr(hashstr + 3, '@', (size_t)(hashlen - 3));
     } else if (hashstr[2] == '@') {
         at2 = hashstr + 2;
     } else return 0;
@@ -16605,7 +17877,7 @@ static int verify_qnx7_sha512(const char *hashstr, int hashlen,
     const char *at2;
     if (hashstr[2] == ',') {
         iter = atoi(hashstr + 3);
-        at2 = strchr(hashstr + 3, '@');
+        at2 = (char *)memchr(hashstr + 3, '@', (size_t)(hashlen - 3));
     } else if (hashstr[2] == '@') {
         at2 = hashstr + 2;
     } else return 0;
@@ -18410,7 +19682,8 @@ static int verify_blake2b512(const char *hashstr, int hashlen,
 {
     unsigned char *expected = (unsigned char *)WS->ctx1;
     unsigned char *computed = (unsigned char *)WS->ctx2;
-    const char *hex; int hexlen;
+    char *hexbuf = (char *)WS->gp1;
+    const char *hex; int hexlen, iter;
 
     if (hashlen == 136 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
         hex = hashstr + 8; hexlen = 128;
@@ -18419,7 +19692,17 @@ static int verify_blake2b512(const char *hashstr, int hashlen,
     } else return 0;
     if (hex2bin(hex, hexlen, expected) != 64) return 0;
     blake2b_hash(computed, 64, pass, passlen);
-    return memcmp(computed, expected, 64) == 0;
+    /* The outermost hash iterates: x(n+1) = blake2(hex(x n)). Confirmed
+     * against mdxfind own x01/x02/x03 output for all three widths. This type
+     * is emitted BOTH as $BLAKE2$<hex> and as a bare hex digest; the bare
+     * form is a plain hex result and so must iterate. */
+    if (memcmp(computed, expected, 64) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(computed, hexbuf, 128);
+        blake2b_hash(computed, 64, (const unsigned char *)hexbuf, 128);
+        if (memcmp(computed, expected, 64) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
 }
 
 /* BLAKE2B512PASSSALT with $BLAKE2$ prefix (e842, hashcat mode 610)
@@ -18489,7 +19772,8 @@ static int verify_blake2b256(const char *hashstr, int hashlen,
 {
     unsigned char *expected = (unsigned char *)WS->ctx1;
     unsigned char *computed = (unsigned char *)WS->ctx2;
-    const char *hex; int hexlen;
+    char *hexbuf = (char *)WS->gp1;
+    const char *hex; int hexlen, iter;
 
     if (hashlen == 72 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
         hex = hashstr + 8; hexlen = 64;
@@ -18498,7 +19782,17 @@ static int verify_blake2b256(const char *hashstr, int hashlen,
     } else return 0;
     if (hex2bin(hex, hexlen, expected) != 32) return 0;
     blake2b_hash(computed, 32, pass, passlen);
-    return memcmp(computed, expected, 32) == 0;
+    /* The outermost hash iterates: x(n+1) = blake2(hex(x n)). Confirmed
+     * against mdxfind own x01/x02/x03 output for all three widths. This type
+     * is emitted BOTH as $BLAKE2$<hex> and as a bare hex digest; the bare
+     * form is a plain hex result and so must iterate. */
+    if (memcmp(computed, expected, 32) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(computed, hexbuf, 64);
+        blake2b_hash(computed, 32, (const unsigned char *)hexbuf, 64);
+        if (memcmp(computed, expected, 32) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
 }
 
 /* BLAKE2B256PASSSALT with $BLAKE2$ prefix (e846, hashcat mode 34810)
@@ -18568,7 +19862,8 @@ static int verify_blake2s256(const char *hashstr, int hashlen,
 {
     unsigned char *expected = (unsigned char *)WS->ctx1;
     unsigned char *computed = (unsigned char *)WS->ctx2;
-    const char *hex; int hexlen;
+    char *hexbuf = (char *)WS->gp1;
+    const char *hex; int hexlen, iter;
 
     if (hashlen == 72 && memcmp(hashstr, "$BLAKE2$", 8) == 0) {
         hex = hashstr + 8; hexlen = 64;
@@ -18577,7 +19872,17 @@ static int verify_blake2s256(const char *hashstr, int hashlen,
     } else return 0;
     if (hex2bin(hex, hexlen, expected) != 32) return 0;
     blake2s(computed, 32, pass, passlen, NULL, 0);
-    return memcmp(computed, expected, 32) == 0;
+    /* The outermost hash iterates: x(n+1) = blake2(hex(x n)). Confirmed
+     * against mdxfind own x01/x02/x03 output for all three widths. This type
+     * is emitted BOTH as $BLAKE2$<hex> and as a bare hex digest; the bare
+     * form is a plain hex result and so must iterate. */
+    if (memcmp(computed, expected, 32) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(computed, hexbuf, 64);
+        blake2s(computed, 32, (const unsigned char *)hexbuf, 64, NULL, 0);
+        if (memcmp(computed, expected, 32) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
 }
 
 /* MURMUR3 (e972, hashcat mode 27800)
@@ -18859,6 +20164,96 @@ static int verify_mangos(const char *hashstr, int hashlen,
     return strncasecmp(computed, hashstr, 40) == 0;
 }
 
+/* SHA1UCUSERPASS (e1005): SHA1(UC(user) + ":" + pass)  — John dynamic_35
+ * SHA1USERCOLONPASS (e1006): SHA1(user + ":" + pass)   — John dynamic_36
+ * Format "40hex:username". The ONLY difference is whether the username is
+ * uppercased; the password never is (that is what separates these from
+ * e540 MANGOS, which uppercases both). John distinguishes them by the Setup
+ * flag MGF_USERNAME_UPCASE, not by its function list. */
+static int verify_useridcolonpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int upcase)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *digest   = (unsigned char *)WS->ctx2;
+    char *hexbuf = (char *)WS->gp1;
+    char *buf    = (char *)WS->gp2;
+    const char *colon, *user;
+    int i, blen, userlen, iter;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    if (hex2bin(hashstr, 40, expected) != 20) return 0;
+    user = colon + 1;
+    userlen = hashlen - 41;
+    if (userlen < 0) return 0;
+
+    blen = 0;
+    for (i = 0; i < userlen && blen < (int)WS_GP_SIZE - 2; i++)
+        buf[blen++] = upcase ? toupper((unsigned char)user[i]) : user[i];
+    buf[blen++] = ':';
+    for (i = 0; i < passlen && blen < (int)WS_GP_SIZE - 1; i++)
+        buf[blen++] = pass[i];
+
+    SHA1((unsigned char *)buf, blen, digest);
+    if (memcmp(digest, expected, 20) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(digest, hexbuf, 40);
+        SHA1((unsigned char *)hexbuf, 40, digest);
+        if (memcmp(digest, expected, 20) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
+}
+
+static int verify_sha1ucuserpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_useridcolonpass(hashstr, hashlen, pass, passlen, 1); }
+
+static int verify_sha1usercolonpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return verify_useridcolonpass(hashstr, hashlen, pass, passlen, 0); }
+
+/* MD5USERMD5PASSSALT (e1011): md5(user . md5(pass) . salt)  — John dynamic_15
+ *   hashstr "32hex:salt:user"
+ * Splits the tail on its FIRST colon, matching mdxfind's combined-salt
+ * handling, so a -z line feeds straight back in.
+ * (John dynamic_1560 / SocialEngine is NOT here: it is already e991
+ * MD5SALT1SALT2.) */
+static int verify_md5usermd5passsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *digest   = (unsigned char *)WS->ctx2;
+    unsigned char *inner    = (unsigned char *)WS->ctx3;
+    char *hexbuf = (char *)WS->gp1;
+    char *buf    = (char *)WS->gp2;
+    const char *tail, *colon;
+    int slen, ulen, blen, iter;
+
+    if (hashlen < 34 || hashstr[32] != ':') return 0;
+    if (hex2bin(hashstr, 32, expected) != 16) return 0;
+    tail = hashstr + 33;
+    colon = memchr(tail, ':', hashlen - 33);
+    if (!colon) return 0;
+    slen = colon - tail;
+    ulen = hashlen - 33 - slen - 1;
+    if (ulen < 0 || ulen + 32 + slen >= (int)WS_GP_SIZE) return 0;
+
+    hp_md5(pass, passlen, inner);
+    blen = 0;
+    memcpy(buf, colon + 1, ulen); blen += ulen;
+    prmd5(inner, buf + blen, 32); blen += 32;
+    memcpy(buf + blen, tail, slen); blen += slen;
+
+    hp_md5(buf, blen, digest);
+    if (memcmp(digest, expected, 16) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(digest, hexbuf, 32);
+        hp_md5(hexbuf, 32, digest);
+        if (memcmp(digest, expected, 16) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
+}
+
 /* YAF-SHA1 (e459): SHA1(UTF16LE(pass) + base64_decode(salt)) — "b64hash:b64salt" */
 static int verify_yafsalt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -18881,10 +20276,9 @@ static int verify_yafsalt(const char *hashstr, int hashlen,
 
     /* Convert password to UTF-16LE */
     ulen = 0;
-    for (i = 0; i < passlen && ulen + 2 + salt_len <= (int)WS_GP_SIZE; i++) {
-        buf[ulen++] = pass[i];
-        buf[ulen++] = 0;
-    }
+    /* iconv, not a byte expansion: mdxfind converts through iconv opened
+     * with //IGNORE, so every non-ASCII candidate differed here. */
+    ulen = utf8_to_utf16le(pass, passlen, buf, (int)WS_GP_SIZE - 64);
     memcpy(buf + ulen, salt_bin, salt_len);
     SHA1(buf, ulen + salt_len, sha1);
 
@@ -19053,7 +20447,7 @@ static int verify_sha1customusersalt(const char *hashstr, int hashlen,
     SHA1((unsigned char *)buf, userlen + 15 + 20, C);
     for (i = 0; i < 20; i++) C[i] ^= A[i];
 
-    blen = base64_encode(C, 20, out, (int)sizeof(out));
+    blen = base64_encode(C, 20, out, WS_GP_SIZE);
     return blen == b64len && memcmp(out, hashstr, blen) == 0;
 }
 
@@ -19128,7 +20522,7 @@ static int verify_ntlm_md5passmd5salt(const char *hashstr, int hashlen,
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
     rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_NTLM);
 }
 
 /* MD4UTF16MD5MD5PASSMD5SALT (e784): NTLM(UTF16LE(md5(md5hex(pass))+md5hex(salt)))
@@ -19166,7 +20560,7 @@ static int verify_ntlm_md5md5passmd5salt(const char *hashstr, int hashlen,
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexsalt[i]; ubuf[ulen++] = 0; }
     rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_NTLM);
 }
 
 /* MD4UTF16MD5PASSMD5SHA1SALT (e785): NTLM(UTF16LE(md5hex(pass)+md5(sha1hex(salt))))
@@ -19204,7 +20598,7 @@ static int verify_ntlm_md5passmd5sha1salt(const char *hashstr, int hashlen,
     for (i = 0; i < 32; i++) { ubuf[ulen++] = hexmd5sha1[i]; ubuf[ulen++] = 0; }
     rhash_msg(RHASH_MD4, ubuf, ulen, ntlm);
     prmd5(ntlm, computed, 32);
-    return strncasecmp(computed, hashstr, 32) == 0;
+    return hex_iter_match(computed, hashstr, ITER_NTLM);
 }
 
 /* ================================================================== */
@@ -19343,6 +20737,38 @@ static void compute_md5sha1x6(const unsigned char *pass, int passlen,
 /* --- Group B: CAP verify types (HTV unsalted) --- */
 
 /* SHA1MD51CAP (e664): MD5(pass)→hex, enumerate single-char CAP, SHA1 each */
+/* SHA1MD51CAPSALT (e669): emit(sha1(cap(md5(pass), N) . salt)), N = each
+ * lowercase position.  As with every other "1CAP" type the cap position is
+ * enumerated and a digest emitted per position; compute_sha1md5capsalt caps
+ * only the first lowercase, so it could match at most one of them. */
+static int verify_sha1md51capsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5h = (unsigned char *)WS->ctx1;
+    unsigned char *sha1h = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+    char *computed = (char *)WS->gp2;
+    const char *colon;
+    int saltlen, y;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    saltlen = hashlen - 41;
+    if (saltlen < 0 || saltlen > 200) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, md5h);
+    prmd5(md5h, buf, 32);
+    memcpy(buf + 32, colon + 1, saltlen);
+    for (y = 0; y < 32; y++) {
+        if (!islower((unsigned char)buf[y])) continue;
+        buf[y] = toupper((unsigned char)buf[y]);
+        SHA1((unsigned char *)buf, 32 + saltlen, sha1h);
+        prmd5(sha1h, computed, 40);
+        buf[y] = tolower((unsigned char)buf[y]);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
+    return 0;
+}
+
 static int verify_sha1md51cap(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -19359,7 +20785,7 @@ static int verify_sha1md51cap(const char *hashstr, int hashlen,
             hex[y] = toupper((unsigned char)hex[y]);
             SHA1((unsigned char *)hex, 32, sha1h);
             prmd5(sha1h, computed, 40);
-            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
             hex[y] = tolower((unsigned char)hex[y]);
         }
     }
@@ -19370,53 +20796,11 @@ static int verify_sha1md51cap(const char *hashstr, int hashlen,
  * Total: MD5(pass)→hex, then MD5^N(hex)→hex2, both CAP strategies→SHA1.
  * Input format: "40hexhash:N:password" (salted) or "40hexhash:password" (unsalted, N=1).
  * For hashpipe we always use N=1 since it falls through with one pre-step. */
+/* e733: one md5-to-hex pre-step, then the x1CAP loop */
 static int verify_sha1md51capmd5(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
-    unsigned char *md5h = (unsigned char *)WS->ctx1;
-    unsigned char *sha1h = (unsigned char *)WS->ctx2;
-    char *hex = (char *)WS->gp1;
-    char *computed = (char *)WS->gp2;
-    int y, j, niter = 1, i;
-    const char *colon;
-    if (hashlen < 40) return 0;
-    /* Parse optional :N salt */
-    if (hashlen > 40 && hashstr[40] == ':') {
-        colon = hashstr + 41;
-        niter = atoi(colon);
-        if (niter < 1) niter = 1;
-    }
-    /* MD5(pass) → hex (SHA1MD51CAPMD5 pre-step) */
-    rhash_msg(RHASH_MD5, pass, passlen, md5h);
-    prmd5(md5h, hex, 32);
-    /* MD5^N(hex) from x1CAP loop */
-    for (i = 0; i < niter; i++) {
-        rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, md5h);
-        prmd5(md5h, hex, 32);
-    }
-    /* Strategy 1: single-position CAP */
-    for (y = 0; y < 32; y++) {
-        if (islower((unsigned char)hex[y])) {
-            hex[y] = toupper((unsigned char)hex[y]);
-            SHA1((unsigned char *)hex, 32, sha1h);
-            prmd5(sha1h, computed, 40);
-            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
-            hex[y] = tolower((unsigned char)hex[y]);
-        }
-    }
-    /* Strategy 2: letter-class CAP */
-    for (j = 'a'; j <= 'f'; j++) {
-        for (y = 0; y < 32; y++) {
-            if (isupper((unsigned char)hex[y]))
-                hex[y] = tolower((unsigned char)hex[y]);
-            if (hex[y] == j)
-                hex[y] = toupper((unsigned char)hex[y]);
-        }
-        SHA1((unsigned char *)hex, 32, sha1h);
-        prmd5(sha1h, computed, 40);
-        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
-    }
-    return 0;
+    return x1cap_engine(hashstr, hashlen, pass, passlen, 1);
 }
 
 /* SHA1SHA11CAP (e737): SHA1(pass)→hex, single-position CAP + letter-class CAP */
@@ -19437,7 +20821,7 @@ static int verify_sha1sha11cap(const char *hashstr, int hashlen,
             hex[y] = toupper((unsigned char)hex[y]);
             SHA1((unsigned char *)hex, 40, sha1r);
             prmd5(sha1r, computed, 40);
-            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
             hex[y] = tolower((unsigned char)hex[y]);
         }
     }
@@ -19452,10 +20836,47 @@ static int verify_sha1sha11cap(const char *hashstr, int hashlen,
         }
         SHA1((unsigned char *)hex, 40, sha1r);
         prmd5(sha1r, computed, 40);
-        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     }
     return 0;
 }
+
+/* --- xNN iteration for SHA1-outer verify types ---
+ *
+ * mdxfind iterates the OUTERMOST hash and nothing else: x01 is the type's own
+ * digest and x(n+1) = sha1(hex40(x n)). A verify function returns a boolean
+ * rather than a digest, so the generic iteration paths skip verify types
+ * outright ("if (ht->verify) continue") and such a type could only ever match
+ * at x01. Walking the chain here is what lets it match at depth.
+ *
+ * computed[0..39] holds the x01 hex digest and is ADVANCED IN PLACE, so a
+ * caller with a second candidate must recompute it before trying again -- all
+ * callers below already do, since each candidate re-runs prmd5 into the slot.
+ *
+ * Applies only where the result is a plain hex digest. Structured results
+ * ($BLAKE2$ and the like) do not iterate and must not call this. Dave's rule,
+ * 2026-09-01. */
+static int hex_iter_match(char *computed, const char *hashstr, int kind)
+{
+    unsigned char *dg = (unsigned char *)WS->ctx5;
+    int iter, hl = (kind == ITER_SHA1) ? 40 : 32;
+
+    if (strncasecmp(computed, hashstr, hl) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        switch (kind) {
+        case ITER_SHA1: SHA1((const unsigned char *)computed, hl, dg); break;
+        case ITER_MD5:  rhash_msg(RHASH_MD5, (const unsigned char *)computed, hl, dg); break;
+        case ITER_MD4:  rhash_msg(RHASH_MD4, (const unsigned char *)computed, hl, dg); break;
+        default:        compute_ntlm((const unsigned char *)computed, hl, NULL, 0, dg); break;
+        }
+        prmd5(dg, computed, hl);
+        if (strncasecmp(computed, hashstr, hl) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
+}
+
+static int sha1_hex_iter_match(char *computed, const char *hashstr)
+{ return hex_iter_match(computed, hashstr, ITER_SHA1); }
 
 /* --- Group C: TRUNC+CAP verify types (HTV salted, salt=truncation length) --- */
 
@@ -19488,11 +20909,11 @@ static int verify_sha1sha1captrunc(const char *hashstr, int hashlen,
     /* Left-aligned prefix */
     SHA1((unsigned char *)hex, trunclen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
     /* Right-aligned suffix */
     SHA1((unsigned char *)(hex + (40 - trunclen)), trunclen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
     return 0;
 }
 
@@ -19522,7 +20943,7 @@ static int verify_sha1md6captrunc(const char *hashstr, int hashlen,
     }
     SHA1((unsigned char *)hex, trunclen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
     return 0;
 }
 
@@ -19530,55 +20951,11 @@ static int verify_sha1md6captrunc(const char *hashstr, int hashlen,
 
 /* SHA1MD5x1CAP (e749): MD5^N(pass)→hex, enumerate CAP, SHA1 each.
  * Salt = iteration count N. */
+/* e749: the x1CAP loop entered directly */
 static int verify_sha1md5x1cap(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
-    unsigned char *md5h = (unsigned char *)WS->ctx1;
-    unsigned char *sha1h = (unsigned char *)WS->ctx2;
-    char *hex = (char *)WS->gp1;
-    char *computed = (char *)WS->gp2;
-    const char *colon, *saltstr;
-    int niter, i, y, j;
-    colon = memchr(hashstr, ':', hashlen);
-    if (!colon || colon - hashstr != 40) return 0;
-    saltstr = colon + 1;
-    niter = atoi(saltstr);
-    if (niter < 1 || niter > 100000) return 0;
-    /* Apply N iterations of MD5 hex */
-    memcpy(hex, pass, passlen < 32 ? passlen : 32);
-    {
-        const unsigned char *inp = pass;
-        int inlen = passlen;
-        for (i = 0; i < niter; i++) {
-            rhash_msg(RHASH_MD5, inp, inlen, md5h);
-            prmd5(md5h, hex, 32);
-            inp = (unsigned char *)hex;
-            inlen = 32;
-        }
-    }
-    /* Strategy 1: single-position CAP */
-    for (y = 0; y < 32; y++) {
-        if (islower((unsigned char)hex[y])) {
-            hex[y] = toupper((unsigned char)hex[y]);
-            SHA1((unsigned char *)hex, 32, sha1h);
-            prmd5(sha1h, computed, 40);
-            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
-            hex[y] = tolower((unsigned char)hex[y]);
-        }
-    }
-    /* Strategy 2: letter-class CAP */
-    for (j = 'a'; j <= 'f'; j++) {
-        for (y = 0; y < 32; y++) {
-            if (isupper((unsigned char)hex[y]))
-                hex[y] = tolower((unsigned char)hex[y]);
-            if (hex[y] == j)
-                hex[y] = toupper((unsigned char)hex[y]);
-        }
-        SHA1((unsigned char *)hex, 32, sha1h);
-        prmd5(sha1h, computed, 40);
-        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
-    }
-    return 0;
+    return x1cap_engine(hashstr, hashlen, pass, passlen, 0);
 }
 
 /* ================================================================== */
@@ -19653,7 +21030,7 @@ static int verify_sha1_truncsalt(const char *hashstr, int hashlen,
         SHA1((unsigned char *)buf, trunclen + real_saltlen, sha1r);
     }
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
 
     /* Right-aligned suffix */
     if (try_right) {
@@ -19667,7 +21044,7 @@ static int verify_sha1_truncsalt(const char *hashstr, int hashlen,
             SHA1((unsigned char *)buf, trunclen + real_saltlen, sha1r);
         }
         prmd5(sha1r, computed, 40);
-        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+        if (sha1_hex_iter_match(computed, hashstr)) return 1;
     }
     return 0;
 }
@@ -19706,8 +21083,9 @@ static int verify_sha1md5truncsalt(const char *hashstr, int hashlen,
 static int trunc_nosalt_verify(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen, int kind)
 {
-    unsigned char h[64];
-    char hex[129], cand[41];
+    unsigned char *h = (unsigned char *)WS->ctx6;
+    char *hex = (char *)WS->gp3;
+    char *cand = (char *)WS->gp8;
     const char *colon;
     int width, n, i;
 
@@ -19731,7 +21109,7 @@ static int trunc_nosalt_verify(const char *hashstr, int hashlen,
         const char *seg = i ? hex + (width - n) : hex;
         SHA1((const unsigned char *)seg, n, h);
         prmd5(h, cand, 40);
-        if (strncasecmp(cand, hashstr, 40) == 0) return 1;
+        if (sha1_hex_iter_match(cand, hashstr)) return 1;
     }
     return 0;
 }
@@ -19741,6 +21119,166 @@ static int verify_sha1sha1truncmd5(const char *hs, int hl, const unsigned char *
 { return trunc_nosalt_verify(hs, hl, p, pl, 1); }
 static int verify_sha1sha512truncmd5(const char *hs, int hl, const unsigned char *p, int pl)
 { return trunc_nosalt_verify(hs, hl, p, pl, 2); }
+
+/* --- Generic TRUNC verify helper, unsalted ---
+ *
+ * The stored hash is "digest:N". mdxfind walks the truncation length N down
+ * from the full hex width of the intermediate digest to 20, and for each N
+ * hashes the FIRST N characters of that hex and -- for most types -- the LAST
+ * N as well, reporting the matching N in the salt field. hx.8 Note [24].
+ *
+ * The thirteen types below were registered as fixed 16-byte compute chains
+ * with no notion of N (two were marked "placeholder" in the source), so they
+ * could never match anything mdxfind emits. Same defect and same fix as
+ * e723/e750/e755 immediately above.
+ *
+ *   innerhex[0..hexlen-1]  hex of the intermediate digest, already cased
+ *   try_right              1 = also try the trailing-N cut
+ *
+ * No concat buffer is needed: the cut is a substring of innerhex, so SHA1
+ * runs over it in place. Buffers are WS slots, never the stack. */
+static int verify_sha1_truncnosalt(const char *hashstr, int hashlen,
+    const char *innerhex, int hexlen, int try_right)
+{
+    unsigned char *sha1r = (unsigned char *)WS->ctx4;
+    char *computed = (char *)WS->gp7;
+    const char *colon;
+    int n;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    n = atoi(colon + 1);
+    if (n < 20 || n > hexlen) return 0;
+
+    SHA1((const unsigned char *)innerhex, n, sha1r);
+    prmd5(sha1r, computed, 40);
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
+
+    if (try_right) {
+        SHA1((const unsigned char *)innerhex + (hexlen - n), n, sha1r);
+        prmd5(sha1r, computed, 40);
+        if (sha1_hex_iter_match(computed, hashstr)) return 1;
+    }
+    return 0;
+}
+
+/* e622 SHA1SHA256TRUNC: sha1(cut(sha256(pass), 0, N)) */
+static int verify_sha1sha256trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA256(p, pl, h); prmd5(h, hex, 64);
+    return verify_sha1_truncnosalt(hs, hl, hex, 64, 1);
+}
+
+/* e623 SHA1SHA256TRUNCMD5: sha1(cut(sha256(md5(pass)), 0, N)) -- md5 is INSIDE */
+static int verify_sha1sha256truncmd5(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_MD5, p, pl, h); prmd5(h, hex, 32);
+    SHA256((const unsigned char *)hex, 32, h); prmd5(h, hex, 64);
+    return verify_sha1_truncnosalt(hs, hl, hex, 64, 1);
+}
+
+/* e626 SHA1SHA1TRUNC: sha1(cut(sha1(pass), 0, N)) */
+static int verify_sha1sha1trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA1(p, pl, h); prmd5(h, hex, 40);
+    return verify_sha1_truncnosalt(hs, hl, hex, 40, 1);
+}
+
+/* e630 SHA1SHA256UCTRUNC: sha1(cut(upper(sha256(pass)), 0, N)) */
+static int verify_sha1sha256uctrunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA256(p, pl, h); prmd5UC(h, hex, 64);
+    return verify_sha1_truncnosalt(hs, hl, hex, 64, 1);
+}
+
+/* e635 SHA1WRLTRUNC: sha1(cut(wrl(pass), 0, N)), leading only */
+static int verify_sha1wrltrunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_WHIRLPOOL, p, pl, h); prmd5(h, hex, 128);
+    return verify_sha1_truncnosalt(hs, hl, hex, 128, 0);
+}
+
+/* e636 SHA1SHA512TRUNC: sha1(cut(sha512(pass), 0, N)) */
+static int verify_sha1sha512trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA512(p, pl, h); prmd5(h, hex, 128);
+    return verify_sha1_truncnosalt(hs, hl, hex, 128, 1);
+}
+
+/* e644 SHA1MD6TRUNC: sha1(cut(md6(pass), 0, N)), leading only */
+static int verify_sha1md6trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    compute_md6_128(p, pl, NULL, 0, h); prmd5(h, hex, 32);
+    return verify_sha1_truncnosalt(hs, hl, hex, 32, 0);
+}
+
+/* e653 SHA1WRLUCTRUNC: sha1(cut(upper(wrl(pass)), 0, N)), leading only */
+static int verify_sha1wrluctrunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_WHIRLPOOL, p, pl, h); prmd5UC(h, hex, 128);
+    return verify_sha1_truncnosalt(hs, hl, hex, 128, 0);
+}
+
+/* e661 SHA1SHA1UCTRUNC: sha1(cut(upper(sha1(pass)), 0, N)) */
+static int verify_sha1sha1uctrunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA1(p, pl, h); prmd5UC(h, hex, 40);
+    return verify_sha1_truncnosalt(hs, hl, hex, 40, 1);
+}
+
+/* e689 SHA1SHA512UCTRUNC: sha1(cut(upper(sha512(pass)), 0, N)) */
+static int verify_sha1sha512uctrunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    SHA512(p, pl, h); prmd5UC(h, hex, 128);
+    return verify_sha1_truncnosalt(hs, hl, hex, 128, 1);
+}
+
+/* e710 SHA1SHA3-256TRUNC: sha1(cut(sha3_256(pass), 0, N)) */
+static int verify_sha1sha3_256trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_SHA3_256, p, pl, h); prmd5(h, hex, 64);
+    return verify_sha1_truncnosalt(hs, hl, hex, 64, 1);
+}
+
+/* e745 SHA1SHA384TRUNC: sha1(cut(sha384(pass), 0, N)) */
+static int verify_sha1sha384trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_SHA384, p, pl, h); prmd5(h, hex, 96);
+    return verify_sha1_truncnosalt(hs, hl, hex, 96, 1);
+}
+
+/* e746 SHA1RMD160TRUNC: sha1(cut(rmd160(pass), 0, N)) */
+static int verify_sha1rmd160trunc(const char *hs, int hl, const unsigned char *p, int pl)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    rhash_msg(RHASH_RIPEMD160, p, pl, h); prmd5(h, hex, 40);
+    return verify_sha1_truncnosalt(hs, hl, hex, 40, 1);
+}
 
 /* SHA1MD51CAPMD5MD5 (e758).
  *
@@ -19757,47 +21295,92 @@ static int verify_sha1sha512truncmd5(const char *hs, int hl, const unsigned char
  * This verifier takes i from the salt and accepts any of the variants, which
  * is what mdxfind checks. Confirmed against the live crack
  * c1cb05f7...:1:pappubhai87 (whose match is the single 'a' position). */
+/* Shared engine for the SHA1MD5x1CAP family (e749 / e733 / e758).
+ *
+ * In mdxfind, JOB_SHA1MD51CAPMD5MD5 and JOB_SHA1MD51CAPMD5 carry no break and
+ * fall through into JOB_SHA1MD5x1CAP, so all three run the same loop; they
+ * differ only in how many md5-to-hex pre-steps ran before entering it (2, 1
+ * and 0 respectively).
+ *
+ * Each round takes the 32-character hex of md5 applied i times and emits two
+ * families of digests: one per lowercase position, capitalised in turn and
+ * carrying the round number in the salt field; and one per hex letter a-f,
+ * capitalising every occurrence of that letter, emitted bare.  A salted line
+ * pins the round; a bare line must be walked.
+ */
+#define X1CAP_MAX_ROUNDS 16
+
+static int x1cap_engine(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen, int entry)
+{
+    unsigned char *md5h  = (unsigned char *)WS->ctx1;
+    unsigned char *sha1h = (unsigned char *)WS->ctx2;
+    char *hx   = (char *)WS->gp1;
+    char *cur  = (char *)WS->gp2;
+    char *cand = (char *)WS->gp3;
+    char *cls  = (char *)WS->gp4;
+    const char *colon;
+    int pinned = 0, i, y, j, curlen, rounds;
+
+    if (hashlen < 40) return 0;
+    colon = memchr(hashstr, ':', hashlen);
+    if (colon) {
+        if (colon - hashstr != 40) return 0;
+        pinned = atoi(colon + 1);
+        if (pinned < 1 || pinned > X1CAP_MAX_ROUNDS) return 0;
+    } else if (hashlen != 40) {
+        return 0;
+    }
+
+    if (entry == 0) {
+        if (passlen > MAXLINE) return 0;
+        memcpy(cur, pass, passlen);
+        curlen = passlen;
+    } else {
+        rhash_msg(RHASH_MD5, pass, passlen, md5h);
+        prmd5(md5h, cur, 32);
+        curlen = 32;
+        for (i = 1; i < entry; i++) {
+            rhash_msg(RHASH_MD5, (unsigned char *)cur, 32, md5h);
+            prmd5(md5h, cur, 32);
+        }
+    }
+
+    rounds = pinned ? pinned : X1CAP_MAX_ROUNDS;
+    for (i = 1; i <= rounds; i++) {
+        rhash_msg(RHASH_MD5, (unsigned char *)cur, curlen, md5h);
+        prmd5(md5h, hx, 32);
+        curlen = 32;
+        if (!pinned || i == pinned) {
+            for (y = 0; y < 32; y++) {
+                char c = hx[y];
+                if (c < 'a' || c > 'f') continue;
+                hx[y] = (char)(c - 32);
+                SHA1((const unsigned char *)hx, 32, sha1h);
+                prmd5(sha1h, cand, 40);
+                hx[y] = c;
+                if (hex_iter_match(cand, hashstr, ITER_SHA1)) return 1;
+            }
+        }
+        if (!pinned) {
+            for (j = 'a'; j <= 'f'; j++) {
+                for (y = 0; y < 32; y++)
+                    cls[y] = (hx[y] == (char)j) ? (char)(hx[y] - 32) : hx[y];
+                SHA1((const unsigned char *)cls, 32, sha1h);
+                prmd5(sha1h, cand, 40);
+                if (hex_iter_match(cand, hashstr, ITER_SHA1)) return 1;
+            }
+        }
+        memcpy(cur, hx, 32);
+    }
+    return 0;
+}
+
+/* e758: two md5-to-hex pre-steps, then the x1CAP loop */
 static int verify_sha1md51capmd5md5(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
-    unsigned char m[20];        /* 20: SHA1 writes 20 bytes here, not 16 */
-    char hx[33], cand[41];
-    const char *colon;
-    int i, n, y, r;
-
-    colon = memchr(hashstr, ':', hashlen);
-    if (!colon || (colon - hashstr) != 40) return 0;
-    n = atoi(colon + 1);
-    if (n < 1 || n > 64) return 0;
-
-    rhash_msg(RHASH_MD5, pass, passlen, m);
-    prmd5(m, hx, 32);
-    for (r = 0; r < n + 1; r++) {          /* one entry round + n loop rounds */
-        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, m);
-        prmd5(m, hx, 32);
-    }
-    /* (a) one lowercase position at a time */
-    for (y = 0; y < 32; y++) {
-        char c = hx[y];
-        if (c < 'a' || c > 'f') continue;
-        hx[y] = c - 32;
-        SHA1((unsigned char *)hx, 32, m);
-        prmd5(m, cand, 40);
-        hx[y] = c;
-        if (strncasecmp(cand, hashstr, 40) == 0) return 1;
-    }
-    /* (b) all occurrences of each letter a..f */
-    for (i = 'a'; i <= 'f'; i++) {
-        char save[33];
-        memcpy(save, hx, 33);
-        for (y = 0; y < 32; y++)
-            if (hx[y] == (char)i) hx[y] -= 32;
-        SHA1((unsigned char *)hx, 32, m);
-        prmd5(m, cand, 40);
-        memcpy(hx, save, 33);
-        if (strncasecmp(cand, hashstr, 40) == 0) return 1;
-    }
-    return 0;
+    return x1cap_engine(hashstr, hashlen, pass, passlen, 2);
 }
 
 static int verify_sha1sha1truncsalt(const char *hashstr, int hashlen,
@@ -19817,7 +21400,7 @@ static int verify_sha1wrluctruncsalt(const char *hashstr, int hashlen,
     unsigned char *h = (unsigned char *)WS->ctx1;
     char *hex = (char *)WS->gp1;
     rhash_msg(RHASH_WHIRLPOOL, pass, passlen, h);
-    prmd5(h, hex, 128);
+    prmd5UC(h, hex, 128);
     return verify_sha1_truncsalt(hashstr, hashlen, hex, 128, 0, 0);
 }
 
@@ -19925,7 +21508,7 @@ static int verify_sha1saltmd5passpepper(const char *hashstr, int hashlen,
     memcpy(buf + saltlen + 32, pepper, peplen);
     SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTMD5UCPASSPEPPER (e651): SHA1(salt + MD5UC_hex(pass) + pepper) */
@@ -19954,7 +21537,7 @@ static int verify_sha1saltmd5ucpasspepper(const char *hashstr, int hashlen,
     memcpy(buf + saltlen + 32, pepper, peplen);
     SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTSHA1PASSPEPPER (e681): SHA1(salt + sha1hex(pass) + pepper) */
@@ -19983,7 +21566,7 @@ static int verify_sha1saltsha1passpepper(const char *hashstr, int hashlen,
     memcpy(buf + saltlen + 40, pepper, peplen);
     SHA1((unsigned char *)buf, saltlen + 40 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTMD5MD5PASSPEPPER (e719): SHA1(salt + md5hex(md5hex(pass)) + pepper) */
@@ -20015,7 +21598,7 @@ static int verify_sha1saltmd5md5passpepper(const char *hashstr, int hashlen,
     memcpy(buf + saltlen + 32, pepper, peplen);
     SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTMD5SHA1PASSPEPPER (e742): SHA1(salt + md5hex(sha1hex(pass)) + pepper) */
@@ -20048,7 +21631,7 @@ static int verify_sha1saltmd5sha1passpepper(const char *hashstr, int hashlen,
     memcpy(buf + saltlen + 32, pepper, peplen);
     SHA1((unsigned char *)buf, saltlen + 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-MD5PEPPER-MD5SALT (e597): SHA1(md5hex(md5hex(pass) + salt) + pepper) */
@@ -20081,7 +21664,7 @@ static int verify_sha1_md5pepper_md5salt(const char *hashstr, int hashlen,
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-MD5PEPPER-MD5SALTMD5PASS (e596):
@@ -20119,7 +21702,7 @@ static int verify_sha1_md5pepper_md5saltmd5pass(const char *hashstr, int hashlen
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-MD5PEPPER-MD5MD5SALT (e611):
@@ -20155,7 +21738,7 @@ static int verify_sha1_md5pepper_md5md5salt(const char *hashstr, int hashlen,
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-MD5CAPPEPPER-MD5SALT (e654):
@@ -20195,7 +21778,7 @@ static int verify_sha1_md5cappepper_md5salt(const char *hashstr, int hashlen,
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-PEPPER-MD5SALT (e677):
@@ -20229,7 +21812,7 @@ static int verify_sha1_pepper_md5salt(const char *hashstr, int hashlen,
     memcpy(buf + peplen, hex, 32);
     SHA1((unsigned char *)buf, peplen + 32, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* --- 7C: 1BYTE-SALT types ---
@@ -20279,10 +21862,10 @@ static int verify_md5sql5_32(const char *hashstr, int hashlen,
     for (i = 0; i < 4; i++) {
         rhash_msg(RHASH_MD5, (unsigned char *)(uc + offsets[i]), lengths[i], md5r);
         prmd5(md5r, computed, 32);
-        if (strncasecmp(computed, hashstr, 32) == 0) return 1;
+        if (hex_iter_match(computed, hashstr, ITER_MD5)) return 1;
         rhash_msg(RHASH_MD5, (unsigned char *)(lc + offsets[i]), lengths[i], md5r);
         prmd5(md5r, computed, 32);
-        if (strncasecmp(computed, hashstr, 32) == 0) return 1;
+        if (hex_iter_match(computed, hashstr, ITER_MD5)) return 1;
     }
     return 0;
 }
@@ -20296,9 +21879,9 @@ static int verify_md5sql5_32(const char *hashstr, int hashlen,
 static int try_1salt_5combo(const char *hex32, int saltbyte,
     const char *hashstr, int hashchars, int use_sha1)
 {
-    char buf[36];
-    unsigned char hr[20];
-    char computed[41];
+    char *buf = (char *)WS->gp6;
+    unsigned char *hr = (unsigned char *)WS->ctx7;
+    char *computed = (char *)WS->gp7;
     static const int offsets[] = {1, 2, 1, 0, 2};
     static const int lengths[] = {33, 33, 34, 34, 34};
     int i;
@@ -20313,7 +21896,8 @@ static int try_1salt_5combo(const char *hex32, int saltbyte,
         else
             rhash_msg(RHASH_MD5, (unsigned char *)(buf + offsets[i]), lengths[i], hr);
         prmd5(hr, computed, hashchars);
-        if (strncasecmp(computed, hashstr, hashchars) == 0)
+        if (hex_iter_match(computed, hashstr,
+                           use_sha1 ? ITER_SHA1 : ITER_MD5))
             return 1;
     }
     return 0;
@@ -20405,7 +21989,7 @@ static int verify_sha1md51saltmd5(const char *hashstr, int hashlen,
         prmd5(mh, hex32, 32);
         SHA1((unsigned char *)hex32, 32, sha1r);
         prmd5(sha1r, computed, 40);
-        if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     }
     return 0;
 }
@@ -20457,7 +22041,7 @@ static int verify_sha1md5base641salt(const char *hashstr, int hashlen,
     hex[32] = (char)saltbyte;
     SHA1((unsigned char *)hex, 33, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SHA512TRUNC1SALT (e638): SHA512(pass)→hex(128), trunc to N,
@@ -20497,7 +22081,7 @@ static int verify_sha1sha512trunc1salt(const char *hashstr, int hashlen,
     hex[trunclen] = (char)saltbyte;
     SHA1((unsigned char *)hex, trunclen + 1, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return sha1_hex_iter_match(computed, hashstr);
 }
 
 /* SHA1SHA1PASS-TRUNC1SALT (e639):
@@ -20528,7 +22112,7 @@ static int verify_sha1sha1passtrunc1salt(const char *hashstr, int hashlen,
     hex[40] = (char)saltbyte;
     SHA1((unsigned char *)hex, 41, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return sha1_hex_iter_match(computed, hashstr);
 }
 
 /* SHA11SALTMD5UC (e718): 1-byte salt pre/appended to MD5UC_hex(pass), SHA1
@@ -20558,23 +22142,23 @@ static int verify_sha11saltmd5uc(const char *hashstr, int hashlen,
     /* 1: salt(1) + md5uchex(32) = hex[1..33], SHA1(33) */
     SHA1((unsigned char *)(hex + 1), 33, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     /* 2: md5uchex(32) + salt(1) = hex[2..34], SHA1(33) */
     SHA1((unsigned char *)(hex + 2), 33, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     /* 3: salt(1) + md5uchex(32) + salt(1) = hex[1..34], SHA1(34) */
     SHA1((unsigned char *)(hex + 1), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     /* 4: salt(2) + md5uchex(32) = hex[0..33], SHA1(34) */
     SHA1((unsigned char *)(hex + 0), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     /* 5: md5uchex(32) + salt(2) = hex[2..35], SHA1(34) */
     SHA1((unsigned char *)(hex + 2), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     return 0;
 }
@@ -20608,19 +22192,19 @@ static int verify_sha11saltmd5sha256(const char *hashstr, int hashlen,
     /* Same 5 combos as SHA11SALTMD5UC */
     SHA1((unsigned char *)(hex + 1), 33, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     SHA1((unsigned char *)(hex + 2), 33, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     SHA1((unsigned char *)(hex + 1), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     SHA1((unsigned char *)(hex + 0), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     SHA1((unsigned char *)(hex + 2), 34, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     return 0;
 }
 
@@ -20658,7 +22242,7 @@ static int verify_sha1sha1md5md5pass1salt(const char *hashstr, int hashlen,
     hex[40] = (char)saltbyte;
     SHA1((unsigned char *)hex, 41, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     /* Variant 2: md5hex(pass) + ":" + pass */
     inner[32] = ':';
@@ -20670,7 +22254,7 @@ static int verify_sha1sha1md5md5pass1salt(const char *hashstr, int hashlen,
     hex[40] = (char)saltbyte;
     SHA1((unsigned char *)hex, 41, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     return 0;
 }
@@ -20709,24 +22293,24 @@ static int verify_sha1md5dsalt(const char *hashstr, int hashlen,
     /* mdcur[0]: SHA1(buf, passlen + saltlen + 1) */
     SHA1((unsigned char *)buf, passlen + saltlen + 1, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     /* mdcur[2]: SHA1(buf, passlen + saltlen) */
     SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     /* mdcur[3]: SHA1(buf, passlen + 1) */
     SHA1((unsigned char *)buf, passlen + 1, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     /* Rebuild as "md5hex + salt\0" (no colon) for mdcur[1] */
     memcpy(buf + 32, salt, saltlen);
     buf[32 + saltlen] = 0;
     SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
     /* Variant 4: 1-byte append at [32], SHA1(buf, passlen+1) for bytes 9..126 */
     if (passlen >= 32) {
@@ -20735,7 +22319,7 @@ static int verify_sha1md5dsalt(const char *hashstr, int hashlen,
             buf[32] = (char)y;
             SHA1((unsigned char *)buf, passlen + 1, sha1r);
             prmd5(sha1r, computed, 40);
-            if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+            if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
         }
     }
 
@@ -20785,7 +22369,7 @@ static int verify_sha1md5saltpasspepper(const char *hashstr, int hashlen,
     memcpy(buf + 32, pepper, peplen);
     SHA1((unsigned char *)buf, 32 + peplen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1MD5xSALT (e736): MD5^N(pass)→hex + salt → SHA1.
@@ -20813,6 +22397,7 @@ static int verify_sha1md5xsalt(const char *hashstr, int hashlen,
     niter = atoi(saltpart);
     if (niter < 1 || niter > 100000) return 0;
     real_saltlen = saltpartlen - (sp - saltpart) - 1;
+    if (real_saltlen < 0 || real_saltlen > MAXLINE - 64) return 0;
     memcpy(real_salt, sp + 1, real_saltlen);
 
     /* MD5^N(pass) */
@@ -20830,7 +22415,9 @@ static int verify_sha1md5xsalt(const char *hashstr, int hashlen,
     memcpy(buf + 32, real_salt, real_saltlen);
     SHA1((unsigned char *)buf, 32 + real_saltlen, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    /* mdxfind walks the chain with plain sha1 over the hex, so this has to as
+     * well; comparing only the base digest left every deeper depth unresolved. */
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTSHA1CAP (e744): SHA1(pass)→hex, CAP first lowercase, salt+hex→SHA1 */
@@ -20863,7 +22450,7 @@ static int verify_sha1saltsha1cap(const char *hashstr, int hashlen,
     memcpy(buf + saltlen, hex, 40);
     SHA1((unsigned char *)buf, saltlen + 40, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1SALTMD5UCMD5UC (e757): MD5(pass)→UC→MD5(UC)→UC→salt prepend→SHA1 */
@@ -20892,7 +22479,7 @@ static int verify_sha1saltmd5ucmd5uc(const char *hashstr, int hashlen,
     memcpy(buf + saltlen, hex, 32);
     SHA1((unsigned char *)buf, saltlen + 32, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1MD5UC-MD5UCSALT (e692): MD5(pass)→UC→MD5(UC+salt)→UC→SHA1 */
@@ -20921,7 +22508,7 @@ static int verify_sha1md5uc_md5ucsalt(const char *hashstr, int hashlen,
     prmd5UC(mh, hex, 32);
     SHA1((unsigned char *)hex, 32, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-MD5UCMD5UCPASSMD5UCSALT (e662):
@@ -20959,7 +22546,7 @@ static int verify_sha1_md5ucmd5ucpassmd5ucsalt(const char *hashstr, int hashlen,
     memcpy(buf + 32, hex2, 32);
     SHA1((unsigned char *)buf, 64, sha1r);
     prmd5(sha1r, computed, 40);
-    return strncasecmp(computed, hashstr, 40) == 0;
+    return hex_iter_match(computed, hashstr, ITER_SHA1);
 }
 
 /* SHA1-SALTSHA1U16 (e824): SHA1(raw_salt + SHA1(UTF16LE(user) + ':' + UTF16LE(pass)))
@@ -21017,10 +22604,15 @@ static int verify_sha1_saltsha1u16(const char *hashstr, int hashlen,
     }
 
     /* Convert user:pass to UTF16LE(user) + ':' + UTF16LE(pass) */
-    u16len = 0;
-    for (i = 0; i < ulen; i++) { utf16[u16len++] = user[i]; utf16[u16len++] = 0; }
+    /* mdxfind converts through iconv (opened with //IGNORE), not by expanding
+     * each byte, so a non-ASCII candidate produced a different string here and
+     * every one of them failed. */
+    u16len = utf8_to_utf16le((const unsigned char *)user, ulen,
+                             (unsigned char *)utf16, WS_U16_SIZE - 4);
     utf16[u16len++] = ':';  /* single ASCII byte, NOT UTF16LE */
-    for (i = 0; i < passlen; i++) { utf16[u16len++] = pass[i]; utf16[u16len++] = 0; }
+    u16len += utf8_to_utf16le(pass, passlen,
+                              (unsigned char *)utf16 + u16len,
+                              WS_U16_SIZE - u16len - 2);
     SHA1((unsigned char *)utf16, u16len, sh);
 
     /* Hex-decode salt to raw binary */
@@ -21075,11 +22667,11 @@ static int verify_sha1sha1trunc_sha1pass_3(const char *hashstr, int hashlen,
     /* Left-aligned */
     SHA1((unsigned char *)hex, trunclen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
     /* Right-aligned */
     SHA1((unsigned char *)(hex + (40 - trunclen)), trunclen, sha1r);
     prmd5(sha1r, computed, 40);
-    if (strncasecmp(computed, hashstr, 40) == 0) return 1;
+    if (sha1_hex_iter_match(computed, hashstr)) return 1;
     return 0;
 }
 
@@ -21185,11 +22777,10 @@ static int verify_sha1_salt_utf16_pepper(const char *hashstr, int hashlen,
     memcpy(combined + clen, reversed, rlen); clen += rlen;
     memcpy(combined + clen, pepper, peplen); clen += peplen;
     /* Convert to UTF16LE */
-    u16len = 0;
-    for (i = 0; i < clen; i++) {
-        utf16[u16len++] = combined[i];
-        utf16[u16len++] = 0;
-    }
+    /* iconv, not a byte expansion: mdxfind converts through iconv opened with
+     * //IGNORE, so a non-ASCII candidate produced a different string here. */
+    u16len = utf8_to_utf16le((const unsigned char *)combined, clen,
+                             (unsigned char *)utf16, WS_U16_SIZE - 2);
     SHA1((unsigned char *)utf16, u16len, sha1r);
     prmd5(sha1r, computed, 40);
     return strncasecmp(computed, hashstr, 40) == 0;
@@ -21727,13 +23318,11 @@ static int verify_msonline(const char *hashstr, int hashlen,
     if (hexlen != 64) return 0;
     if (hex2bin(hexhash, 64, expected) != 32) return 0;
 
-    /* Encode password as UTF-16LE (simple ASCII->UTF16LE) */
-    int u16len = passlen * 2;
-    if (u16len > (int)WS_GP_SIZE - 2) return 0;
-    for (int i = 0; i < passlen; i++) {
-        u16pass[i * 2] = pass[i];
-        u16pass[i * 2 + 1] = 0;
-    }
+    /* UTF-8 to UTF-16LE via iconv.  mdxfind uses the real conversion for
+     * this type, not the byte expansion it uses for DCC2, so the naive
+     * form agreed only for ASCII passwords. */
+    int u16len = utf8_to_utf16le(pass, passlen, u16pass, (int)WS_GP_SIZE - 2);
+    if (u16len <= 0 && passlen > 0) return 0;
 
     /* PBKDF2-HMAC-SHA256(UTF16LE(pass), "", iter, 32) */
     PKCS5_PBKDF2_HMAC((const char *)u16pass, u16len,
@@ -21803,6 +23392,182 @@ static int verify_wbb4(const char *hashstr, int hashlen,
 /* SAPCODVNH512 (e984, mode 35000):
  * Format: {x-isSHA512, ITER}BASE64(hash64+salt)
  * Algorithm: SHA512(pass+salt) iterated ITER times. Password max 40 bytes. */
+/*
+ * SAP CODVN H, SHA-256 and SHA-384 flavours (e1016, e1017).
+ *
+ * Identical in shape to SAPCODVNH512, differing only in digest function and
+ * width. John's saph ships {x-isSHA256, 3000} and {x-isSHA384, 5000} vectors
+ * beside the SHA-1 and SHA-512 ones, and those four were the ONLY saph vectors
+ * hashpipe could not verify.
+ *
+ * Format: {x-isSHA<N>, ITER}BASE64(digest || salt)
+ *   round 0         h = H(pass[0..39] . salt)
+ *   rounds 1..IT-1  h = H(pass[0..39] . h)
+ *
+ * The password is truncated at 40 bytes, as SAP does.
+ *
+ * The construction was confirmed against all four of John's own vectors with an
+ * INDEPENDENT implementation before this code existed, so the check is not
+ * circular -- a self-generated vector would have proved nothing.
+ */
+static int sapcodvnh_sha2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen,
+    const char *tag, int taglen, int dlen, double bench_cost)
+{
+    char *buf = (char *)WS->gp1;
+    unsigned char *decoded = (unsigned char *)WS->gp2;
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *p, *brace;
+    int iter, b64len, dl, saltlen, plen, i;
+    unsigned char *expected, *salt;
+
+    if (hashlen < taglen + 4 || hashlen >= (int)WS_GP_SIZE) return 0;
+    if (memcmp(hashstr, tag, (size_t)taglen) != 0) return 0;
+
+    memcpy(buf, hashstr, (size_t)hashlen);
+    buf[hashlen] = 0;
+
+    p = buf + taglen;
+    brace = strchr(p, '}');
+    if (!brace) return 0;
+    iter = atoi(p);
+    if (iter < 1) return 0;
+    /* bench_cost is the iteration count of this type's OWN registered test
+     * vector, which is what the rate in bench_rates.h was measured at. Passing
+     * the sibling's 1024 would scale every estimate by 3x for SHA-256 and 5x
+     * for SHA-384. */
+    if (verify_cost_exceeds(WS->cur_rate, bench_cost, (double)iter)) return 0;
+
+    b64len = (int)(buf + hashlen - brace - 1);
+    dl = base64_decode(brace + 1, b64len, decoded, WS_GP_SIZE);
+    if (dl < dlen + 1) return 0;          /* digest plus at least one salt byte */
+
+    expected = decoded;
+    salt     = decoded + dlen;
+    saltlen  = dl - dlen;
+
+    plen = passlen > 40 ? 40 : passlen;
+
+    if (dlen == 32) {
+        SHA256_CTX c;
+        SHA256_Init(&c); SHA256_Update(&c, pass, plen);
+        SHA256_Update(&c, salt, saltlen); SHA256_Final(h, &c);
+        for (i = 1; i < iter; i++) {
+            SHA256_Init(&c); SHA256_Update(&c, pass, plen);
+            SHA256_Update(&c, h, 32); SHA256_Final(h, &c);
+        }
+    } else {
+        SHA512_CTX c;                      /* SHA-384 shares SHA-512's context */
+        SHA384_Init(&c); SHA384_Update(&c, pass, plen);
+        SHA384_Update(&c, salt, saltlen); SHA384_Final(h, &c);
+        for (i = 1; i < iter; i++) {
+            SHA384_Init(&c); SHA384_Update(&c, pass, plen);
+            SHA384_Update(&c, h, 48); SHA384_Final(h, &c);
+        }
+    }
+    return memcmp(h, expected, (size_t)dlen) == 0;
+}
+
+static int verify_sapcodvnh256(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return sapcodvnh_sha2(hashstr, hashlen, pass, passlen, "{x-isSHA256, ", 13, 32, 3000.0);
+}
+
+static int verify_sapcodvnh384(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return sapcodvnh_sha2(hashstr, hashlen, pass, passlen, "{x-isSHA384, ", 13, 48, 5000.0);
+}
+
+/*
+ * MONGODB (e1018) -- MongoDB system credential, John's "MongoDB" type 0.
+ *
+ *   stored:  $mongodb$0$<user>$<32-hex>
+ *   digest:  md5(user . ":mongo:" . pass)
+ *
+ * John also ships a type 1, a sniffed network challenge/response
+ * md5(salt . user . hex(md5(user . ":mongo:" . pass))). That is a captured
+ * authenticator rather than a stored password hash, so it is deliberately not
+ * implemented here, on the same grounds as dmd5 and hdaa.
+ *
+ * Construction reproduced from John's own vector by an independent
+ * implementation before this code existed.
+ */
+static int verify_mongodb(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp1;
+    const char *user, *hex;
+    int ulen, n, i;
+    static const char hx[] = "0123456789abcdef";
+
+    if (hashlen < 14 || memcmp(hashstr, "$mongodb$0$", 11) != 0) return 0;
+    user = hashstr + 11;
+    hex  = memchr(user, '$', (size_t)(hashlen - 11));
+    if (!hex) return 0;
+    ulen = (int)(hex - user);
+    hex++;
+    if ((int)(hashstr + hashlen - hex) != 32) return 0;
+    if (ulen < 1 || ulen + 7 + passlen >= MAXLINE) return 0;
+
+    n = 0;
+    memcpy(buf + n, user, (size_t)ulen);      n += ulen;
+    memcpy(buf + n, ":mongo:", 7);            n += 7;
+    memcpy(buf + n, pass, (size_t)passlen);   n += passlen;
+    hp_md5(buf, n, dig);
+
+    for (i = 0; i < 16; i++) {
+        if (tolower((unsigned char)hex[i * 2])     != hx[dig[i] >> 4] ||
+            tolower((unsigned char)hex[i * 2 + 1]) != hx[dig[i] & 15]) return 0;
+    }
+    return 1;
+}
+
+/*
+ * H3C (e1019) -- H3C/HPE/Huawei device password.
+ *
+ *   stored:  $h$6$<salt>$<base64 of 64-byte digest>
+ *   digest:  sha512(pass . NUL . salt . pass . NUL)
+ *
+ * The password is hashed INCLUDING its terminating NUL, twice, with the salt
+ * between. Verified against all three of John's own vectors, base64 exact.
+ */
+static int verify_h3c(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    unsigned char *buf = (unsigned char *)WS->gp1;
+    unsigned char *dec = (unsigned char *)WS->gp2;
+    const char *salt, *b64;
+    int slen, blen, n, dl;
+    SHA512_CTX c;
+
+    if (hashlen < 10 || memcmp(hashstr, "$h$6$", 5) != 0) return 0;
+    salt = hashstr + 5;
+    b64  = memchr(salt, '$', (size_t)(hashlen - 5));
+    if (!b64) return 0;
+    slen = (int)(b64 - salt);
+    b64++;
+    blen = (int)(hashstr + hashlen - b64);
+    if (slen < 1 || blen < 40) return 0;
+    if (2 * (passlen + 1) + slen >= MAXLINE) return 0;
+
+    n = 0;
+    memcpy(buf + n, pass, (size_t)passlen); n += passlen; buf[n++] = 0;
+    memcpy(buf + n, salt, (size_t)slen);    n += slen;
+    memcpy(buf + n, pass, (size_t)passlen); n += passlen; buf[n++] = 0;
+
+    SHA512_Init(&c);
+    SHA512_Update(&c, buf, (size_t)n);
+    SHA512_Final(dig, &c);
+
+    dl = base64_decode(b64, blen, dec, WS_GP_SIZE);
+    if (dl < 64) return 0;
+    return memcmp(dec, dig, 64) == 0;
+}
+
 static int verify_sapcodvnh512(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -22159,7 +23924,11 @@ static int verify_as400ssha1(const char *hashstr, int hashlen,
  * Format 2 (Magento v2): HEXHASH:SALT:2  (defaults: argon2id v19, t=2, m=65536, p=1, hashlen=32)
  * Format 3 (Magento v2): HEXHASH:SALT:3_HASHLEN_ITER_MEMBYTES
  * Algorithm: argon2{d|i|id}(pass, salt, t_cost, m_cost, parallelism, hashlen) */
-static int verify_argon2(const char *hashstr, int hashlen,
+/*
+ * Shared Argon2 body. verify_argon2 passes the plaintext straight through;
+ * verify_argon2md5 pre-hashes it, which is the only difference between the two.
+ */
+static int argon2_core(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     unsigned char *salt = (unsigned char *)WS->gp1;   /* decoded salt, up to 256 bytes */
@@ -22305,8 +24074,142 @@ do_argon2:
     }
 }
 
+static int verify_argon2(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return argon2_core(hashstr, hashlen, pass, passlen);
+}
+
+/*
+ * ARGON2MD5 (e1020) -- Argon2 over the MD5 HEX of the password.
+ *
+ *   argon2(md5(pass), salt, m, t, p)
+ *
+ * vBulletin 6's scheme, and the direct successor to what e451 BCRYPTMD5 already
+ * models for vBulletin 5: bcrypt(md5(pass), ...). The inner digest is the
+ * 32-character lowercase HEX, not the 16 raw bytes, matching e451 and
+ * vBulletin's own long-standing convention.
+ *
+ * Accepts every wrapper verify_argon2 does, since it shares that parser
+ * entirely; only the password fed to Argon2 differs.
+ *
+ * NOTE ON THE TEST VECTOR: neither John nor hashcat ships one for this scheme,
+ * so the registered vector was produced by python argon2-cffi -- a DIFFERENT
+ * implementation from the argon2 library linked here. It is therefore a genuine
+ * cross-implementation check and not the self-generated kind that let SAP-BCODE
+ * and PASSCODE5 pass while broken.
+ */
+static int verify_argon2md5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->ctx2;
+    static const char hx[] = "0123456789abcdef";
+    int i;
+
+    hp_md5(pass, passlen, dig);
+    for (i = 0; i < 16; i++) {
+        hex[i * 2]     = hx[dig[i] >> 4];
+        hex[i * 2 + 1] = hx[dig[i] & 15];
+    }
+    return argon2_core(hashstr, hashlen, (const unsigned char *)hex, 32);
+}
+
 /* MD5SALT1SALT2 (e991, hashcat mode 33000): md5($salt1.$pass.$salt2)
  * Format: 32hex:salt1:salt2 */
+/* ---- DragonFly BSD $3$ / $4$ crypt ---------------------------------------
+ * DragonFly's crypt() sets up like sha256crypt/sha512crypt but returns after
+ * a SINGLE digest of  password || magic || salt  -- there is no round loop,
+ * so these are among the cheapest salted types in the catalogue.
+ *
+ * The magic is the format tag INCLUDING its NUL terminator.  On 64-bit builds
+ * the length was taken as 8 rather than 4, so four adjacent rodata bytes ride
+ * along after the NUL -- "sha5" for $3$, "/etc" for $4$.  That is the "bug"
+ * in John's format names, and both variants exist in the wild; the stored
+ * forms are indistinguishable, so both types must be tried.
+ *
+ * The digest is emitted with the sha256crypt/sha512crypt transposition.  $4$
+ * encodes only 62 of the 64 digest bytes -- bytes 62 and 63 are never
+ * represented, so a $4$ hash cannot be fully round-tripped back to a digest.
+ * We therefore encode forward and compare strings rather than decoding.
+ */
+static int dragonfly_core(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen,
+    int sha512, const char *magic, int magiclen)
+{
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    char *enc = (char *)WS->gp1;
+    const char *salt, *stored;
+    int saltlen, i, j = 0;
+    int ngrp = sha512 ? 20 : 10;
+    int off2 = sha512 ? 21 : 11;
+    int off3 = sha512 ? 42 : 21;
+    int t1   = sha512 ? 20 : 10;
+    int t2   = sha512 ? 41 : 31;
+
+    if (hashlen < 6 || hashstr[0] != '$' || hashstr[1] != magic[1] ||
+        hashstr[2] != '$') return 0;
+
+    salt = hashstr + 3;
+    for (saltlen = 0; saltlen < 9 && salt[saltlen] && salt[saltlen] != '$';
+         saltlen++)
+        ;
+    if (salt[saltlen] != '$') return 0;       /* salt is at most 8 chars */
+    stored = salt + saltlen + 1;
+
+    if (sha512) {
+        SHA512_CTX *c = (SHA512_CTX *)WS->ctx6;
+        SHA512_Init(c);
+        SHA512_Update(c, pass, passlen);
+        SHA512_Update(c, (const unsigned char *)magic, magiclen);
+        SHA512_Update(c, (const unsigned char *)salt, saltlen);
+        SHA512_Final(dig, c);
+    } else {
+        SHA256_CTX *c = (SHA256_CTX *)WS->ctx6;
+        SHA256_Init(c);
+        SHA256_Update(c, pass, passlen);
+        SHA256_Update(c, (const unsigned char *)magic, magiclen);
+        SHA256_Update(c, (const unsigned char *)salt, saltlen);
+        SHA256_Final(dig, c);
+    }
+
+    for (i = 0; i < ngrp; i++) {
+        unsigned int v = ((unsigned int)dig[i] << 16) |
+                         ((unsigned int)dig[i + off2] << 8) |
+                          (unsigned int)dig[i + off3];
+        enc[j++] = phpitoa64[v & 0x3f];
+        enc[j++] = phpitoa64[(v >> 6) & 0x3f];
+        enc[j++] = phpitoa64[(v >> 12) & 0x3f];
+        enc[j++] = phpitoa64[(v >> 18) & 0x3f];
+    }
+    { unsigned int v = ((unsigned int)dig[t1] << 16) |
+                       ((unsigned int)dig[t2] << 8);
+      enc[j++] = phpitoa64[v & 0x3f];
+      enc[j++] = phpitoa64[(v >> 6) & 0x3f];
+      enc[j++] = phpitoa64[(v >> 12) & 0x3f];
+      enc[j++] = phpitoa64[(v >> 18) & 0x3f];
+    }
+    enc[j] = 0;
+
+    return (int)(stored - hashstr) + j == hashlen &&
+           memcmp(enc, stored, j) == 0;
+}
+
+static int verify_dragonfly3_32(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return dragonfly_core(hashstr, hashlen, pass, passlen, 0, "$3$\0", 4); }
+
+static int verify_dragonfly3_64(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return dragonfly_core(hashstr, hashlen, pass, passlen, 0, "$3$\0sha5", 8); }
+
+static int verify_dragonfly4_32(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return dragonfly_core(hashstr, hashlen, pass, passlen, 1, "$4$\0", 4); }
+
+static int verify_dragonfly4_64(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{ return dragonfly_core(hashstr, hashlen, pass, passlen, 1, "$4$\0/etc", 8); }
 static int verify_md5salt1salt2(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -22568,6 +24471,425 @@ static int verify_gost12512crypt(const char *hashstr, int hashlen,
     return memcmp(computed_b64, expected_b64, 86) == 0;
 }
 
+/* GOST12256CRYPT (streebog256crypt): sha256crypt with GOST-2012 Streebog-256
+ * replacing SHA-256. Format: $gost12256hash$[rounds=N$]SALT$HASH43
+ * The 256-bit sibling of GOST12512CRYPT (e994); same Drepper schedule with a
+ * 32-byte digest and the sha256crypt transposition. */
+static int verify_gost12256crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *digest = (unsigned char *)WS->ctx1;
+    unsigned char *altdigest = (unsigned char *)WS->ctx2;
+    unsigned char *pbytes = (unsigned char *)WS->gp1;
+    unsigned char *sbytes = (unsigned char *)WS->gp2;
+    unsigned char *tmpbuf = (unsigned char *)WS->gp3;
+    streebog_t *ctx = (streebog_t *)WS->gp4;
+
+    static const char itoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    static const int s256_trip[][3] = {
+        { 0,10,20}, {21, 1,11}, {12,22, 2}, { 3,13,23}, {24, 4,14},
+        {15,25, 5}, { 6,16,26}, {27, 7,17}, {18,28, 8}, { 9,19,29}
+    };
+
+    if (hashlen < 17) return 0;
+    if (memcmp(hashstr, "$gost12256hash$", 15) != 0) return 0;
+
+    const char *p = hashstr + 15;
+    int rounds = 5000;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        if (rounds < 1000 || rounds > 999999999) return 0;
+        p = strchr(p + 7, '$');
+        if (!p) return 0;
+        p++;
+    }
+    const char *saltp = p;
+    const char *hashsep = strchr(saltp, '$');
+    if (!hashsep) return 0;
+    int saltlen = hashsep - saltp;
+    if (saltlen < 1 || saltlen > 16) return 0;
+    const char *expected_b64 = hashsep + 1;
+    int b64len = hashlen - (expected_b64 - hashstr);
+    if (b64len != 43) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
+
+    int len = passlen;
+
+    /* Step 1: alt = GOST256(pass + salt + pass) */
+    streebog_init(ctx, 32);
+    streebog_update(ctx, pass, len);
+    streebog_update(ctx, saltp, saltlen);
+    streebog_update(ctx, pass, len);
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 32; i++) altdigest[i] = tmpbuf[31 - i]; }
+
+    /* Step 2: digest = GOST256(pass + salt + alt_bytes[0..len-1]) */
+    streebog_init(ctx, 32);
+    streebog_update(ctx, pass, len);
+    streebog_update(ctx, saltp, saltlen);
+    { int x;
+      for (x = len; x > 32; x -= 32)
+        streebog_update(ctx, altdigest, 32);
+      streebog_update(ctx, altdigest, x);
+    }
+    { int x;
+      for (x = len; x != 0; x >>= 1) {
+        if (x & 1) streebog_update(ctx, altdigest, 32);
+        else       streebog_update(ctx, pass, len);
+      }
+    }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 32; i++) digest[i] = tmpbuf[31 - i]; }
+
+    /* Step 3: P-bytes = GOST256(pass repeated len times) */
+    streebog_init(ctx, 32);
+    { int x; for (x = 0; x < len; x++) streebog_update(ctx, pass, len); }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 32; i++) pbytes[i] = tmpbuf[31 - i]; }
+    { int x; for (x = 32; x < len; x += 32) memcpy(pbytes + x, pbytes, 32); }
+
+    /* Step 4: S-bytes = GOST256(salt repeated 16+digest[0] times) */
+    streebog_init(ctx, 32);
+    { int x;
+      for (x = 0; x < 16 + (unsigned)digest[0]; x++)
+        streebog_update(ctx, saltp, saltlen);
+    }
+    streebog_final(tmpbuf, ctx);
+    { int i; for (i = 0; i < 32; i++) sbytes[i] = tmpbuf[31 - i]; }
+
+    /* Step 5: rounds loop */
+    { int x;
+      for (x = 0; x < rounds; x++) {
+        streebog_init(ctx, 32);
+        if (x & 1) streebog_update(ctx, pbytes, len);
+        else       streebog_update(ctx, digest, 32);
+        if (x % 3) streebog_update(ctx, sbytes, saltlen);
+        if (x % 7) streebog_update(ctx, pbytes, len);
+        if (x & 1) streebog_update(ctx, digest, 32);
+        else       streebog_update(ctx, pbytes, len);
+        streebog_final(tmpbuf, ctx);
+        { int i; for (i = 0; i < 32; i++) digest[i] = tmpbuf[31 - i]; }
+      }
+    }
+
+    /* sha256crypt itoa64 transposition: 10 triplets then digest[31],digest[30] */
+    char computed_b64[48];
+    int pos = 0;
+    { int t;
+      for (t = 0; t < 10; t++) {
+        unsigned int v = ((unsigned int)digest[s256_trip[t][0]] << 16) |
+                         ((unsigned int)digest[s256_trip[t][1]] << 8) |
+                          (unsigned int)digest[s256_trip[t][2]];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+      { unsigned int v = ((unsigned int)digest[31] << 8) |
+                          (unsigned int)digest[30];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+    }
+    computed_b64[pos] = 0;
+
+    WS->verify_iter = rounds;
+    return memcmp(computed_b64, expected_b64, 43) == 0;
+}
+/* GOST94CRYPT: sha256crypt with GOST R 34.11-94 replacing SHA-256.
+ * Format: $gost94hash$[rounds=N$]SALT$HASH43
+ * John's gost94hash uses the TEST-parameter S-box, not CryptoPro -- its
+ * john_gost_cryptopro_init override is commented out -- so this is RHASH_GOST
+ * (our e13 GOST), not RHASH_GOST_CRYPTOPRO (e14 GOST-CRYPTO). */
+static int verify_gost94crypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *digest = (unsigned char *)WS->ctx1;
+    unsigned char *altdigest = (unsigned char *)WS->ctx2;
+    unsigned char *pbytes = (unsigned char *)WS->gp1;
+    unsigned char *sbytes = (unsigned char *)WS->gp2;
+    rhash ctx;
+
+    static const char itoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    static const int s256_trip[][3] = {
+        { 0,10,20}, {21, 1,11}, {12,22, 2}, { 3,13,23}, {24, 4,14},
+        {15,25, 5}, { 6,16,26}, {27, 7,17}, {18,28, 8}, { 9,19,29}
+    };
+
+    if (hashlen < 14) return 0;
+    if (memcmp(hashstr, "$gost94hash$", 12) != 0) return 0;
+
+    const char *p = hashstr + 12;
+    int rounds = 5000;
+    if (strncmp(p, "rounds=", 7) == 0) {
+        rounds = atoi(p + 7);
+        if (rounds < 1000 || rounds > 999999999) return 0;
+        p = strchr(p + 7, '$');
+        if (!p) return 0;
+        p++;
+    }
+    const char *saltp = p;
+    const char *hashsep = strchr(saltp, '$');
+    if (!hashsep) return 0;
+    int saltlen = hashsep - saltp;
+    if (saltlen < 1 || saltlen > 16) return 0;
+    const char *expected_b64 = hashsep + 1;
+    int b64len = hashlen - (expected_b64 - hashstr);
+    if (b64len != 43) return 0;
+
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)rounds)) return 0;
+
+    int len = passlen;
+    ctx = rhash_init(RHASH_GOST);
+    if (!ctx) return 0;
+
+    /* Step 1: alt = GOST(pass + salt + pass) */
+    rhash_reset(ctx);
+    rhash_update(ctx, pass, len);
+    rhash_update(ctx, saltp, saltlen);
+    rhash_update(ctx, pass, len);
+    rhash_final(ctx, altdigest);
+
+    /* Step 2: digest = GOST(pass + salt + alt_bytes[0..len-1]) */
+    rhash_reset(ctx);
+    rhash_update(ctx, pass, len);
+    rhash_update(ctx, saltp, saltlen);
+    { int x;
+      for (x = len; x > 32; x -= 32) rhash_update(ctx, altdigest, 32);
+      rhash_update(ctx, altdigest, x);
+    }
+    { int x;
+      for (x = len; x != 0; x >>= 1) {
+        if (x & 1) rhash_update(ctx, altdigest, 32);
+        else       rhash_update(ctx, pass, len);
+      }
+    }
+    rhash_final(ctx, digest);
+
+    /* Step 3: P-bytes = GOST(pass repeated len times) */
+    rhash_reset(ctx);
+    { int x; for (x = 0; x < len; x++) rhash_update(ctx, pass, len); }
+    rhash_final(ctx, pbytes);
+    { int x; for (x = 32; x < len; x += 32) memcpy(pbytes + x, pbytes, 32); }
+
+    /* Step 4: S-bytes = GOST(salt repeated 16+digest[0] times) */
+    rhash_reset(ctx);
+    { int x;
+      for (x = 0; x < 16 + (unsigned)digest[0]; x++)
+        rhash_update(ctx, saltp, saltlen);
+    }
+    rhash_final(ctx, sbytes);
+
+    /* Step 5: rounds loop */
+    { int x;
+      for (x = 0; x < rounds; x++) {
+        rhash_reset(ctx);
+        if (x & 1) rhash_update(ctx, pbytes, len);
+        else       rhash_update(ctx, digest, 32);
+        if (x % 3) rhash_update(ctx, sbytes, saltlen);
+        if (x % 7) rhash_update(ctx, pbytes, len);
+        if (x & 1) rhash_update(ctx, digest, 32);
+        else       rhash_update(ctx, pbytes, len);
+        rhash_final(ctx, digest);
+      }
+    }
+    rhash_free(ctx);
+
+    /* sha256crypt itoa64 transposition */
+    char computed_b64[48];
+    int pos = 0;
+    { int t;
+      for (t = 0; t < 10; t++) {
+        unsigned int v = ((unsigned int)digest[s256_trip[t][0]] << 16) |
+                         ((unsigned int)digest[s256_trip[t][1]] << 8) |
+                          (unsigned int)digest[s256_trip[t][2]];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+      { unsigned int v = ((unsigned int)digest[31] << 8) |
+                          (unsigned int)digest[30];
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        computed_b64[pos++] = itoa64[v & 0x3f];
+      }
+    }
+    computed_b64[pos] = 0;
+
+    WS->verify_iter = rounds;
+    return memcmp(computed_b64, expected_b64, 43) == 0;
+}
+/* ---- SunMD5 (Solaris crypt) -------------------------------------------
+ * Format: $md5$[rounds=N$]SALT$HASH22, or the "$$" variant where the salt
+ * carries a trailing '$'. Taking the salt as everything before the LAST '$'
+ * handles both without a special case, which is what John does.
+ *
+ * digest = MD5(pass . salt), then 4096+N rounds of:
+ *     digest = MD5(digest [. constant_phrase if coin] . ascii(round))
+ * The coin flip is derived from bits of the previous digest via md5bit and
+ * coin_step -- this is what makes the cost data-dependent, since only about
+ * half the rounds hash the extra 1517 bytes.
+ *
+ * constant_phrase is 1516 characters of Hamlet PLUS its terminating NUL:
+ * Sun's code passed sizeof(), so the NUL is hashed too. Copied verbatim from
+ * John the Ripper's sunmd5_fmt_plug.c.
+ */
+static const char sunmd5_phrase[] =
+    "To be, or not to be,--that is the question:--\n"
+    "Whether 'tis nobler in the mind to suffer\n"
+    "The slings and arrows of outrageous fortune\n"
+    "Or to take arms against a sea of troubles,\n"
+    "And by opposing end them?--To die,--to sleep,--\n"
+    "No more; and by a sleep to say we end\n"
+    "The heartache, and the thousand natural shocks\n"
+    "That flesh is heir to,--'tis a consummation\n"
+    "Devoutly to be wish'd. To die,--to sleep;--\n"
+    "To sleep! perchance to dream:--ay, there's the rub;\n"
+    "For in that sleep of death what dreams may come,\n"
+    "When we have shuffled off this mortal coil,\n"
+    "Must give us pause: there's the respect\n"
+    "That makes calamity of so long life;\n"
+    "For who would bear the whips and scorns of time,\n"
+    "The oppressor's wrong, the proud man's contumely,\n"
+    "The pangs of despis'd love, the law's delay,\n"
+    "The insolence of office, and the spurns\n"
+    "That patient merit of the unworthy takes,\n"
+    "When he himself might his quietus make\n"
+    "With a bare bodkin? who would these fardels bear,\n"
+    "To grunt and sweat under a weary life,\n"
+    "But that the dread of something after death,--\n"
+    "The undiscover'd country, from whose bourn\n"
+    "No traveller returns,--puzzles the will,\n"
+    "And makes us rather bear those ills we have\n"
+    "Than fly to others that we know not of?\n"
+    "Thus conscience does make cowards of us all;\n"
+    "And thus the native hue of resolution\n"
+    "Is sicklied o'er with the pale cast of thought;\n"
+    "And enterprises of great pith and moment,\n"
+    "With this regard, their currents turn awry,\n"
+    "And lose the name of action.--Soft you now!\n"
+    "The fair Ophelia!--Nymph, in thy orisons\n"
+    "Be all my sins remember'd.\n";
+#define SUNMD5_BIT(d,b) ((((d)[(((b)>>3)&0xF)]>>((b)&7)))&1)
+
+static int sunmd5_coin(const unsigned char *d, int i, int j, int shift)
+{
+    return SUNMD5_BIT(d, d[(d[i] >> (d[j] % 5)) & 0x0F] >>
+                         ((d[j] >> (d[i] & 0x07)) & 0x01)) << shift;
+}
+
+static int verify_sunmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *dig = (unsigned char *)WS->ctx1;
+    char *salt = (char *)WS->gp1;
+    rhash c;
+    static const int trip[5][3] = {{0,6,12},{1,7,13},{2,8,14},{3,9,15},{4,10,5}};
+    static const char itoa64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const char *stored, *rp;
+    /* Workspace slots, not stack: verify functions must not put working
+     * buffers on the stack. */
+    char *roundascii = (char *)WS->ctx3;
+    char *enc = (char *)WS->ctx4;
+    int saltlen, rounds = 0, maxrounds, round, roundlen, t, pos = 0;
+
+    if (hashlen < 10 || memcmp(hashstr, "$md5", 4) != 0) return 0;
+    { /* Bounded reverse scan: strrchr runs to the NUL and so walked past the
+       * hash into the password field, finding the '$' of a $HEX[] password.
+       * Every $HEX-encoded candidate therefore parsed the salt wrongly and
+       * failed, whatever its contents -- even a plain ASCII password written
+       * in $HEX form. */
+      const char *last = NULL;
+      { int _i; for (_i = hashlen - 1; _i > 0; _i--)
+          if (hashstr[_i] == '$') { last = hashstr + _i; break; } }
+      if (!last || last == hashstr) return 0;
+      saltlen = (int)(last - hashstr);
+      if (saltlen < 5 || saltlen >= WS_GP_SIZE - 1) return 0;
+      stored = last + 1;
+    }
+    if (hashlen - (int)(stored - hashstr) != 22) return 0;
+    memcpy(salt, hashstr, saltlen);
+    salt[saltlen] = 0;
+
+    rp = strstr(salt, "rounds=");
+    if (rp) {
+        rounds = atoi(rp + 7);
+        if (rounds < 0 || rounds > 999999999) return 0;
+    }
+    maxrounds = 4096 + rounds;
+    if (verify_cost_exceeds(WS->cur_rate, 5000.0, (double)maxrounds)) return 0;
+
+    c = rhash_init(RHASH_MD5);
+    if (!c) return 0;
+    rhash_update(c, pass, passlen);
+    rhash_update(c, (const unsigned char *)salt, saltlen);
+    rhash_final(c, dig);
+
+    roundascii[0] = '0'; roundascii[1] = 0; roundlen = 1;
+    for (round = 0; round < maxrounds; round++) {
+        int ia, ib, bit;
+        ia = SUNMD5_BIT(dig, round) ?
+             sunmd5_coin(dig,1,4,0)|sunmd5_coin(dig,2,5,1)|sunmd5_coin(dig,3,6,2)|
+             sunmd5_coin(dig,4,7,3)|sunmd5_coin(dig,5,8,4)|sunmd5_coin(dig,6,9,5)|
+             sunmd5_coin(dig,7,10,6)
+             :
+             sunmd5_coin(dig,0,3,0)|sunmd5_coin(dig,1,4,1)|sunmd5_coin(dig,2,5,2)|
+             sunmd5_coin(dig,3,6,3)|sunmd5_coin(dig,4,7,4)|sunmd5_coin(dig,5,8,5)|
+             sunmd5_coin(dig,6,9,6);
+        ib = SUNMD5_BIT(dig, round + 64) ?
+             sunmd5_coin(dig,9,12,0)|sunmd5_coin(dig,10,13,1)|sunmd5_coin(dig,11,14,2)|
+             sunmd5_coin(dig,12,15,3)|sunmd5_coin(dig,13,0,4)|sunmd5_coin(dig,14,1,5)|
+             sunmd5_coin(dig,15,2,6)
+             :
+             sunmd5_coin(dig,8,11,0)|sunmd5_coin(dig,9,12,1)|sunmd5_coin(dig,10,13,2)|
+             sunmd5_coin(dig,11,14,3)|sunmd5_coin(dig,12,15,4)|sunmd5_coin(dig,13,0,5)|
+             sunmd5_coin(dig,14,1,6);
+        bit = SUNMD5_BIT(dig, ia) ^ SUNMD5_BIT(dig, ib);
+
+        rhash_reset(c);
+        rhash_update(c, dig, 16);
+        if (bit) rhash_update(c, sunmd5_phrase,
+                              sizeof(sunmd5_phrase));  /* 1517: includes the NUL */
+        rhash_update(c, roundascii, roundlen);
+        rhash_final(c, dig);
+
+        /* increment the decimal round counter in place */
+        { int k = roundlen - 1;
+          while (k >= 0) {
+            if (roundascii[k] != '9') { roundascii[k]++; break; }
+            roundascii[k--] = '0';
+          }
+          if (k < 0) {
+            memmove(roundascii + 1, roundascii, roundlen);
+            roundascii[0] = '1';
+            roundascii[++roundlen] = 0;
+          }
+        }
+    }
+
+    rhash_free(c);
+
+    for (t = 0; t < 5; t++) {
+        unsigned int v = ((unsigned int)dig[trip[t][0]] << 16) |
+                         ((unsigned int)dig[trip[t][1]] << 8) |
+                          (unsigned int)dig[trip[t][2]];
+        enc[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        enc[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        enc[pos++] = itoa64[v & 0x3f]; v >>= 6;
+        enc[pos++] = itoa64[v & 0x3f];
+    }
+    { unsigned int v = (unsigned int)dig[11];
+      enc[pos++] = itoa64[v & 0x3f]; v >>= 6;
+      enc[pos++] = itoa64[v & 0x3f];
+    }
+    enc[pos] = 0;
+
+    WS->verify_iter = maxrounds;
+    return memcmp(enc, stored, 22) == 0;
+}
 /* ---- Chain arrays for types needing HTC registration ---- */
 static struct chain_step chain_md5sha1ucmd5uc[] = { SU_MD5, SU_SHA1, S_MD5 };
 /* chain_md5md5ucsha1md5md5 defined earlier */
@@ -22684,6 +25006,8 @@ static void init_hashtypes(void)
             Hashtypes[_i].vclass = HCLASS_HEX; \
             Hashtypes[_i].nchain = sizeof(chain_arr) / sizeof(chain_arr[0]); \
             Hashtypes[_i].chain = (chain_arr); \
+            Hashtypes[_i].outer_fn = \
+                (chain_arr)[sizeof(chain_arr)/sizeof(chain_arr[0]) - 1].fn; \
             Hashtypes[_i].example = (ex); \
         } \
     } while(0)
@@ -22887,14 +25211,14 @@ static void init_hashtypes(void)
     HT("SHA1SALTSHA1SALTSHA1PASS", 20, HTF_SALTED, compute_sha1saltsha1saltsha1pass, "94a34fbac5bcdbea13160afdb735e834a0ad9f40:administrator:password123");
     HT("MD5-MD5psSHA1MD5psp", 16, HTF_SALTED, compute_md5_md5pssha1md5psp, "a617d18d8cf3ac067a075c3d46c072f4:cd6bc227:password123");
     HT("MD5-MD5puSHA1MD5pup", 16, HTF_SALTED, compute_md5_md5pusha1md5pup, "d3bb75580d2a9999443e5067793169c5:1:password123");
-    HT("SHA256RAWSALTPASS",  32, HTF_SALTED, compute_sha256saltpass, "5ac28834ed8be26198bde055d77ba012ef5207441d415de9ea8e55b504d07afa:Salt:password123");
+    HT("SHA256RAWSALTPASS",  32, HTF_SALTED | HTF_ITER_RAW, compute_sha256saltpass, "5ac28834ed8be26198bde055d77ba012ef5207441d415de9ea8e55b504d07afa:Salt:password123");
     HT("SMF",               20, HTF_SALTED, compute_smf, "7f8316036b3ebfb2b145b09b947d8e3b22f974dc:Admin:password123");
     HT("MSCACHE",           16, HTF_SALTED, compute_mscache, "559a1d5d1337e276b1db7bfab28c9223:Administrator:password123");
     /* MD5AM, MD5AM2: unsupported (vendor-specific) */
     HT("SHA512-CUSTOM1",    64, HTF_SALTED, compute_sha512_custom1, "b854f6169f8b85d165805784be56fa8fe44178168d9dfa92e1f860e75aa95455c17a86eb4be3432bb6c6a40139996893a72ccd7b1c95a41ee61c2f7ad449460c:$3dfhgjhgG65- 23ewdfwGh5RG65?:password123");
 
     /* --- Composed types: hashlen = outer (leftmost) hash's byte length --- */
-    HT_ALT("MD5MD5PASS",    16, HTF_COMPOSED, compute_md5md5pass, compute_md5md5pass_colon, "4e9dcbe0c0b21731e2d3e9d2cca8f384:password123");
+    HTV("MD5MD5PASS", 0, verify_md5md5pass, "4e9dcbe0c0b21731e2d3e9d2cca8f384:password123");
     HT("MD2MD5",        16, HTF_COMPOSED, compute_md2md5, "87d453c8acdc928f3f63714cd3f445dc:password123");       /* outer=MD2(16) */
     HT("MD4MD5",        16, HTF_COMPOSED, compute_md4md5, "afb204805372c4d49b797117e7cad74b:password123");       /* outer=rhash_msg(RHASH_MD4, 16) */
     HT("GOSTMD5", 32, HTF_COMPOSED, compute_gostmd5, "16d1edab552d7f1277d1a05124fe3a4dbe6294cb396512276eb47a8215d4e3f6:password123");      /* outer=GOST(32) */
@@ -22953,7 +25277,7 @@ static void init_hashtypes(void)
     HT("MD5MD2",        16, HTF_COMPOSED, compute_md5md2, "37b313a2b18e0a301591570810406aac:password123");
     HT("SHA1MD2",       20, HTF_COMPOSED, compute_sha1md2, "3a34b827a4ca0c5c026e8c1d7325fd221094611b:password123");
     HT("SHA1RMD128",    20, HTF_COMPOSED, compute_sha1rmd128, "8938ac86890fbabe1960983a84a4f8c756272526:password123");
-    HT("SHA1HAV128",    20, HTF_COMPOSED, compute_sha1hav128, "b9659eb6e6578110b759f0c4e78147ee12332691:password123");
+    HTV("SHA1HAV128", 0, verify_sha1hav128, "b9659eb6e6578110b759f0c4e78147ee12332691:password123");
     HT("SHA1WRL",       20, HTF_COMPOSED, compute_sha1wrl, "cc94bc2fa03f5667f924beb18cb8d875b7fffbb6:password123");
     HT("WRLSHA512",     64, HTF_COMPOSED, compute_wrlsha512, "368896d60816fc4450c34a948d6147978e59ec0c3ced9ad652dcfb12d552f02bef4345cb8f5f505226b45087950bbd9e298388a4fdf86d7845cc0388c8f6e449:password123");
     HT("SHA1NTLM",      20, HTF_COMPOSED, compute_sha1ntlm, "5dfbf4e615e89cb5a1c8273f57eef28271f343cb:password123");
@@ -22963,9 +25287,9 @@ static void init_hashtypes(void)
 
     /* --- Standalone special types --- */
     HT("MDC2",          16, 0, compute_mdc2, "62bab9c63e5adc67ab2192afcaf586ff:password123");
-    HT("SQL5",          20, 0, compute_sql5, "a0f874bc7f54ee086fce60a37ce7887d8b31086b:password123");
+    HTV("SQL5", 0, verify_sql5, "a0f874bc7f54ee086fce60a37ce7887d8b31086b:password123");
     HT("RADMIN2",       16, 0, compute_radmin2, "97a8ec63f2a44154479e6b8f53c0eb93:password123");
-    HT_ALT("MD5-DBL-PASS",  16, 0, compute_md5dblpass, compute_md5dblpass_colon, "91a5b1589d8f19e1062d041ef5d85491:password123");
+    HTV("MD5-DBL-PASS", 0, verify_md5dblpass, "91a5b1589d8f19e1062d041ef5d85491:password123");
     HT("CRYPTEXT",      20, 0, compute_cryptext, "e2ebed1cf4f2e40f4f0fc57c74d403879f6cf15f:password123");
 
     /* --- xMD5PASS types: x(hex(rhash_msg(RHASH_MD5, pass)) + pass) — hashlen = outer x's bytes --- */
@@ -23069,7 +25393,7 @@ static void init_hashtypes(void)
     HTC("SHA1SHA256MD5", 20, HTF_COMPOSED, chain_sha1sha256md5, "4b89f9b11e9b3d30c2c2f6f6034bda9cb7393df2:password123");
     HTC("SHA1SHA256SHA512",20,HTF_COMPOSED, chain_sha1sha256sha512, "bce1f0e714ffa8e2c9f961ea50c6e2dcff79a001:password123");
     HTC("SHA1WRLMD5",    20, HTF_COMPOSED, chain_sha1wrlmd5, "a76b923b5f08ae3f68dd5bcafc3b44230cfd0762:password123");
-    HTC("MYSQL5MD5",     20, HTF_COMPOSED, chain_mysql5md5, "2c13011ac7f9b6ce6564935154f8986a535979a9:password123");
+    HTV("MYSQL5MD5", 0, verify_mysql5md5, "2c13011ac7f9b6ce6564935154f8986a535979a9:password123");
 
     /* 4-step chains */
     HTC("MD5SHA1MD5MD5", 16, HTF_COMPOSED, chain_md5sha1md5md5, "edf0460584d8d492c762bd8d7c42a087:password123");
@@ -23130,7 +25454,7 @@ static void init_hashtypes(void)
     HTC("SHA1MD5WRLSHA1",   20, HTF_COMPOSED, chain_sha1md5wrlsha1, "f0310acaa7128de3f9c58c02c12f55649206d9bb:password123");
 
     /* --- UC intermediate chain types --- */
-    HTC("MD5UCMD5",          16, HTF_COMPOSED, chain_md5ucmd5_x2, "d168e00fe57116e52a5e804887a05cd0:password123");
+    HTV("MD5UCMD5", 0, verify_md5ucmd5, "d168e00fe57116e52a5e804887a05cd0:password123");
     HTC("SHA1MD5UCMD5",      20, HTF_COMPOSED, chain_sha1md5ucmd5, "b29e45df173e35365963900d11e10d43cd218a86:password123");
     HTC("MD5SHA1UCMD5",      16, HTF_COMPOSED, chain_md5sha1ucmd5, "1a22ce81ee0fff8670f6700195890c37:password123");
     HTC("MD5MD5UCMD5",       16, HTF_COMPOSED, chain_md5md5ucmd5, "d168e00fe57116e52a5e804887a05cd0:password123");
@@ -23140,7 +25464,7 @@ static void init_hashtypes(void)
     HTC("SHA1UCWRL",         20, HTF_COMPOSED | HTF_UC, chain_sha1ucwrl, "D9136DA58EA47FF05733763BDBC72BB81F74C452:password123");
     HTC("SHA1MD5UCSHA1UCMD5UC",20,HTF_COMPOSED,chain_sha1md5ucsha1ucmd5uc, "3972e62890dbed1bc8cbe642fb52dbc7b4ede57b:password123");
     HTC("SHA1SHA256UCSHA256",20,HTF_COMPOSED,chain_sha1sha256ucsha256, "1906600c09e2d8755c9897e1c24ec466cdb1ab02:password123");
-    HTC("SHA1SHA256UCxSHA256",20,HTF_COMPOSED,chain_sha1sha256ucsha256, "1906600c09e2d8755c9897e1c24ec466cdb1ab02:password123");
+    HT("SHA1SHA256UCxSHA256", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha256ucxsha256, "1906600c09e2d8755c9897e1c24ec466cdb1ab02:1:password123");
     HTC("SHA1SHA256UCSHA256SHA256",20,HTF_COMPOSED,chain_sha1sha256ucsha256sha256, "46d3bdc93c1ecb9c0bda1f1c1fdfa6fec03ec8e9:password123");
     HTC("SHA1MD4UTF16UCMD4UTF16UC",20,HTF_COMPOSED,chain_sha1md4utf16ucmd4utf16uc, "afa7de6fd5fd31dedbd6b674f21c76b93dd24db0:password123");
 
@@ -23156,13 +25480,22 @@ static void init_hashtypes(void)
     /* ================================================================= */
 
     /* --- Standalone special types --- */
-    HT("NULL",          16, 0, compute_null, "70617373776f72643132330000000000:password123");
+    HTV("NULL", 0, verify_null, "70617373776f72643132330000000000:password123");
     HT("MYSQL3",         8, 0, compute_mysql3, "0b034ec713f89a68:password123");
     HT("LM",           16, 0, compute_lm, "e52cac67419a9a22664345140a852f61:PASSWORD123");
     HTV("NTLMH",        0, verify_ntlmh, "a9fdfa038c4b75ebc76dc855dd74f0da:password123");
     HT("SKYPE",        16, HTF_SALTED, compute_skype, "229922b8b59931e6f8bfd223eb006806:chloe01:password123");
     HT("RMD320",       40, 0, compute_rmd320, "e3a8ce82f0e176fd498227b3994bf3b238197c98a9576c7e5741b5a7f22cfab7ef9c2bbf462d2a32:password123");
     HT("RMD256",       32, 0, compute_rmd256, "afbd6e228b9d8cbbcef5ca2d03e6dba10ac0bc7dcbe4680e1e42d2e975459b65:abc");
+    HT("MD4SALTPASS",   16, HTF_SALTED, compute_md4saltpass, "6130dbd8f17cec94c3077e7bb21fa9a0:administrator:password123");
+    HT("MD4PASSSALT",   16, HTF_SALTED | HTF_SALT_AFTER, compute_md4passsalt, "0694290624fe4dc7b3b140bde0741eec:administrator:password123");
+    HT("MD5PASSSALTMD5PASSSALT", 16, HTF_SALTED, compute_md5passsaltmd5passsalt, "07a4c8a48e3fd0610f81d24504f34c8a:aaaSXB:password123");
+    HT("QAS-VASAUTH",   32, HTF_SALTED, compute_qasvasauth, "3379b2f8bcff3e26cbbfff24a9e70933fc0dff54e6ca72938b09aab008ec344d:C34208EA-8C33-473D-A9B4-53FB40347EA0:password123");
+    HT("POSTOFFICE",    16, HTF_SALTED, compute_postoffice, "6ea0219af11769f174c2d7cafc12411e:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:password123");
+    HT("IPB2",          16, HTF_SALTED, compute_ipb2, "801f6df476ac42760f021b979d04a46b:2e75504633:password123");
+    HT("SHA512RAWPASSSALT", 64, HTF_SALTED | HTF_SALT_AFTER | HTF_ITER_RAW, compute_sha512passsalt, "a7a2a6174d5c151e0df2052271a0184fb38ed4761209141cca085401d5be5584b4979af0f365204a11876fa7b6a83ebc31bd1fde7014e1456165393d20e74e59:DB1C19C0:password123");
+    HT("EPISERVER-SID", 20, HTF_SALTED, compute_episerversid, "516aee1808f5ec7f26fe293d34dbbd1e987af364:5F1D84A6DE97E2BEFB637A3CB5318AFEF0750B856CF1836BD1D4470175BE:password123");
+    HTV("ORACLE11", 0, verify_oracle11, "EB7F2C5FFA3D1F4FC84907015EF1091E491071C7903603F2C52ED1B4D642:password123");
     HT("SHA1DRU",      20, 0, compute_sha1dru, "d5e8e759bb5c48d9adb0b0d640ab030cba3e3b01:password123");
     HT("SHA1HESK",     20, HTF_COMPOSED, compute_sha1hesk, "6eae5a30262eba6cad69217528a88c541e22c914:password123");
     /* '+' is the UTF-7 shift character and must be escaped as "+-", so this
@@ -23204,7 +25537,7 @@ static void init_hashtypes(void)
     HT("MD5PASSMD5MD5MD5",16,HTF_COMPOSED,compute_md5passmd5md5md5, "f98264c6f8a6c9d17253369d7b6801c3:password123");
     HT("MD5PASSMD5MD5PASS",16,HTF_COMPOSED,compute_md5passmd5md5pass, "4a077dbc79c326523bb89712c7a2c153:password123");
     HT("MD5MD5PASSSHA1",16,HTF_COMPOSED, compute_md5md5passsha1, "dec021292cf48fd37b3cac0d2a54096d:password123");
-    HT("SHA1MD5MD5PASS",20,HTF_COMPOSED, compute_sha1md5md5pass, "57ca18e525942612241186c80a98e66f3a544fc9:password123");
+    HTV("SHA1MD5MD5PASS", 0, verify_sha1md5md5pass, "57ca18e525942612241186c80a98e66f3a544fc9:password123");
     HT("SHA1MD5PASSMD5",20,HTF_COMPOSED, compute_sha1md5passmd5, "b64aadd5ce832efbf8eeb0ef50359cbcee268016:password123");
     HT("MD5SHA1MD5PASS",16,HTF_COMPOSED, compute_md5sha1md5pass, "57b511120d3e396e3973b2185e683f7f:password123");
     HT("MD5-MD5PASSMD5",16,HTF_COMPOSED, compute_md5_md5passmd5, "7a2e7d18aa3c90a38d584fb812f22f15:password123");
@@ -23220,14 +25553,18 @@ static void init_hashtypes(void)
     HT("MD5-SHA1numSHA1", 16, HTF_SALTED | HTF_COMPOSED, compute_md5_sha1numsha1, "125a2916d62717945c84bb3f78fba2ad:1:password123");
     HT("MD5-MD5SHA1MD5SHA1MD5SHA1p",16,HTF_COMPOSED,compute_md5_md5sha1md5sha1md5sha1p, "ce9e00b0d2224012b3f7836ff17f632e:password123");
     HT("SHA1MD5-SHA1PASSPASS",20,HTF_COMPOSED,compute_sha1md5_sha1passpass, "8d6880e26eebbc4e52b315fcded563572868e9e2:password123");
-    HT("SHA1MD5UC1LC",    20, HTF_COMPOSED, compute_sha1md5uc1lc, "900bd2208de3ca960ecee76ee483904300ceb991:password123");
+    HTV("SHA1MD5UC1LC", 0, verify_sha1md5uc1lc, "160d592326dc89b18de0131c4532a18e64f23422:password123");
     HT("MD5MD5UCp",       16, HTF_COMPOSED, compute_md5md5ucp, "6d82af54a03d8846767875d8877c18dc:password123");
     HT("MD5WRLRAW",       16, HTF_COMPOSED, compute_md5wrlraw, "918c5781d69d4490c33c13a66ce9f9c8:password123");
 
     /* --- RAW types (binary chain: hash(hash_binary(pass))) --- */
     HTC("MD5RAW",         16, HTF_COMPOSED, chain_md5raw_self, "ebc56e4d393f9084d3941ca228c31aea:password123");
-    HT("MD5RAWUC",        16, HTF_UC, compute_md5rawuc, "E8EEB4FFDBE6D08270590C63EACEFFC3:password123");
+    HTV("MD5RAWUC", 0, verify_md5rawuc, "e8eeb4ffdbe6d08270590c63eaceffc3:password123");
     Hashtypes[find_type_index("MD5RAWUC")].base_iter = 2;
+    /* MD5CAP first emits at x02: mdxfind loops "for (x = 2; x <= Maxiter)".
+     * Its rounds re-cap, so it also needs its own iteration primitive. */
+    Hashtypes[find_type_index("MD5CAP")].base_iter = 2;
+    Hashtypes[find_type_index("MD5CAP")].outer_fn  = (hashfn_t)iter_md5cap;
     Hashtypes[find_type_index("MD5RAWUC")].iter_fn = (hashfn_t)compute_md5;
     HT("MD5RAWMD5RAW",    16, HTF_COMPOSED, compute_md5rawmd5raw, "0dafdf1f6f811c846a5a22590792418c:password123");
     HT("MD5MD2RAW",       16, HTF_COMPOSED, compute_md5md2raw, "eb4b511ae4f2d3a1c95033768b02162d:password123");
@@ -23256,16 +25593,16 @@ static void init_hashtypes(void)
     /* --- x-suffix types (iteration marker, same as base) --- */
     /* Types ending in 'x' are just iteration markers — the xNN is parsed from the hint */
     /* MD5SHA1x = MD5SHA1 with arbitrary iteration */
-    HT("MD5SHA1x",      16, HTF_COMPOSED, compute_sha1md5, "e933f35ad585ac6753ee607ab8fd0a4d:password123");
+    HT("MD5SHA1x", 16, HTF_SALTED | HTF_COMPOSED, compute_md5sha1x, "e933f35ad585ac6753ee607ab8fd0a4d:1:password123");
     HT("SHA1MD5x",      20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5x, "92ac0281d4695ec3710f690e029a6320ca7e5244:1:password123");
-    HTC("MD5SHA1MD5x",  16, HTF_COMPOSED, chain_md5sha1md5, "3b4f022014f794549416f9c1bd25fa63:1:password123");
+    HTV("MD5SHA1MD5x", HTF_SALTED, verify_md5sha1md5x, "3b4f022014f794549416f9c1bd25fa63:1:password123");
     HT("MD4UTF16MD5x",  16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16md5x, "b4c89d27458fd978c7c9bec66214f6b1:salt:password123");
     Hashtypes[find_type_index("MD4UTF16MD5x")].iter_fn = (hashfn_t)compute_ntlm;
     HT("MD4UTF16SHA1x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16sha1x, "71b6aae38e2a3a62b509193a7ae57806:salt:password123");
     Hashtypes[find_type_index("MD4UTF16SHA1x")].iter_fn = (hashfn_t)compute_ntlm;
     HT("MD4UTF16revBASE64x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16revbase64x, "c0a08297890abfed6dd7be5356ff2130:1:password123");
     Hashtypes[find_type_index("MD4UTF16revBASE64x")].iter_fn = (hashfn_t)compute_ntlm;
-    HT("MD4UTF16SHA256x",16,HTF_COMPOSED, compute_md4utf16sha256, "97362c2ab715d69d28382060ba6d3eb3:password123");
+    HT("MD4UTF16SHA256x", 16, HTF_SALTED | HTF_COMPOSED, compute_md4utf16sha256x, "97362c2ab715d69d28382060ba6d3eb3:1:password123");
     HT("SHA1MD5UCx",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5ucx, "900bd2208de3ca960ecee76ee483904300ceb991:salt:password123");
     HT("SHA1MD5MD5UCx", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5md5ucx, "bd6afcc0dc9f9408182c17e4fd2205bb64bf200c:salt:password123");
     HT("SHA1SHA256UCx", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha256ucx, "753877e474ee39a3411466aec66fba077a5f3c61:salt:password123");
@@ -23290,42 +25627,46 @@ static void init_hashtypes(void)
 
     /* SHA1SHA1TRUNC = SHA1(SHA1(pass)) truncated to 32 hex (16 bytes) */
     /* SHA1SHA1 produces 20 bytes; TRUNC = first 16 bytes */
-    HT("SHA1SHA1TRUNC",    16, HTF_COMPOSED, compute_sha1sha1, "360621c68ac8101809a7a66d5a2c2469:password123");  /* truncated to 16 bytes */
+    HTV("SHA1SHA1TRUNC", HTF_SALTED, verify_sha1sha1trunc, "5f3d6b203fc6a91f3571167fb7ec387905dd49c6:30:password123");
     HTV("SHA1SHA1TRUNCMD5", HTF_SALTED, verify_sha1sha1truncmd5, "428b5c5e25c263d4f39dcdae384240f44b9eaee4:40:password123");
-    HTC("SHA1SHA1UCTRUNC",  16, HTF_COMPOSED, chain_sha1_sha1uc, "023d9239da6db1c77576a8881c2c284c:password123");
+    HTV("SHA1SHA1UCTRUNC", HTF_SALTED, verify_sha1sha1uctrunc, "6ba9c166f9c2fce9ca26f1b0ef9d7038f6718724:30:password123");
 
     /* SHA1SHA256TRUNC = SHA1(SHA256(pass)) truncated */
-    HT("SHA1SHA256TRUNC",  16, HTF_COMPOSED, compute_sha1sha256, "178f1d54c362162cf48501121c4a5fba:password123");
-    HTC("SHA1SHA256TRUNCMD5",16,HTF_COMPOSED, chain_sha1sha256md5, "4b89f9b11e9b3d30c2c2f6f6034bda9c:password123");
-    HTC("SHA1SHA256UCTRUNC",16, HTF_COMPOSED, chain_sha1_sha256uc, "753877e474ee39a3411466aec66fba07:password123");
+    HTV("SHA1SHA256TRUNC", HTF_SALTED, verify_sha1sha256trunc, "7d10cbd8d85c05a93b9016895b0d1927a9f4a84d:50:password123");
+    HTV("SHA1SHA256TRUNCMD5", HTF_SALTED, verify_sha1sha256truncmd5, "35d9d30f7073efe0bec0c52a0346a325f889ab93:50:password123");
+    HTV("SHA1SHA256UCTRUNC", HTF_SALTED, verify_sha1sha256uctrunc, "e01089cc187a6d68e4ffca4e174360991bdd1d14:50:password123");
 
     /* SHA1SHA512TRUNC, SHA1SHA384TRUNC, SHA1SHA3-256TRUNC */
-    HT("SHA1SHA512TRUNC",  16, HTF_COMPOSED, compute_sha1sha512, "0d7ab85e1039a61d62206b2e6ec0c6a2:password123");
+    HTV("SHA1SHA512TRUNC", HTF_SALTED, verify_sha1sha512trunc, "831e7b34089ec0a36ab9947cb39d21f5302630cd:100:password123");
     HTV("SHA1SHA512TRUNCMD5", HTF_SALTED, verify_sha1sha512truncmd5, "b34d9b3da5eb378180825a657a7e955ce260fd31:128:password123");
-    HTC("SHA1SHA512UCTRUNC",16, HTF_COMPOSED, chain_sha1_sha512uc, "4afd0b1778128a55bbe3322aef6bf813:password123");
-    HT("SHA1SHA384TRUNC",  16, HTF_COMPOSED, compute_sha1sha384, "8954403705dae6fa5d10b96de809a365:password123");
-    HTC("SHA1SHA3-256TRUNC",16,HTF_COMPOSED, chain_sha1sha3_256, "3a1f71639a8dc528b489817cd26225e9:password123");
+    HTV("SHA1SHA512UCTRUNC", HTF_SALTED, verify_sha1sha512uctrunc, "dcf04a11a65b85ecc8453564ec21b81d138427fa:100:password123");
+    HTV("SHA1SHA384TRUNC", HTF_SALTED, verify_sha1sha384trunc, "4b1de1a619bfe783ca1acf10a92e571d5e9d77fe:70:password123");
+    HTV("SHA1SHA3-256TRUNC", HTF_SALTED, verify_sha1sha3_256trunc, "0c1e77bd46f858d36fe27220ec0408d466021cc8:50:password123");
 
     /* SHA1SHA1SHA1TRUNC */
     HTV("SHA1SHA1SHA1TRUNC", HTF_SALTED, verify_sha1sha1sha1trunc, "406f2667097e9913b66646d27f12294207f85bdc:40:password123");
 
     /* SHA1RMD160TRUNC */
-    HT("SHA1RMD160TRUNC",  16, HTF_COMPOSED, compute_sha1rmd160, "7eed1099ed66ef7c2555d514cf93a106:password123");  /* placeholder: need SHA1(RMD160) */
+    HTV("SHA1RMD160TRUNC", HTF_SALTED, verify_sha1rmd160trunc, "c91c49b8a000fca5e5dbda6f9daf582bc66ef378:30:password123");
 
     /* SHA1MD6TRUNC, SHA1MD6CAPTRUNC */
-    HTC("SHA1MD6TRUNC",    16, HTF_COMPOSED, chain_sha1md6, "ca9b69f958d5f0f8bfe72ecd3b54fdfd:password123");
+    HTV("SHA1MD6TRUNC", HTF_SALTED, verify_sha1md6trunc, "979e5a079a7846a7635983f641a76b984f3fc9c8:26:password123");
     /* SHA1MD6CAPTRUNC — capitalize + MD6 + SHA1 truncated */
 
     /* SHA1WRLTRUNC, SHA1WRLUCTRUNC */
-    HT("SHA1WRLTRUNC",     16, HTF_COMPOSED, compute_sha1wrl, "cc94bc2fa03f5667f924beb18cb8d875:password123");
-    HTC("SHA1WRLUCTRUNC",   16, HTF_COMPOSED, chain_sha1_wrluc, "d9136da58ea47ff05733763bdbc72bb8:password123");
+    HTV("SHA1WRLTRUNC", HTF_SALTED, verify_sha1wrltrunc, "de3a08918d405d71e78ead53ff1c6dcce5c43249:100:password123");
+    HTV("SHA1WRLUCTRUNC", HTF_SALTED, verify_sha1wrluctrunc, "b41b0bc015fa0fce118ef37481c0d4064b979609:100:password123");
 
     /* SHA1SHA1CAPTRUNC — SHA1(SHA1(capitalize(pass))) truncated */
     /* SHA1SHA11CAP — SHA1(SHA1(hex(SHA1(capitalize(pass))))) */
     /* SHA1SHA256CAP — SHA1(SHA256(capitalize(pass))) */
 
     /* SHA1PASS-TRUNC — SHA1(pass) truncated */
-    HT("SHA1PASS-TRUNC",   20, 0, compute_sha1pass_trunc, "1aff295984946a012d4b0bd3027722fe17c65be0:password123");
+    /* HTF_COMPOSED, not 0: this is sha1(sha1(pass) . cut(pass,0,3)), so
+     * ht->compute is NOT its outermost hash and the unsalted iteration
+     * branch would re-apply the whole construction to the hex. The
+     * composed path consults outer_fn (compute_sha1) instead. */
+    HT("SHA1PASS-TRUNC",   20, HTF_COMPOSED, compute_sha1pass_trunc, "1aff295984946a012d4b0bd3027722fe17c65be0:password123");
 
     /* uNN types — first N hex chars */
     /* SHA1SHA1u32 = SHA1(SHA1(pass)) first 32 hex = 16 bytes (=TRUNC) */
@@ -23352,7 +25693,7 @@ static void init_hashtypes(void)
     HT("MD5SHA1u39",      16, HTF_COMPOSED, compute_md5sha1u39, "cf67d04314b051cee88c3aa65c376952:password123");
 
     /* SHA1lsb32, SHA1lsb35 — least significant bits */
-    HT("SHA1lsb32",        16, 0, compute_sha1lsb32, "0000000008f9cab4083784cbd1874f76:password123");
+    HTV("SHA1lsb32", 0, verify_sha1lsb32, "0000000008f9cab4083784cbd1874f76:password123");
     HT("SHA1lsb35",        20, 0, compute_sha1lsb35, "00000c6008f9cab4083784cbd1874f76618d2a97:password123");
     HT("MD5SHA1lsb35",     16, HTF_COMPOSED, compute_md5sha1lsb35, "5690e62bacddc4faa4db03790c58c382:password123");
 
@@ -23468,7 +25809,7 @@ static void init_hashtypes(void)
     HT("SHA1MD5CAP",             20, 0, compute_sha1md5cap, "09936cb4c466edfde7c94569792dc39163bf2984:password123");
     HT("SHA1MD5CAPMD5",          20, 0, compute_sha1md5capmd5, "997954278c421be1a92bf24cd50f6a8ba9c14016:password123");
     HTV("SHA1MD51CAPMD5MD5", HTF_SALTED, verify_sha1md51capmd5md5, "bb4fe159c777f18f7b6556c7477298645c78cf41:1:password123");
-    HT("SHA1SHA256CAP",          20, 0, compute_sha1sha256cap, "44a979fb3990b7b88dfd2e42b8c6458713a779ca:password123");
+    HTV("SHA1SHA256CAP", 0, verify_sha1sha256cap, "00dedf63da0272e762a8cbe95916d091743b9b94:Godfrey123");
     HT("SHA1MD5-2xMD5-MD5",     20, 0, compute_sha1md5_2xmd5_md5, "52b943f48a6504a5595c6a3ef0456ba115966ee9:password123");
 
     /* --- Misc/SHA1SHA1RAW --- */
@@ -23569,9 +25910,9 @@ static void init_hashtypes(void)
     HT_ALT("MD5MD5USER",      16, HTF_SALTED | HTF_COMPOSED, compute_md5md5user, compute_md5md5user_colon, "423a170b613885b19cdc496242a80787:testsalt:password123");
     HT_ALT("SHA1MD5USER",     20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5user, compute_sha1md5user_colon, "18768e979e77779052a467262d0cf1d486c76d2c:testsalt:password123");
     HT("SHA1SHA1USER",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha1user, "3b8240b10f2caefcc6cd7c970b332b4109d7e63c:testsalt:password123");
-    HT_ALT("MD5CAPMD5USER",   16, HTF_SALTED | HTF_COMPOSED, compute_md5capmd5user, compute_md5capmd5user_colon, "225342c927041c489e98d77561c0bb77:0:password123");
-    HT_ALT("MD5CAPMD5MD5USER",16, HTF_SALTED | HTF_COMPOSED, compute_md5capmd5md5user, compute_md5capmd5md5user_colon, "203a0dc2c7fd903d8c79e1fd923d7946:0:password123");
-    HT_ALT("MD5MD5MD5USER",   16, HTF_SALTED | HTF_COMPOSED, compute_md5md5md5user, compute_md5md5md5user_colon, "966fb8f379de3a2dbdbf249470a76e86:testsalt:password123");
+    HTV("MD5CAPMD5USER", HTF_SALTED, verify_md5capmd5user, "225342c927041c489e98d77561c0bb77:0:password123");
+    HTV("MD5CAPMD5MD5USER", HTF_SALTED, verify_md5capmd5md5user, "203a0dc2c7fd903d8c79e1fd923d7946:0:password123");
+    HTV("MD5MD5MD5USER", HTF_SALTED, verify_md5md5md5user, "966fb8f379de3a2dbdbf249470a76e86:testsalt:password123");
     HT("MD5USERPASS",     16, HTF_SALTED, compute_md5userpass, "4e48abb76d3e0295f3f89eb02d05b344:testsalt:password123");
     HT("SHA512SHA512RAWUSER", 64, HTF_SALTED | HTF_COMPOSED, compute_sha512sha512rawuser, "7f132a28e5e5af1fb9536c9bed74c85a26059b43ec740e445c0dfcc97d499e8d0a7ac8dc93833f366c58fafb9dc53408f52118580d82fe153bea8e4dfac79229:testsalt:password123");
     Hashtypes[find_type_index("SHA512SHA512RAWUSER")].iter_fn = (hashfn_t)compute_sha512;
@@ -23590,7 +25931,7 @@ static void init_hashtypes(void)
     HT_ALT2("MD52SALTMD5MD5",  16, HTF_SALTED | HTF_COMPOSED, compute_md52saltmd5md5, compute_md52saltmd5md5_after, compute_md52saltmd5md5_wrap, "949273099a5f50434c70f2399ead956c:fz:password123");
     HT_ALT2("MD52SALTMD5MD5MD5",16, HTF_SALTED | HTF_COMPOSED, compute_md52saltmd5md5md5, compute_md52saltmd5md5md5_after, compute_md52saltmd5md5md5_wrap, "c015cff71f2b4c8aea0fd4c69aba1c93:$HEX[7f57]:password123");
     HT("MD5UCSALT",       16, HTF_SALTED | HTF_COMPOSED, compute_md5ucsalt, "69da68d2893de24e2d927a619bbd92bf:testsalt:password123");
-    HT("MD5DSALT",         16, HTF_SALTED | HTF_COMPOSED, compute_md5dsalt, "4e8d3e56d0159708bced73cfad02555f:7aG7aG:password123");
+    HTV("MD5DSALT", HTF_SALTED, verify_md5dsalt, "4e8d3e56d0159708bced73cfad02555f:7aG7aG:password123");
 
     /* Other MD5/SHA1 salt-composed */
     HT_ALT("MD5UCBASE64MD5RAW",16, HTF_COMPOSED | HTF_UC, compute_md5base64md5raw, compute_md5base64md5raw_strip, "ccc24639342a9838f92a9e54a350c3e7:password123");
@@ -23646,7 +25987,7 @@ static void init_hashtypes(void)
     /* SHA1(salt + hex(INNER(pass))) types */
     HT("SHA1SALTMD5PASS",   20, HTF_SALTED | HTF_COMPOSED, compute_sha1saltmd5pass, "e5571cdbc11c39a3c1450e8bbc1860462637abf3:testsalt:password123");
     HT("SHA1SALTSHA1PASS",  20, HTF_SALTED | HTF_COMPOSED, compute_sha1saltsha1pass, "0048b661bdb70a4c650d452a172412d3c842932a:testsalt:password123");
-    HT("SHA256SALTSHA256PASS",32,HTF_SALTED | HTF_COMPOSED, compute_sha256saltsha256pass, "606344e0d3e29c3250e0b4cf2031b8115acdde10c644219107449be678129752:testsalt:password123");
+    HT("SHA256SALTSHA256PASS",32,HTF_SALTED | HTF_COMPOSED | HTF_ITER_RAW, compute_sha256saltsha256pass, "606344e0d3e29c3250e0b4cf2031b8115acdde10c644219107449be678129752:testsalt:password123");
     HT("SHA512SALTMD5",     64, HTF_SALTED | HTF_COMPOSED, compute_sha512saltmd5, "2a0660efed3149bb8044e51d48de13dcd85b07a183fe9ad98be137ae6f972b8438999995e000798714f89ca3b758eb22b8edc6d82186a6d01048b4a45c063d83:salt:password123");
     HT("SHA1SALTSHA256",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1saltsha256, "93091a1fda71af9d9a98a90e326ae019dba38b2f:salt:password123");
 
@@ -23676,7 +26017,7 @@ static void init_hashtypes(void)
     { int _i = find_type_index("SHA1SALTCX"); if (_i >= 0) Hashtypes[_i].verify = verify_sha1saltcx; }
     HT("SHA1MD5-PASSMD5SALT",20,HTF_SALTED | HTF_COMPOSED, compute_sha1md5_passmd5salt, "a0ed870e27d9a6c3083bfdd3df948c3269067c7d:salt:password123");
     HT("SHA1MD5SALTMD5PASS",20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5saltmd5pass, "0826e3b77f869ab50fd3f53fe18a8636d36dc639:salt:password123");
-    HT("SHA1-SHA512PASSSHA512SALT",20,HTF_SALTED | HTF_COMPOSED, compute_sha1_sha512passsha512salt, "ec64a6ccf4576e0d76345e59ba97bb315983a656:salt:password123");
+    HTV("SHA1-SHA512PASSSHA512SALT", HTF_SALTED, verify_sha1_sha512passsha512salt, "745e294d9926e240a47e0121df6857ae80ff75a2:1122334455667788:password123");
     HT("MD5-MD5SHA1PASSSHA1MD5SALT",16,HTF_SALTED | HTF_COMPOSED, compute_md5_md5sha1passsha1md5salt, "4b581b293bcbd2fa3af8a4b512163365:salt:password123");
 
     /* Unsalted composed */
@@ -23707,8 +26048,8 @@ static void init_hashtypes(void)
     /* --- Batch 6 Wave 3 --- */
     /* CAP (capitalize first alpha hex char) types */
     HT("SHA1MD5CAPSALT",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5capsalt, "859a4fd1459a3eaee93004bf4aed18c085530c6b:ts:password123");
-    HT("SHA1MD51CAPSALT",   20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5capsalt, "ae90cba55af617eadcffefdffcf808340f67d37e:salt:password123");
-    HT("SHA1SHA1CAPSALT",   20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha1capsalt, "f4616a12ba3a79a289fe0156ae93972b5945ef80:administrator:password123");
+    HTV("SHA1MD51CAPSALT", HTF_SALTED, verify_sha1md51capsalt, "ae90cba55af617eadcffefdffcf808340f67d37e:salt:password123");
+    HTV("SHA1SHA1CAPSALT", HTF_SALTED, verify_sha1sha1capsalt, "f4616a12ba3a79a289fe0156ae93972b5945ef80:administrator:password123");
     HT("SHA1MD5CAPMD5SALT", 20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5capmd5salt, "fa07a0a16f53706d750ae7d2eb60c82c5955022c:ts:password123");
     HT("SHA1MD5CAPSHA1SALT",20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5capsha1salt, "5fee3f3bf4aba7b1647695adb08d58b995a14300:testsalt:password123");
     /* dash CAP types (inner salt) */
@@ -23762,6 +26103,7 @@ static void init_hashtypes(void)
      * password "hashcat") during the 2026-08-14 sweep; the house vector below
      * regenerates to exactly this value, so it is kept. */
     HTV("RACF",        0, verify_racf, "6A182040F07213B8:USER:password123");
+    HTV("RVARY",       0, verify_rvary, "7166b7c204ce67f4:password123");
     /* RACF also needs HCLASS_PREFIX for $racf$* format */
     { int _i = find_type_index("RACF");
       if (_i >= 0) Hashtypes[_i].vclass |= HCLASS_PREFIX;
@@ -23944,6 +26286,18 @@ static void init_hashtypes(void)
     HTV("MSONLINE",         0, verify_msonline, "$MSONLINEACCOUNT$0$10000$6153d80b93f4f3c4082576154118d4191744911d6370b505e823d049375654ef:password123");
     HTV("WBB4",             0, verify_wbb4, "$2a$08$aaaaaaaaaaaaaaaaaaaaaOTh6vK9mhTsqbydr1hjy8VMv24KoT/pS:password123");
     HTV("SAPCODVNH512",     0, verify_sapcodvnh512, "{x-isSHA512, 15000}sWjKv3fK8srBNiZxspxwl2HnFSlo7tpAQkVFwOlvcS00IPHEYWM2OAG3Q8VZ7kxJq7+N5kfZI67otz3E3ugXLTY4NTQ4MDY1NzQ2NA==:password123");
+    HTV("SAPCODVNH256",     0, verify_sapcodvnh256, "{x-isSHA256, 3000}UqMnsr5BYN+uornWC7yhGa/Wj0u5tshX19mDUQSlgih6OTFoZjRpMQ==:booboo");
+    HTV("SAPCODVNH384",     0, verify_sapcodvnh384, "{x-isSHA384, 5000}3O/F4YGKNmIYHDu7ZQ7Q+ioCOQi4HRY4yrggKptAU9DtmHigCuGqBiAPVbKbEAfGTzh4YlZLWUM=:booboo");
+    HTV("MONGODB",          0, verify_mongodb, "$mongodb$0$sa$75692b1d11c072c6c79332e248c4f699:sa");
+    HTV("H3C",              0, verify_h3c, "$h$6$4tWqOiqovcWddOKv$XyFMVgaE46fGiqsZEHbcr+BM/m9tDkvahDbqU7HoNrvmALk2u31z9c/tuUmX7IiQhWRwN5qoZquW82A8XYaDWA==:abc");
+    HTV("ARGON2MD5",        0, verify_argon2md5, "$argon2id$v=19$m=65536,t=3,p=1$QUFBQUFBQUFBQUFBQUFBQQ$tfFVjXN7s2JLYKv2e4ctPK5B/3gVohhZA/vcbKx4PVQ:password123");
+    HTV("DRAGONFLY3-32",    0, verify_dragonfly3_32, "$3$z$EBG66iBCGfUfENOfqLUH/r9xQxI1cG373/hRop6j.oWs:magnum");
+    HTV("DRAGONFLY3-64",    0, verify_dragonfly3_64, "$3$z$sNV7KLtLxvJRsj2MfBtGZFuzXP3CECITaFq/rvsy.Y.Q:magnum");
+    HTV("DRAGONFLY4-32",    0, verify_dragonfly4_32, "$4$7E48ul$K4u43llx1P184KZBoILl2hnFLBHj6.486TtxWA.EA1pLZuQS7P5k0LQqyEULux47.5vttDbSo/Cbpsez.AUI:magnum");
+    HTV("DRAGONFLY4-64",    0, verify_dragonfly4_64, "$4$7E48ul$9or6.L/T.iChtPIGY4.vIgdYEmMkTW7Ru4OJxtGJtonCQo.wu3.bS4UPlUc2B8CAfGo1Oi5PgQvfhzNQ.A8v:magnum");
+    HTV("GOST12256CRYPT",   0, verify_gost12256crypt, "$gost12256hash$password$awrQfwgXMa0BFMCtZu97GJKqeVszI/B2usmTf9cpOa/:magnum");
+    HTV("GOST94CRYPT",      0, verify_gost94crypt, "$gost94hash$salt$sG.6rfU0vKHX4eL00bUDqjXxaAcQHqpJQlM3ctfj013:magnum");
+    HTV("SUNMD5",           0, verify_sunmd5, "$md5$rounds=904$Vc3VgyFx44iS8.Yu$Scf90iLWN6O6mT9TA06NK/:test");
     HTV("SM3CRYPT",         0, verify_sm3crypt, "$sm3$aaaaaaaaaaaaaaaa$9hj3BsTKoxVnrt6XmdzPzkD4Xi1i8VVI6wk6t.RK.w7:password123");
     HTV("AS400SSHA1",       0, verify_as400ssha1, "$as400$ssha1$*QTEST1*228267B3F408E739F5A577554E978DD05536A3ED:password123");
     HTV("ARGON2",           0, verify_argon2, "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$g21LGibBQ2iHFjsbopcv8xkV8FNXi1tW6wD6GcyKB7I:password123");
@@ -24002,6 +26356,9 @@ static void init_hashtypes(void)
     HTV("LASTPASS",          0, verify_lastpass, "e70e2b8e01e218f19f4cbfaf3c9dcd98:100100:pmix@trash-mail.com:password123");
     HTV("FORTIGATE",         0, verify_fortigate, "AK1FCIhM0IUIQVFJgcDvmNyl2Vlb6Lq9PVehp2IN/JtDbM=:password123");
     HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
+    HTV("SHA1UCUSERPASS", 0, verify_sha1ucuserpass, "ed62e880d893dfe7f953000951602ce7932e8503:administrator:password123");
+    HTV("SHA1USERCOLONPASS", 0, verify_sha1usercolonpass, "0c0a719f6d39e6685856e8aef8317a41800bbe99:administrator:password123");
+    HTV("MD5USERMD5PASSSALT", 0, verify_md5usermd5passsalt, "77700f6a12d5939b42df03fa313055c2:aaaSXB:administrator:password123");
     HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk= AQIDBA==:password123");
     HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
     HT("MURMUR64A",      8, HTF_SALTED, compute_murmur64a, "ae8450e53d91404d:1234:password123");
@@ -24041,7 +26398,7 @@ static void init_hashtypes(void)
     /* 7A: TRUNC+SALT */
     HTV("SHA1MD5TRUNCSALT", 0, verify_sha1md5truncsalt, "f98326e072780bdba37b7b1cc144f6dd7b18cba5:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 32:password123");
     HTV("SHA1SHA1TRUNCSALT", 0, verify_sha1sha1truncsalt, "1a42a781654831a7459659b44001c0c291711ec2:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY 40:password123");
-    HTV("SHA1WRLUCTRUNCSALT", 0, verify_sha1wrluctruncsalt, "76b863a553ad0cf1bb8da94f9a0d427f1e6ca395:1122334455667788 128:password123");
+    HTV("SHA1WRLUCTRUNCSALT", 0, verify_sha1wrluctruncsalt, "ef1948763cdad6af7bf04f40dd0d61fff5d7e534:1122334455667788 100:password123");
     HTV("SHA1SHA256TRUNCSALT", 0, verify_sha1sha256truncsalt, "dacff3bff50db6dcacee1f52d6bc22ccbe8184b9:Salt 63:password123");
     HTV("SHA1SHA256TRUNCMD5SALT", 0, verify_sha1sha256truncmd5salt, "23101d128277f9cdc7bc3f1ffdd13f868c722743:1122334455667788 63:password123");
     HTV("SHA1SALTSHA256TRUNC", 0, verify_sha1saltsha256trunc, "28f11333c2180248c75695abdfb0ce84df9239b6:1122334455667788 64:password123");
@@ -24098,6 +26455,643 @@ static void init_hashtypes(void)
     #undef HTV
     #undef HTVC
 
+    /* --- outer_fn for HT-registered composed and salted types ---------------
+     *
+     * Dave's rule: the OUTERMOST hash of a construction is what iterates.
+     * HTC chain types derive outer_fn from chain[nchain-1].fn above, but an
+     * HT registration carrying HTF_COMPOSED holds one monolithic compute_*
+     * function with no chain to introspect, so it fell through to
+     * hash_by_len -- which picks a primitive from the digest WIDTH and is
+     * right only by coincidence.  Worse, the hinted-iteration path used
+     * ht->compute for an unsalted composed type, re-running the WHOLE chain
+     * every iteration instead of just the outer hash.
+     *
+     * This table is DERIVED, not hand-written: tools took every "eN <tab>
+     * NAME <tab> expression" row of hx.8 (the authority; mdxfind.c is the
+     * authority above that and hx.8 tracks it), took the outermost call of
+     * the expression, unwrapped the pure wrappers that are not hashes
+     * (upper/lower/hex/emit -- "the outermost CALL is not always the
+     * outermost HASH"), and mapped the resulting primitive to this file's
+     * compute_* function for it.  Nothing here is inferred from a type name
+     * or a function name: those disagree by construction, since a type name
+     * is outer-first while a function name is inner-first (type SHA1MD5 is
+     * sha1(md5(pass)), outer SHA1, and registers compute_md5sha1).
+     *
+     * One correction the raw outermost call does NOT give you: when an
+     * encoding transform wraps the WHOLE argument of the outer hash, the
+     * thing that iterates is the composite.  md4(utf16le(X)) iterates as
+     * compute_ntlm, not compute_md4 -- which is exactly what the HTC chains
+     * of that family already carry as chain[nchain-1] (S_NTLM).  The
+     * generator special-cases that pair and refuses any other
+     * hash-after-encoding combination, since hashpipe has no primitive for
+     * one.  Note this is NOT the same shape as md5(utf16le(pass) . salt),
+     * where the argument is a concatenation and the outer hash really is
+     * plain md5.
+     *
+     * Restricted to HTF_COMPOSED and HTF_SALTED types, which are the only
+     * ones that consult outer_fn: a plain unsalted type iterates through
+     * ht->compute, which already IS its outermost hash.  hmac_* outers are
+     * deliberately excluded -- HMAC is keyed, mdxfind emits no iterated HMAC
+     * to check against, and iterating one keyless is undefined.
+     *
+     * The five -q internal-iteration types (MD5RAWUC, MD4UTF16MD5x,
+     * MD4UTF16SHA1x, MD4UTF16revBASE64x, SHA512SHA512RAWUSER) are held out of
+     * the table entirely.  Every dispatch site reads iter_fn first, so an
+     * entry for them would be inert, but that class is not this change's to
+     * touch.
+     *
+     * Applied only where outer_fn is still NULL, so an HTC-derived value and
+     * any explicit assignment below both win.  iter_fn is untouched: it also
+     * marks the -q internal-iteration class. */
+    {
+        static const struct { const char *name; hashfn_t fn; } outer_tab[] = {
+        { "MD5SALT", (hashfn_t)compute_md5 },
+        { "MD5RAW", (hashfn_t)compute_md5 },
+        { "SHA1RAW", (hashfn_t)compute_sha1 },
+        { "SHA224RAW", (hashfn_t)compute_sha224 },
+        { "SHA256RAW", (hashfn_t)compute_sha256 },
+        { "SHA384RAW", (hashfn_t)compute_sha384 },
+        { "SHA512RAW", (hashfn_t)compute_sha512 },
+        { "MD2MD5", (hashfn_t)compute_md2 },
+        { "MD2MD5PASS", (hashfn_t)compute_md2 },
+        { "MD4MD5", (hashfn_t)compute_md4 },
+        { "MD4MD5PASS", (hashfn_t)compute_md4 },
+        { "MD5MD5PASS", (hashfn_t)compute_md5 },
+        { "GOSTMD5", (hashfn_t)compute_gost },
+        { "GOSTMD5PASS", (hashfn_t)compute_gost },
+        { "HAV128MD5", (hashfn_t)compute_hav128_3 },
+        { "HAV128MD5PASS", (hashfn_t)compute_hav128_3 },
+        { "HAV128-4MD5", (hashfn_t)compute_hav128_4 },
+        { "HAV128-4MD5PASS", (hashfn_t)compute_hav128_4 },
+        { "HAV128-5MD5", (hashfn_t)compute_hav128_5 },
+        { "HAV128-5MD5PASS", (hashfn_t)compute_hav128_5 },
+        { "HAV160-3MD5", (hashfn_t)compute_hav160_3 },
+        { "HAV160-3MD5PASS", (hashfn_t)compute_hav160_3 },
+        { "HAV160-4MD5", (hashfn_t)compute_hav160_4 },
+        { "HAV160-4MD5PASS", (hashfn_t)compute_hav160_4 },
+        { "HAV160-5MD5", (hashfn_t)compute_hav160_5 },
+        { "HAV160-5MD5PASS", (hashfn_t)compute_hav160_5 },
+        { "HAV192-3MD5", (hashfn_t)compute_hav192_3 },
+        { "HAV192-3MD5PASS", (hashfn_t)compute_hav192_3 },
+        { "HAV192-4MD5", (hashfn_t)compute_hav192_4 },
+        { "HAV192-4MD5PASS", (hashfn_t)compute_hav192_4 },
+        { "HAV192-5MD5", (hashfn_t)compute_hav192_5 },
+        { "HAV192-5MD5PASS", (hashfn_t)compute_hav192_5 },
+        { "HAV224-3MD5", (hashfn_t)compute_hav224_3 },
+        { "HAV224-3MD5PASS", (hashfn_t)compute_hav224_3 },
+        { "HAV224-4MD5", (hashfn_t)compute_hav224_4 },
+        { "HAV224-4MD5PASS", (hashfn_t)compute_hav224_4 },
+        { "HAV224-5MD5", (hashfn_t)compute_hav224_5 },
+        { "HAV224-5MD5PASS", (hashfn_t)compute_hav224_5 },
+        { "HAV256MD5", (hashfn_t)compute_hav256_3 },
+        { "HAV256MD5PASS", (hashfn_t)compute_hav256_3 },
+        { "HAV256-4MD5", (hashfn_t)compute_hav256_4 },
+        { "HAV256-4MD5PASS", (hashfn_t)compute_hav256_4 },
+        { "HAV256-5MD5", (hashfn_t)compute_hav256_5 },
+        { "HAV256-5MD5PASS", (hashfn_t)compute_hav256_5 },
+        { "RMD128MD5", (hashfn_t)compute_rmd128 },
+        { "RMD128MD5PASS", (hashfn_t)compute_rmd128 },
+        { "RMD160MD5", (hashfn_t)compute_rmd160 },
+        { "RMD160MD5PASS", (hashfn_t)compute_rmd160 },
+        { "SHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA224MD5", (hashfn_t)compute_sha224 },
+        { "SHA224MD5PASS", (hashfn_t)compute_sha224 },
+        { "SHA256MD5", (hashfn_t)compute_sha256 },
+        { "SHA256MD5PASS", (hashfn_t)compute_sha256 },
+        { "SHA384MD5", (hashfn_t)compute_sha384 },
+        { "SHA384MD5PASS", (hashfn_t)compute_sha384 },
+        { "SHA512MD5", (hashfn_t)compute_sha512 },
+        { "SHA512MD5PASS", (hashfn_t)compute_sha512 },
+        { "TIGERMD5", (hashfn_t)compute_tiger },
+        { "TIGERMD5PASS", (hashfn_t)compute_tiger },
+        { "WRLMD5", (hashfn_t)compute_whirlpool },
+        { "WRLMD5PASS", (hashfn_t)compute_whirlpool },
+        { "SNE128MD5", (hashfn_t)compute_sne128 },
+        { "SNE128MD5PASS", (hashfn_t)compute_sne128 },
+        { "SNE256MD5", (hashfn_t)compute_sne256 },
+        { "SNE256MD5PASS", (hashfn_t)compute_sne256 },
+        { "MD5SHA1", (hashfn_t)compute_md5 },
+        { "MD5SHA256", (hashfn_t)compute_md5 },
+        { "MD5SHA512", (hashfn_t)compute_md5 },
+        { "SHA1PASSSHA1", (hashfn_t)compute_sha1 },
+        { "MD5HEXSALT", (hashfn_t)compute_md5 },
+        { "SHA1HEXSALT", (hashfn_t)compute_sha1 },
+        { "SHA256HEXSALT", (hashfn_t)compute_sha256 },
+        { "GOSTHEXSALT", (hashfn_t)compute_gost },
+        { "HAV128HEXSALT", (hashfn_t)compute_hav128_3 },
+        { "MD5SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5SHA1", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5SHA1SHA1", (hashfn_t)compute_md5 },
+        { "SHA1MD5SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1MD5", (hashfn_t)compute_sha1 },
+        { "MD5HAV160-3", (hashfn_t)compute_md5 },
+        { "MD5SHA1HAV160-4", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5RMD160", (hashfn_t)compute_md5 },
+        { "MD5SHA1SHA256", (hashfn_t)compute_md5 },
+        { "SHA256SHA512", (hashfn_t)compute_sha256 },
+        { "MD5WRL", (hashfn_t)compute_md5 },
+        { "MD5PASSMD5", (hashfn_t)compute_md5 },
+        { "SHA1MD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1MD5SHA1MD5", (hashfn_t)compute_sha1 },
+        { "MD5MD5UCMD5", (hashfn_t)compute_md5 },
+        { "RMD128MD5MD5", (hashfn_t)compute_rmd128 },
+        { "MD5BASE64MD5RAWSHA1", (hashfn_t)compute_md5 },
+        { "MD5BASE64MD5RAWMD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64MD5RAWMD5MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1UC", (hashfn_t)compute_md5 },
+        { "MD5SHA1UCMD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1UCMD5UC", (hashfn_t)compute_md5 },
+        { "SHA256SHA1", (hashfn_t)compute_sha256 },
+        { "MD5revMD5", (hashfn_t)compute_md5 },
+        { "MD5revMD5MD5", (hashfn_t)compute_md5 },
+        { "MD5revSHA1", (hashfn_t)compute_md5 },
+        { "MD5USERIDMD5", (hashfn_t)compute_md5 },
+        { "MD5USERIDMD5MD5", (hashfn_t)compute_md5 },
+        { "MD5MD5UC", (hashfn_t)compute_md5 },
+        { "MD5USERnulPASS", (hashfn_t)compute_md5 },
+        { "MD5RADMIN2", (hashfn_t)compute_md5 },
+        { "MD5RADMIN2SHA1", (hashfn_t)compute_md5 },
+        { "RADMIN2MD5", (hashfn_t)compute_md5 },
+        { "RADMIN2MD5MD5", (hashfn_t)compute_md5 },
+        { "RADMIN2MD5UC", (hashfn_t)compute_md5 },
+        { "RADMIN2MD5SHA1", (hashfn_t)compute_md5 },
+        { "RADMIN2SHA1", (hashfn_t)compute_md5 },
+        { "RADMIN2SHA1MD5", (hashfn_t)compute_md5 },
+        { "RADMIN2MD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5RADMIN2MD5", (hashfn_t)compute_md5 },
+        { "SHA1RADMIN2", (hashfn_t)compute_sha1 },
+        { "SHA1RADMIN2MD5", (hashfn_t)compute_sha1 },
+        { "MD5-MULTISALT", (hashfn_t)compute_md5 },
+        { "MD52SALTMD5", (hashfn_t)compute_md5 },
+        { "MD5MD5USER", (hashfn_t)compute_md5 },
+        { "SHA1MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1RAWMD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5SHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5MD5SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5MD5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1RAWMD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1RAWMD5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5x", (hashfn_t)compute_sha1 },
+        { "MD5SHA1SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1SHA1", (hashfn_t)compute_md5 },
+        { "SHA1MD5USER", (hashfn_t)compute_sha1 },
+        { "SHA1MD5RADMIN2", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1USER", (hashfn_t)compute_sha1 },
+        { "MD5TIGER2", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5RADMIN2", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5MD5MD5SHA1", (hashfn_t)compute_md5 },
+        { "MD5SHA1RAW", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5MD5SALT", (hashfn_t)compute_md5 },
+        { "MD5UCSALT", (hashfn_t)compute_md5 },
+        { "MD5TIGER", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5PASS", (hashfn_t)compute_md5 },
+        { "MD5CAPMD5USER", (hashfn_t)compute_md5 },
+        { "MD5CAPMD5MD5USER", (hashfn_t)compute_md5 },
+        { "MD5MD5MD5USER", (hashfn_t)compute_md5 },
+        { "MD5MD5SALT-SALT", (hashfn_t)compute_md5 },
+        { "MD5CAPSHA1", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5x", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5MD5SHA1", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5UC", (hashfn_t)compute_md5 },
+        { "MD5MD5HUM", (hashfn_t)compute_md5 },
+        { "SHA1MD5HUM", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1HUM", (hashfn_t)compute_sha1 },
+        { "MD5SHA1HUM", (hashfn_t)compute_md5 },
+        { "MD5-MD5SALTMD5PASS", (hashfn_t)compute_md5 },
+        { "MD5NTLM", (hashfn_t)compute_md5 },
+        { "MD5MD4", (hashfn_t)compute_md5 },
+        { "MD5NTLMUC", (hashfn_t)compute_md5 },
+        { "MD5USERPASS", (hashfn_t)compute_md5 },
+        { "MD5PASSSALT", (hashfn_t)compute_md5 },
+        { "MD5SHA1RADMIN2MD5", (hashfn_t)compute_md5 },
+        { "MD5UCBASE64MD5RAW", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5MD5UC", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5HUM", (hashfn_t)compute_md5 },
+        { "MD5LM", (hashfn_t)compute_md5 },
+        { "MD5LMUC", (hashfn_t)compute_md5 },
+        { "SHA256SHA256SALT", (hashfn_t)compute_sha256 },
+        { "SHA512PASSSALT", (hashfn_t)compute_sha512 },
+        { "SHA512SHA512SALT", (hashfn_t)compute_sha512 },
+        { "SHA512SALTPASS", (hashfn_t)compute_sha512 },
+        { "SHA512SALTSHA512", (hashfn_t)compute_sha512 },
+        { "WRLPASSSALT", (hashfn_t)compute_whirlpool },
+        { "WRLWRLSALT", (hashfn_t)compute_whirlpool },
+        { "WRLSALTPASS", (hashfn_t)compute_whirlpool },
+        { "WRLSALTWRL", (hashfn_t)compute_whirlpool },
+        { "MD5SALTPASS", (hashfn_t)compute_md5 },
+        { "SHA1SALTPASSSALT", (hashfn_t)compute_sha1 },
+        { "MD5MD5UCSHA1MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA256MD5", (hashfn_t)compute_md5 },
+        { "SHA1PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA256MD5SALTPASS", (hashfn_t)compute_sha256 },
+        { "MD5padMD5", (hashfn_t)compute_md5 },
+        { "MD5DSALT", (hashfn_t)compute_md5 },
+        { "MD5SALTPASSSALT", (hashfn_t)compute_md5 },
+        { "SHA256SALTPASS", (hashfn_t)compute_sha256 },
+        { "SHA256PASSSALT", (hashfn_t)compute_sha256 },
+        { "SMF", (hashfn_t)compute_sha1 },
+        { "MD5-MD5SHA1MD5SHA1MD5SHA1p", (hashfn_t)compute_md5 },
+        { "MD5MD5UCp", (hashfn_t)compute_md5 },
+        { "MD5NTLMp", (hashfn_t)compute_md5 },
+        { "MD5-MD5USERSHA1MD5PASS", (hashfn_t)compute_md5 },
+        { "MD5SHA1u32SALT", (hashfn_t)compute_md5 },
+        { "MD5-LMNTLM", (hashfn_t)compute_md5 },
+        { "MD5WRLMD5", (hashfn_t)compute_md5 },
+        { "MD5AM", (hashfn_t)compute_md5 },
+        { "MD5AM2", (hashfn_t)compute_md5 },
+        { "SHA1SALTSHA1SALTSHA1PASS", (hashfn_t)compute_sha1 },
+        { "MSCACHE", (hashfn_t)compute_md4 },
+        { "MD5SHA1SALTMD5PASS", (hashfn_t)compute_md5 },
+        { "MD5SALTMD5PASS", (hashfn_t)compute_md5 },
+        { "MD5SHA1PASSMD5PASSSHA1PASS", (hashfn_t)compute_md5 },
+        { "MD5SHA1PASSSALT", (hashfn_t)compute_md5 },
+        { "SHA256RAWSALTPASS", (hashfn_t)compute_sha256 },
+        { "SHA512-CUSTOM1", (hashfn_t)compute_sha512 },
+        { "MD5-MD5PASSMD5SALT", (hashfn_t)compute_md5 },
+        { "MD5revMD5SHA1", (hashfn_t)compute_md5 },
+        { "SHA1-8TRACK", (hashfn_t)compute_sha1 },
+        { "SHA1WRL", (hashfn_t)compute_sha1 },
+        { "SHA1revMD5", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1-revMD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1revMD5PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5PASS-SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SALTMD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1SALTrevMD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA384", (hashfn_t)compute_sha1 },
+        { "SHA1SHA512", (hashfn_t)compute_sha1 },
+        { "SHA1SQL3", (hashfn_t)compute_sha1 },
+        { "SHA1UCWRL", (hashfn_t)compute_sha1 },
+        { "SHA1WRLMD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1MD5SHA1MD5SHA1", (hashfn_t)compute_sha1 },
+        { "WRLSHA512", (hashfn_t)compute_whirlpool },
+        { "MD5GOST", (hashfn_t)compute_md5 },
+        { "MD5GOSTMD5", (hashfn_t)compute_md5 },
+        { "MD5GOSTMD5UC", (hashfn_t)compute_md5 },
+        { "MD5WRLRAW", (hashfn_t)compute_md5 },
+        { "MD4SHA1MD5", (hashfn_t)compute_md4 },
+        { "MD5RAWMD5RAW", (hashfn_t)compute_md5 },
+        { "MD5SHA1BASE64SHA1RAW", (hashfn_t)compute_md5 },
+        { "MD5revMD5SHA1SHA1", (hashfn_t)compute_md5 },
+        { "MD5MD2", (hashfn_t)compute_md5 },
+        { "MD5MD2RAW", (hashfn_t)compute_md5 },
+        { "MD5BASE64SHA256RAW", (hashfn_t)compute_md5 },
+        { "MD4UTF16MD5", (hashfn_t)compute_ntlm },
+        { "RMD128MD4", (hashfn_t)compute_rmd128 },
+        { "MD5SHA0", (hashfn_t)compute_md5 },
+        { "MD5PASSSHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5PASSMD5MD5PASS", (hashfn_t)compute_md5 },
+        { "MD5PASSMD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-MD5PASSMD5", (hashfn_t)compute_md5 },
+        { "MD5PASSSHA1", (hashfn_t)compute_md5 },
+        { "MD5MD5PASSSHA1", (hashfn_t)compute_md5 },
+        { "SHA1MD5MD5SHA1MD5SHA1SHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA512SALTMD5", (hashfn_t)compute_sha512 },
+        { "MD5-SALTMD5PASSSALT", (hashfn_t)compute_md5 },
+        { "MD5-SALTMD5SALTPASS", (hashfn_t)compute_md5 },
+        { "MD5-MD5PASS-SALT", (hashfn_t)compute_md5 },
+        { "MD5-MD5SALT-PASS", (hashfn_t)compute_md5 },
+        { "MD5-PASS-MD5SALT", (hashfn_t)compute_md5 },
+        { "SHA1SALTSHA1PASS", (hashfn_t)compute_sha1 },
+        { "SHA256SALTSHA256PASS", (hashfn_t)compute_sha256 },
+        { "MD5BASE64BASE64", (hashfn_t)compute_md5 },
+        { "MD5BASE64BASE64BASE64", (hashfn_t)compute_md5 },
+        { "MD5-SALTSHA1SALTPASS", (hashfn_t)compute_md5 },
+        { "MYSQL5MD5", (hashfn_t)compute_sha1 },
+        { "MD5revMD5SALT", (hashfn_t)compute_md5 },
+        { "MD5sub8-24SALT", (hashfn_t)compute_md5 },
+        { "MD5SHA1lsb35", (hashfn_t)compute_md5 },
+        { "MD5SQL3SQL5MD5MD5", (hashfn_t)compute_md5 },
+        { "SHA1MD5SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256MD5", (hashfn_t)compute_sha1 },
+        { "MD4UTF16MD5MD5", (hashfn_t)compute_ntlm },
+        { "MD5SHA1SALT", (hashfn_t)compute_md5 },
+        { "MD5SHA1u39", (hashfn_t)compute_md5 },
+        { "MD5-MD5SHA1PASSSHA1MD5SALT", (hashfn_t)compute_md5 },
+        { "MD5UCMD5", (hashfn_t)compute_md5 },
+        { "MD4UTF16MD5UC", (hashfn_t)compute_ntlm },
+        { "MD4UTF16MD5MD5MD5", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1SHA1", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256SHA256", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256SHA256SHA256", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256SHA256SHA256SHA256", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1MD5", (hashfn_t)compute_ntlm },
+        { "MD4UTF16MD5SHA1", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256UC", (hashfn_t)compute_ntlm },
+        { "SHA1SHA256UC", (hashfn_t)compute_sha1 },
+        { "MD4UTF16MD5HUM", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1HUM", (hashfn_t)compute_ntlm },
+        { "SHA1-MD5PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256x", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256UCx", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256UCxSHA256", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UC1LC", (hashfn_t)compute_sha1 },
+        /* HT_ALT types that had no outermost hash: without one the chain
+         * re-ran the entire construction on the hex and diverged at x02. */
+        { "MD5-DBL-PASS", (hashfn_t)compute_md5 },
+        { "MD4UTF16", (hashfn_t)compute_ntlm },
+        { "MD4UTF16UC", (hashfn_t)compute_ntlm },
+        { "SHA1MD5MD5PASS", (hashfn_t)compute_sha1 },
+        { "MD52SALTMD5MD5", (hashfn_t)compute_md5 },
+        { "MD52SALTMD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64MD5RAW", (hashfn_t)compute_md5 },
+        { "SHA1SQL5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256UCSHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256UCSHA256SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256SHA512", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5-MD5SALTMD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5UC-MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5-MD5SALTMD5PASS-SALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5SHA1SHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1MD5PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCMD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5-PASSMD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1MD5-SHA1PASSPASS", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SALTMD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u34", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u36", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u38", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u32", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u40", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u34", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u42", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256SHA256SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u38", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u36", (hashfn_t)compute_sha1 },
+        { "SHA1NTLM", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1MD5SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1SALTSHA256", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u35", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256u37", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256TRUNCMD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u39", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u37", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5SHA1PASSSHA1MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256UCTRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5UCx", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1-SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA224", (hashfn_t)compute_sha1 },
+        { "SHA1WRLTRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1SHA512TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1-SHA512PASSSHA512SALT", (hashfn_t)compute_sha1 },
+        { "SHA1HAV128", (hashfn_t)compute_sha1 },
+        { "SHA1MD5RAW", (hashfn_t)compute_sha1 },
+        { "SHA1MD2", (hashfn_t)compute_sha1 },
+        { "SHA1MD5BASE64", (hashfn_t)compute_sha1 },
+        { "SHA1MD6TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1NTLMUC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA512", (hashfn_t)compute_sha1 },
+        { "SHA1MD5WRLSHA1", (hashfn_t)compute_sha1 },
+        { "MD5WRLSHA1", (hashfn_t)compute_md5 },
+        { "SHA1-MD5PASSMD5MD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCSALT", (hashfn_t)compute_sha1 },
+        { "SHA1WRLUCTRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5CAPSALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCMD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5CAPSALT", (hashfn_t)compute_sha1 },
+        { "SHA1SQL5-32", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1UCTRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1SALTMD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1CAPSALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCMD5UCMD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCMD5UCMD5UCMD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD51CAPSALT", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5CAPMD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA512UC", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5SHA256SALT", (hashfn_t)compute_sha1 },
+        { "SHA256MD5SHA256MD5", (hashfn_t)compute_sha256 },
+        { "SHA1SHA256MD5SHA256MD5", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5sub8-24SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SALTMD5MD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1MD5-SALTMD5PASS", (hashfn_t)compute_sha1 },
+        { "SHA1SHA512UCTRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5PASSMD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1MD5MD5SHA1MD5", (hashfn_t)compute_sha1 },
+        { "MD5SHA1MD5MD5SHA1MD5", (hashfn_t)compute_md5 },
+        { "SHA1MD5UCSHA1UCMD5UC", (hashfn_t)compute_sha1 },
+        { "MD5MD5SHA1SALT", (hashfn_t)compute_md5 },
+        { "MD5MD5SHA256SALT", (hashfn_t)compute_md5 },
+        { "MD5SHA1x", (hashfn_t)compute_md5 },
+        { "SHA1SALTMD5PASSMD5", (hashfn_t)compute_sha1 },
+        { "SHA1GOST", (hashfn_t)compute_sha1 },
+        { "MD4UTF16SHA256x", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256SHA256SHA256SHA256SHA256", (hashfn_t)compute_ntlm },
+        { "SHA1SHA3-256TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1SHA3-256", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SQL5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5SQL5", (hashfn_t)compute_sha1 },
+        { "SHA1RMD128", (hashfn_t)compute_sha1 },
+        { "SHA1-SHA1SALTSHA1PASS", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1UCPASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1MD4UTF16UCMD4UTF16UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCx", (hashfn_t)compute_sha1 },
+        { "SHA1SALTSHA1UCPASS", (hashfn_t)compute_sha1 },
+        { "SHA1SALTMD5SHA1PASS", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5SALT-CR", (hashfn_t)compute_sha1 },
+        { "SHA1-MD5MD5SALT-CR", (hashfn_t)compute_sha1 },
+        { "SHA1MD5CAPMD5SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SHA384TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1RMD160TRUNC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5CAPSHA1SALT", (hashfn_t)compute_sha1 },
+        { "SHA1SALTSHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SHA0", (hashfn_t)compute_sha1 },
+        { "SHA1MD4", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SHA1PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1SQL5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1SQL5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1revSHA1", (hashfn_t)compute_sha1 },
+        { "SHA1SHA256MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5SALTPASS", (hashfn_t)compute_sha1 },
+        { "SHA224SHA1", (hashfn_t)compute_sha224 },
+        { "MD5DECBASE64MD5BASE64MD5", (hashfn_t)compute_md5 },
+        { "SHA1revBASE64", (hashfn_t)compute_sha1 },
+        { "SHA1revBASE64x", (hashfn_t)compute_sha1 },
+        { "MD4UTF16MD5MD5MD5MD5", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1UC", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256MD5", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA256SHA1", (hashfn_t)compute_ntlm },
+        { "MD4UTF16MD5PASSMD5SHA1PASS", (hashfn_t)compute_ntlm },
+        { "MD5UTF16LEPASSSALT", (hashfn_t)compute_md5 },
+        { "MD5UTF16LESALTPASS", (hashfn_t)compute_md5 },
+        { "SHA1UTF16LEPASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA1UTF16LESALTPASS", (hashfn_t)compute_sha1 },
+        { "SHA256UTF16LEPASSSALT", (hashfn_t)compute_sha256 },
+        { "SHA256UTF16LESALTPASS", (hashfn_t)compute_sha256 },
+        { "SHA512UTF16LEPASSSALT", (hashfn_t)compute_sha512 },
+        { "SHA512UTF16LESALTPASS", (hashfn_t)compute_sha512 },
+        { "SHA384PASSSALT", (hashfn_t)compute_sha384 },
+        { "SHA384SALTPASS", (hashfn_t)compute_sha384 },
+        { "SHA384UTF16LEPASSSALT", (hashfn_t)compute_sha384 },
+        { "SHA384UTF16LESALTPASS", (hashfn_t)compute_sha384 },
+        { "MD5-SHA1SALTPASS", (hashfn_t)compute_md5 },
+        { "MD5-SALTMD5PASS-SALT", (hashfn_t)compute_md5 },
+        { "MD5-MD5SALT-MD5MD5PASS", (hashfn_t)compute_md5 },
+        { "SHA1-SALTSHA1PASSSALT", (hashfn_t)compute_sha1 },
+        { "SHA256SALTPASSSALT", (hashfn_t)compute_sha256 },
+        { "SHA256-SALTSHA256RAW", (hashfn_t)compute_sha256 },
+        { "WRLSALTPASSSALT", (hashfn_t)compute_whirlpool },
+        { "MURMUR64A", (hashfn_t)compute_murmur64a },
+        { "SHA224PASSSALT", (hashfn_t)compute_sha224 },
+        { "SHA224SALTPASS", (hashfn_t)compute_sha224 },
+        { "SHA1PASSHEXSALT", (hashfn_t)compute_sha1 },
+        { "SKYPE", (hashfn_t)compute_md5 },
+        { "MD5SHA256SHA256", (hashfn_t)compute_md5 },
+        { "MD4SALTPASS", (hashfn_t)compute_md4 },
+        { "MD4PASSSALT", (hashfn_t)compute_md4 },
+        { "MD5PASSSALTMD5PASSSALT", (hashfn_t)compute_md5 },
+        { "QAS-VASAUTH", (hashfn_t)compute_sha256 },
+        { "POSTOFFICE", (hashfn_t)compute_md5 },
+        { "IPB2", (hashfn_t)compute_md5 },
+        { "SHA512RAWPASSSALT", (hashfn_t)compute_sha512 },
+        { "EPISERVER-SID", (hashfn_t)compute_sha1 },
+        /* Both reach mdxfind's SHA1_start after a single first-lowercase
+         * cap, so their rounds are plain sha1(hex(prev)) with no re-cap.
+         * Derived from x01/x02 pairs in regress/testhash.orig. */
+        { "SHA1MD5CAP", (hashfn_t)compute_sha1 },
+        { "SHA1MD5CAPMD5", (hashfn_t)compute_sha1 },
+        { "SHA1PASS-TRUNC", (hashfn_t)compute_sha1 },
+        /* Derived 2026-09-01 from regress/testhash.orig, mdxfind own output:
+         * for each type, x01 and x02 lines were paired on matching password
+         * and the outer hash identified as the primitive reproducing x02
+         * from hex(x01). Minimum 4 pairs per type, no single-sample entry.
+         * These types had NO outer_fn, so the hinted iteration path fell back
+         * to ht->compute, which re-applies the WHOLE construction instead of
+         * the outermost hash -- correct only when a type IS its outer hash.
+         * Strictly additive: no existing entry was found to disagree. */
+        { "MD4SQL3", (hashfn_t)compute_md4 },
+        { "MD4UTF16-2xMD5", (hashfn_t)compute_ntlm },
+        { "MD4UTF16BASE64", (hashfn_t)compute_ntlm },
+        { "MD4UTF16BASE64SHA256", (hashfn_t)compute_ntlm },
+        { "MD4UTF16MD5x", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SHA1x", (hashfn_t)compute_ntlm },
+        { "MD4UTF16SQL3", (hashfn_t)compute_ntlm },
+        { "MD5-1xMD5SHA1", (hashfn_t)compute_md5 },
+        { "MD5-1xMD5SHA1-MD5", (hashfn_t)compute_md5 },
+        { "MD5-1xMD5SHA1-MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-1xSHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5-1xSHA1MD5-MD5", (hashfn_t)compute_md5 },
+        { "MD5-1xSHA1MD5-MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-1xSHA1MD5pSHA1p", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5-MD5", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5-MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5-MD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5-SHA1", (hashfn_t)compute_md5 },
+        { "MD5-2xMD5UC", (hashfn_t)compute_md5 },
+        { "MD5-2xSHA1", (hashfn_t)compute_md5 },
+        { "MD5-2xSHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5-MD5", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5-MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5-MD5MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5-SHA1", (hashfn_t)compute_md5 },
+        { "MD5BASE64", (hashfn_t)compute_md5 },
+        { "MD5BASE64MD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64ROT13", (hashfn_t)compute_md5 },
+        { "MD5BASE64SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64SHA1RAW", (hashfn_t)compute_md5 },
+        { "MD5BASE64SHA1RAWBASE64SHA1RAW", (hashfn_t)compute_md5 },
+        { "MD5BASE64SHA1RAWMD5", (hashfn_t)compute_md5 },
+        { "MD5BASE64revMD5", (hashfn_t)compute_md5 },
+        { "MD5DECBASE64", (hashfn_t)compute_md5 },
+        { "MD5DECBASE64MD5", (hashfn_t)compute_md5 },
+        { "MD5MD5UCSQL3p", (hashfn_t)compute_md5 },
+        { "MD5SHA1-1xSHA1MD5pSHA1p", (hashfn_t)compute_md5 },
+        { "MD5SHA1BASE64", (hashfn_t)compute_md5 },
+        { "MD5SHA1BASE64MD5RAW", (hashfn_t)compute_md5 },
+        { "MD5SHA1BASE64SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1MD5BASE64", (hashfn_t)compute_md5 },
+        { "MD5SHA1SHA1RAW", (hashfn_t)compute_md5 },
+        { "MD5SHA1UCu32", (hashfn_t)compute_md5 },
+        { "MD5SQL3", (hashfn_t)compute_md5 },
+        { "MD5SQL5-40", (hashfn_t)compute_md5 },
+        { "MD5SQL5-chop40", (hashfn_t)compute_md5 },
+        { "MD5SWAP", (hashfn_t)compute_md5 },
+        { "MD5UTF16LE", (hashfn_t)compute_md5 },
+        { "MD5revp", (hashfn_t)compute_md5 },
+        { "MD5sub1-20MD5", (hashfn_t)compute_md5 },
+        { "MD5sub1-20MD5MD5", (hashfn_t)compute_md5 },
+        { "MD5sub8-24MD5sub8-24MD5", (hashfn_t)compute_md5 },
+        { "SHA1-1xMD5SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1-1xSHA1MD5", (hashfn_t)compute_sha1 },
+        { "SHA1-1xSHA1MD5pSHA1p", (hashfn_t)compute_sha1 },
+        { "SHA1-2xMD5", (hashfn_t)compute_sha1 },
+        { "SHA1-2xSHA1", (hashfn_t)compute_sha1 },
+        { "SHA1-2xSHA1-MD5", (hashfn_t)compute_sha1 },
+        { "SHA1-2xSHA1-MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1-2xSHA1-MD5MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1-2xSHA1-SHA1", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64MD5", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64MD5RAW", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64MD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64SHA1RAW", (hashfn_t)compute_sha1 },
+        { "SHA1BASE64SHA256", (hashfn_t)compute_sha1 },
+        { "SHA1DECBASE64", (hashfn_t)compute_sha1 },
+        { "SHA1MD5-2xMD5-MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5UCMD5MD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5MD5UCMD5UC", (hashfn_t)compute_sha1 },
+        { "SHA1MD5RAWUCMD5RAW", (hashfn_t)compute_sha1 },
+        { "SHA1MD5UCSHA1BASE64", (hashfn_t)compute_sha1 },
+        { "SHA1MD5sub1-16", (hashfn_t)compute_sha1 },
+        { "SHA1MD5sub1-16MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5sub1-16MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5sub1-20MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5sub1-20MD5MD5", (hashfn_t)compute_sha1 },
+        { "SHA1MD5xSALT", (hashfn_t)compute_sha1 },
+        { "SHA1RADMIN2BASE64", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1sub1-16", (hashfn_t)compute_sha1 },
+        { "SHA1SHA1u32", (hashfn_t)compute_sha1 },
+        { "SHA1SQL5-40", (hashfn_t)compute_sha1 },
+        { "SHA1UTF16BE", (hashfn_t)compute_sha1 },
+        { "SHA1UTF16BEZ", (hashfn_t)compute_sha1 },
+        { "SHA1UTF16LE", (hashfn_t)compute_sha1 },
+        { "SHA1ZUTF16LE", (hashfn_t)compute_sha1 },
+        { "SHA1revp", (hashfn_t)compute_sha1 },
+        { "SHA256UTF16LE", (hashfn_t)compute_sha256 },
+        { "SHA384UTF16LE", (hashfn_t)compute_sha384 },
+        { "SHA512UTF16LE", (hashfn_t)compute_sha512 },
+        };
+        int _oi, _ot;
+        for (_oi = 0; _oi < (int)(sizeof(outer_tab)/sizeof(outer_tab[0])); _oi++) {
+            _ot = find_type_index(outer_tab[_oi].name);
+            if (_ot >= 0 && !Hashtypes[_ot].outer_fn)
+                Hashtypes[_ot].outer_fn = outer_tab[_oi].fn;
+        }
+        /* Set after every registration: the HT macros clear iter_fn, so doing
+         * this earlier is both overwritten and unsafe, because find_type_index
+         * returns -1 for a type not yet registered. */
+        {   static const char *pad100[] = { "RADMIN2BASE64", "RADMIN2SQL3",
+                                            "RADMIN2SQL5-40" };
+            int _pi;
+            for (_pi = 0; _pi < (int)(sizeof(pad100)/sizeof(pad100[0])); _pi++) {
+                int _pt = find_type_index(pad100[_pi]);
+                if (_pt >= 0) Hashtypes[_pt].iter_fn = (hashfn_t)compute_md5_pad100;
+            }
+        }
+    }
+
     /* --- Classify verify types by input format --- */
     /* Verify types with HCLASS_ALL (default) get auto-classified based on
      * their example hash format so the slow queue skips incompatible types. */
@@ -24147,6 +27141,21 @@ static void init_hashtypes(void)
                 ht->vclass = HCLASS_OTHER;
             }
             }
+        }
+    }
+
+    /* BLAKE2B512, BLAKE2B256 and BLAKE2S256 are emitted BOTH as
+     * $BLAKE2$<hex> and as a bare hex digest, and each verify already accepts
+     * either shape. The auto-classifier above sees only the $BLAKE2$ example
+     * and pins them to HCLASS_PREFIX, so the bare form never reached them and
+     * read 0 at every depth. Admit both classes. */
+    {
+        static const char *_b2[] = { "BLAKE2B512", "BLAKE2B256", "BLAKE2S256" };
+        int _b, _bi;
+        for (_b = 0; _b < 3; _b++) {
+            _bi = find_type_index(_b2[_b]);
+            if (_bi >= 0 && Hashtypes[_bi].verify)
+                Hashtypes[_bi].vclass = HCLASS_PREFIX | HCLASS_HEX;
         }
     }
 
@@ -24279,12 +27288,32 @@ static inline void hash_compute(const struct hashtype *ht,
 }
 
 /* Verify wrapper: calls ht->verify and increments StatTry */
+static int hex2bin(const char *hex, int hexlen, unsigned char *bin);
+
 static inline int hash_verify(const struct hashtype *ht,
     const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
     atomic_fetch_add(&StatTry[ht - Hashtypes], 1);
     WS->cur_rate = ht->rate;
+    /* A $HEX[] salt arrives still encoded, and most verify functions parse the
+     * salt straight out of hashstr without decoding it, so every non-ASCII
+     * salt silently failed for them.  Decode it once here rather than in each
+     * of the seventy-nine that parse a salt this way. */
+    if (hashlen > 7) {
+        const char *c = memchr(hashstr, ':', hashlen);
+        if (c && hashstr[hashlen - 1] == ']' &&
+            (hashstr + hashlen) - (c + 1) > 6 && memcmp(c + 1, "$HEX[", 5) == 0) {
+            int pre = (int)(c - hashstr) + 1;
+            int enc = hashlen - pre - 6;
+            if (enc > 0 && (enc & 1) == 0 && pre + enc / 2 < WS_GP_SIZE) {
+                char *rw = (char *)WS->hexsalt;
+                memcpy(rw, hashstr, pre);
+                if (hex2bin(c + 6, enc, (unsigned char *)rw + pre) == enc / 2)
+                    return ht->verify(rw, pre + enc / 2, pass, passlen);
+            }
+        }
+    }
     return ht->verify(hashstr, hashlen, pass, passlen);
 }
 
@@ -24594,6 +27623,7 @@ struct workitem {
     int fullpasslen;
     struct hashtype *hint;  /* type hint, or NULL */
     int hint_iter;          /* iteration count from xNN suffix */
+    int walk_deferred;      /* bare-separator split withheld; retry after verify */
     int hash_is_uc;         /* original hex had uppercase */
     int john_in;            /* line arrived in John $dynamic_N$ form (-J 1) */
     int hash_class;         /* HCLASS_* bitmask for slow queue filtering */
@@ -24685,6 +27715,26 @@ static int OutFd;
 static int ErrFd;
 static int *ModeList;                   /* -m: ordered array of type indices */
 static int ModeCount;                   /* entries in ModeList */
+
+/*
+ * -m u<id>: user-defined types named on the command line, in the order given.
+ *
+ * These cannot join the built-in hot list: hot_entry.type_idx is dereferenced
+ * as &Hashtypes[...] (and indexes StatHotHit[]) with no discriminator, while
+ * user ops live at JOB_USERDEF_BASE.. deliberately OUTSIDE Hashtypes[]. So a
+ * user id here orders emit_user_matches() and nothing else -- it does not
+ * select, restrict, or speed anything up, because that loop has no early exit
+ * and tries every loaded type behind a one-compare hashlen filter.
+ *
+ * The ids are captured as STRINGS here and resolved in main(): parse_mode_spec
+ * is compiled above the userdef.h include, so struct userdef_type is still
+ * incomplete at this point.
+ */
+#define USERPREF_MAX 64
+static char UserPrefIds[USERPREF_MAX][128];  /* raw id strings from -m u<id> */
+static int  UserPrefIdCount = 0;
+static int  UserPref[USERPREF_MAX];          /* resolved user-type indices   */
+static int  UserPrefCount = 0;
 static int ModeAuto;                    /* -m includes "auto": fallback to auto-detect */
 static const char *ModeDefaultSalt;     /* default salt for hashcat mode (e.g. "00" for mode 24) */
 static int ModeDefaultSaltLen;
@@ -24788,6 +27838,9 @@ static _Atomic int HotHitCount;   /* entries used in HotHitTable */
 static void hot_hit_record(int type_idx, int salt_len)
 {
     int i, n = atomic_load(&HotHitCount);
+    /* Clamp: HotHitCount can exceed HOT_LIST_MAX (see below), and an
+     * unclamped bound here walks the search off the end of the array. */
+    if (n > HOT_LIST_MAX) n = HOT_LIST_MAX;
     /* Search existing entries */
     for (i = 0; i < n; i++) {
         if (HotHitTable[i].type_idx == type_idx &&
@@ -24802,6 +27855,13 @@ static void hot_hit_record(int type_idx, int salt_len)
         HotHitTable[slot].type_idx = type_idx;
         HotHitTable[slot].salt_len = salt_len;
         atomic_store(&HotHitTable[slot].hits, 1);
+    } else {
+        /* Table full. The write above is guarded but the counter was not,
+         * so every further miss pushed HotHitCount past the array size and
+         * the search loop then read further and further past the end --
+         * eventually off the data segment, faulting on an unmapped page.
+         * Give the slot back so the count cannot drift. */
+        atomic_fetch_sub(&HotHitCount, 1);
     }
 }
 
@@ -24951,6 +28011,12 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
     struct hashtype *cands[MAX_CANDIDATES];
     int ncands, c, iter;
     int fullpass_retry = 0;
+    /* Saved across the fullpass goto below, so a failed merged reading is
+     * undone rather than reported in place of the line as written. */
+    char *fp_o_password = NULL, *fp_o_salt = NULL;
+    char *fp_o_altsalt = NULL, *fp_o_altpassword = NULL;
+    int fp_o_passlen = 0, fp_o_saltlen = 0, fp_o_hashlen = 0;
+    int fp_o_altsaltlen = 0, fp_o_altpasslen = 0;
 
     item->verified = 0;
 
@@ -25163,7 +28229,50 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             /* Find original hex hash length by locating first colon in hashstr */
             const char *_fc = memchr(item->hashstr, ':', item->hashlen);
             int _orighl = _fc ? (int)(_fc - item->hashstr) : item->hashlen;
-            if (_orighl >= 16 && (_orighl & 1) == 0 &&
+            if (item->walk_deferred && !(_orighl >= 16 && (_orighl & 1) == 0 &&
+                                         is_hex(item->hashstr, _orighl))) {
+                int _dk;
+                item->walk_deferred = 0;
+                for (_dk = 0; _dk < _orighl; _dk++) {
+                    int _ll = _dk, _rl = _orighl - _dk - 1;
+                    if (item->hashstr[_dk] != '$' && item->hashstr[_dk] != '#' &&
+                        item->hashstr[_dk] != '*') continue;
+                    if (_rl >= 2 && !(_rl & 1) && is_hex(item->hashstr + _dk + 1, _rl)) {
+                        item->salt = item->hashstr; item->saltlen = _ll;
+                        item->hashstr = item->hashstr + _dk + 1; item->hashlen = _rl;
+                        item->hint = NULL; break;
+                    }
+                    if (_ll >= 2 && !(_ll & 1) && is_hex(item->hashstr, _ll)) {
+                        item->salt = item->hashstr + _dk + 1; item->saltlen = _rl;
+                        item->hashlen = _ll;
+                        item->hint = NULL; break;
+                    }
+                }
+                if (item->hint) return;
+                /*
+                 * Restore salt and password exactly as parse_line would have
+                 * after an eager split.  With one colon the salt IS the split
+                 * residue set above and the whole rest is the password; with
+                 * two or more the salt comes from the colon split instead and
+                 * the residue is discarded, which is what the eager walk got
+                 * by falling through to the ncolons cases.
+                 */
+                if (item->rest && item->restlen > 0) {
+                    const char *_c2 = memchr(item->rest, ':', item->restlen);
+                    if (_c2) {
+                        item->salt = (char *)item->rest;
+                        item->saltlen = (int)(_c2 - item->rest);
+                        item->password = (char *)_c2 + 1;
+                        item->passlen = item->restlen - (int)(_c2 - item->rest) - 1;
+                    } else {
+                        item->password = (char *)item->rest;
+                        item->passlen = item->restlen;
+                    }
+                }
+                item->hash_is_uc = has_uppercase_hex(item->hashstr, item->hashlen);
+                item->hash_class = HCLASS_HEX;
+                /* Fall through to hex/compute path */
+            } else if (_orighl >= 16 && (_orighl & 1) == 0 &&
                 is_hex(item->hashstr, _orighl)) {
                 item->hashlen = _orighl;
                 item->hint = NULL;
@@ -25188,10 +28297,16 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 }
                 /* Fall through to hex/compute path */
             } else {
-                /* Non-hex: retry with fullpass before giving up */
+                /* Non-hex: retry with fullpass before giving up.
+                 * Speculative: undo the rewrite if nothing matches, or the
+                 * caller reports an unresolved line built from a truncated
+                 * hashstr and a password that swallowed the salt. */
                 if (!fullpass_retry && item->fullpass &&
                     item->fullpass != item->password) {
                     const unsigned char *fvpass;
+                    char *o_password = item->password;
+                    int   o_passlen  = item->passlen;
+                    int   o_hashlen  = item->hashlen;
                     int fvpasslen, fv;
                     fullpass_retry = 1;
                     if (item->fullpass > item->hashstr &&
@@ -25215,6 +28330,9 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                             return;
                         }
                     }
+                    item->hashlen  = o_hashlen;
+                    item->password = o_password;
+                    item->passlen  = o_passlen;
                 }
                 return;
             }
@@ -25274,9 +28392,28 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 return;
             }
         }
-        /* Retry with fullpass for non-hex verify types */
+        /* Retry with fullpass for non-hex verify types.
+         *
+         * This reading merges the salt and the password into one field, so a
+         * line reported from it does not round-trip: "hash:27 0x7b:hashcat"
+         * came back as "hash:$HEX[27 0x7b:hashcat]".  Two things went wrong.
+         * The mutation below was never undone, so a failed speculation left
+         * the caller holding a truncated hashlen and the merged password; and
+         * a successful one was reported even when the line as written also
+         * verified, which is the authoritative reading.  Which of the two a
+         * line got depended on whether the hot list happened to satisfy it
+         * earlier, so the same line resolved correctly alone and merged in a
+         * long run -- 15140 lines across 14 contiguous blocks. */
         if (!fullpass_retry && item->fullpass &&
             item->fullpass != item->password) {
+            char *o_password = item->password;
+            char *o_salt     = item->salt;
+            int   o_passlen  = item->passlen;
+            int   o_saltlen  = item->saltlen;
+            int   o_hashlen  = item->hashlen;
+            const unsigned char *npass;
+            int npasslen, fp_iter;
+
             fullpass_retry = 1;
             if (item->fullpass > item->hashstr &&
                 item->fullpass <= item->hashstr + item->hashlen) {
@@ -25296,15 +28433,41 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                 if (!ht->verify) continue;
                 WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
+                    fp_iter = WS->verify_iter;
+                    /* Prefer the line as written when it verifies too. */
+                    if (o_hashlen != item->hashlen) {
+                        npasslen = decode_hex_password(o_password, o_passlen,
+                                       (unsigned char *)WS->vpassbuf2, MAXLINE);
+                        if (npasslen >= 0) npass = (const unsigned char *)WS->vpassbuf2;
+                        else { npass = (const unsigned char *)o_password; npasslen = o_passlen; }
+                        WS->verify_iter = 0;
+                        if (hash_verify(ht, item->hashstr, o_hashlen, npass, npasslen)) {
+                            item->hashlen  = o_hashlen;
+                            item->password = o_password;
+                            item->passlen  = o_passlen;
+                            item->salt     = o_salt;
+                            item->saltlen  = o_saltlen;
+                        } else {
+                            WS->verify_iter = fp_iter;
+                        }
+                    }
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
                     *hot_type = v;
                     *hot_iter = WS->verify_iter;
-                    hot_list_add(hot_list, nhot, v, -1);
+                    hot_list_add(hot_list, nhot, v,
+                                 item->salt ? item->saltlen : -1);
                     return;
                 }
             }
+            /* Nothing matched the merged reading: undo the speculation so the
+             * caller does not report a mangled line as unresolved. */
+            item->hashlen  = o_hashlen;
+            item->password = o_password;
+            item->passlen  = o_passlen;
+            item->salt     = o_salt;
+            item->saltlen  = o_saltlen;
         }
         return;
     }
@@ -25393,6 +28556,11 @@ retry_with_fullpass:
 
             /* Hot verify types (hex-format composite hashes like MACOSX) */
             if (ht->verify) {
+                /* Reset before the call exactly as the slow path does: a
+                 * verify function that reports no iteration count leaves the
+                 * slot untouched, so without this it would carry whatever
+                 * this thread last verified. */
+                WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, pass, passlen))
                     goto hot_match;
                 continue;
@@ -25519,7 +28687,13 @@ retry_with_fullpass:
             atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
             item->match_type = ht;
-            item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+            /* A verify type reports its own count through verify_iter; only a
+             * compute type is implicitly x01. Stamping 1 unconditionally here
+             * made the SAME hash label differently on a repeat, because the
+             * first sighting goes down the slow path and reads verify_iter
+             * while every later one hits this cache. */
+            item->match_iter = ht->verify ? WS->verify_iter
+                                          : ((ht->flags & HTF_ITER_X0) ? 0 : 1);
             *hot_type = hot_list[h].type_idx;
             *hot_iter = item->match_iter;
             /* Promote matched entry to front of hot list */
@@ -25622,6 +28796,7 @@ retry_with_fullpass:
                  * (but for salted types, compute includes salt processing
                  * which is wrong for iteration — use hash_by_len instead) */
                 itfn = ht->iter_fn ? ht->iter_fn :
+                       ht->outer_fn ? ht->outer_fn :
                        (ht->flags & HTF_SALTED) ? NULL : ht->compute;
 
                 /* Compute base into iterbuf (gives x=bi result) */
@@ -25672,27 +28847,44 @@ retry_with_fullpass:
                     goto hint_iter_done;
                 }
 
-                /* Iterate from bi+1 to target */
-                for (iter = bi + 1; iter <= target; iter++) {
-                    if (uc)
-                        prmd5UC(iterbuf, hexiter, fullbytes * 2);
-                    else
-                        prmd5(iterbuf, hexiter, fullbytes * 2);
-                    if (itfn)
-                        itfn((unsigned char *)hexiter, fullbytes * 2,
-                             NULL, 0, computed);
-                    else
-                        hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                    fullbytes * 2, computed);
-                    memcpy(iterbuf, computed, fullbytes);
-                }
-                if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
-                    item->verified = 1;
-                    item->match_type = ht;
-                    item->match_iter = target;
-                    *hot_type = ht - Hashtypes;
-                    *hot_iter = target;
-                    return;
+                /* Iterate from bi+1 to target, seeding the chain from EVERY registered
+                 * base encoding. A multi-emit type (HT_ALT / HT_ALT2) produces more than
+                 * one digest per password and mdxfind emits them all -- the HUM family,
+                 * for instance, emits both hex+separator and separator+hex. Seeding only
+                 * from the primary meant the alternate encodings could not verify above
+                 * the base iteration, capping such a type at exactly 1/nbases of its
+                 * lines at depth. This is the hinted path's copy of the defect fixed for
+                 * the composed and salted hard passes in 1.147. */
+                { int _b;
+                  const unsigned char *_sb = (ht->flags & HTF_SALTED) ? saltbin : NULL;
+                  int _sl = (ht->flags & HTF_SALTED) ? saltbinlen : 0;
+                  for (_b = 0; _b < 3; _b++) {
+                    if (_b == 1 && !ht->compute_alt)  continue;
+                    if (_b == 2 && !ht->compute_alt2) continue;
+                    if (_b == 0)      hash_compute(ht, pass, passlen, _sb, _sl, iterbuf);
+                    else if (_b == 1) ht->compute_alt(pass, passlen, _sb, _sl, iterbuf);
+                    else              ht->compute_alt2(pass, passlen, _sb, _sl, iterbuf);
+                    for (iter = bi + 1; iter <= target; iter++) {
+                        if (uc)
+                            prmd5UC(iterbuf, hexiter, fullbytes * 2);
+                        else
+                            prmd5(iterbuf, hexiter, fullbytes * 2);
+                        if (itfn)
+                            itfn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                        else
+                            hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                        fullbytes * 2, computed);
+                        memcpy(iterbuf, computed, fullbytes);
+                    }
+                    if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
+                        item->verified = 1;
+                        item->match_type = ht;
+                        item->match_iter = target;
+                        *hot_type = ht - Hashtypes;
+                        *hot_iter = target;
+                        return;
+                    }
+                  }
                 }
             hint_iter_done: ;
             }
@@ -25717,7 +28909,7 @@ retry_with_fullpass:
                     return;
                 }
                 /* Also try hash:salt for salted verify types */
-                if ((ht->flags & HTF_SALTED) && item->salt && item->saltlen > 0) {
+                if (item->salt && item->saltlen > 0) {
                     int vlen = snprintf(hexiter, WS_GP_SIZE, "%.*s:%.*s",
                         item->hashlen, item->hashstr, item->saltlen, item->salt);
                     WS->verify_iter = 0;
@@ -25732,7 +28924,7 @@ retry_with_fullpass:
                     }
                 }
                 /* Also try hash:alt_salt for multi-colon verify types */
-                if ((ht->flags & HTF_SALTED) && item->alt_salt && item->alt_saltlen > 0 && item->alt_password) {
+                if (item->alt_salt && item->alt_saltlen > 0 && item->alt_password) {
                     int vlen = snprintf(hexiter, WS_GP_SIZE, "%.*s:%.*s",
                         item->hashlen, item->hashstr, item->alt_saltlen, item->alt_salt);
                     WS->verify_iter = 0;
@@ -25848,7 +29040,7 @@ retry_with_fullpass:
             fullbytes = ht->hashlen;
 
             /* Unsalted non-composed: iterate + UC variant */
-            if (!(ht->flags & (HTF_SALTED | HTF_COMPOSED | HTF_NTLM | HTF_UC))) {
+            if (!(ht->flags & (HTF_SALTED | HTF_COMPOSED | HTF_UC))) {
                 int uc;
                 for (uc = 0; uc <= 1; uc++) {
                     ht->compute(pass, passlen, NULL, 0, iterbuf);
@@ -25908,7 +29100,16 @@ retry_with_fullpass:
             /* Composed: compute x01 via chain, iterate outer hash */
             if (ht->flags & HTF_COMPOSED) {
                 int maxinner = ht->iter_fn ? Iterstep : Maxiter;
-                int is_raw = (ht->chain && ht->nchain > 0 && ht->chain[0].uc_hex == 2);
+                /* Raw iteration is decided by the OUTERMOST step, not the innermost.
+                 * chain[0] is the inner hash -- for every RAW type in the catalogue
+                 * that step is raw (MD5RAW = MD5(MD5_bin(pass))) while the OUTER step
+                 * emits hex, so iteration is hex. Testing chain[0] made every such
+                 * type iterate on binary and diverge from mdxfind past x01. No chain
+                 * currently ends in a raw step, so this is false throughout today;
+                 * it stays a test rather than a constant so a future chain that does
+                 * end raw keeps working. */
+                int is_raw = (ht->chain && ht->nchain > 0 &&
+                              ht->chain[ht->nchain - 1].uc_hex == 2);
                 hash_compute(ht, pass, passlen, NULL, 0, iterbuf);
                 for (iter = 2; iter <= maxinner; iter++) {
                     if (is_raw) {
@@ -25917,11 +29118,18 @@ retry_with_fullpass:
                                     fullbytes, computed);
                     } else {
                         prmd5(iterbuf, hexiter, fullbytes * 2);
-                        if (ht->iter_fn)
-                            ht->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
-                        else
-                            hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                        fullbytes * 2, computed);
+                        { /* iterate the OUTERMOST hash.  hash_by_len picks a primitive from the
+                           * digest WIDTH and is right only by coincidence: 16 bytes gives MD5, so
+                           * MD2MD5 (md2(md5(pass)), outer MD2) iterated as MD5 and diverged from
+                           * mdxfind at x02.  iter_fn stays first because it also marks the -q
+                           * internal-iteration class. */
+                          hashfn_t _itf = ht->iter_fn ? ht->iter_fn : ht->outer_fn;
+                          if (_itf)
+                              _itf((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                          else
+                              hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                          fullbytes * 2, computed);
+                        }
                     }
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
@@ -25941,12 +29149,28 @@ retry_with_fullpass:
                 int maxinner = ht->iter_fn ? Iterstep : Maxiter;
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, iterbuf);
                 for (iter = 2; iter <= maxinner; iter++) {
+                    if (ht->flags & HTF_ITER_RAW) {
+                        /* RAW types iterate the BINARY digest, not its hex.
+                         * The composed path has had this via is_raw; the
+                         * salted path did not, so a raw-iterating salted
+                         * type could not verify past x01. */
+                        hash_by_len(fullbytes, (unsigned char *)iterbuf,
+                                    fullbytes, computed);
+                    } else {
                     prmd5(iterbuf, hexiter, fullbytes * 2);
-                    if (ht->iter_fn)
-                        ht->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
-                    else
-                        hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                    fullbytes * 2, computed);
+                    { /* iterate the OUTERMOST hash.  hash_by_len picks a primitive from the
+                       * digest WIDTH and is right only by coincidence: 16 bytes gives MD5, so
+                       * MD2MD5 (md2(md5(pass)), outer MD2) iterated as MD5 and diverged from
+                       * mdxfind at x02.  iter_fn stays first because it also marks the -q
+                       * internal-iteration class. */
+                      hashfn_t _itf = ht->iter_fn ? ht->iter_fn : ht->outer_fn;
+                      if (_itf)
+                          _itf((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                      else
+                          hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                      fullbytes * 2, computed);
+                    }
+                    }
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = ht;
@@ -25964,7 +29188,11 @@ retry_with_fullpass:
     }
 
     /* --- Easy pass: try all salted candidates --- */
-    if (saltbinlen > 0) {
+    /* A present but EMPTY salt field still selects the salted types: the
+     * HMAC KPASS family has an empty default salt on purpose and hmac over
+     * an empty message is well defined, so refusing to try them was a
+     * refusal to compute, not a missing construction. */
+    if (saltbinlen > 0 || item->salt != NULL) {
         ncands = get_candidates_by_hashlen(hashbytes, 1, cands, MAX_CANDIDATES);
         for (c = 0; c < ncands; c++) {
             if (cands[c]->rate > 0 && cands[c]->rate < AUTODETECT_RATE_MIN)
@@ -26029,7 +29257,11 @@ retry_with_fullpass:
     for (c = 0; c < ncands; c++) {
         int uc, fullbytes;
 
-        if (cands[c]->flags & (HTF_SALTED | HTF_COMPOSED | HTF_NTLM | HTF_UC))
+        /* HTF_NTLM is NOT excluded: those types iterate like any other,
+         * their compute over the hex being exactly the chain step, and
+         * skipping them left MD4UTF16 and MD4UTF16UC resolvable only at
+         * base depth. */
+        if (cands[c]->flags & (HTF_SALTED | HTF_COMPOSED | HTF_UC))
             continue;
         /* Skip slow KDFs — they have internal iterations already */
         if (cands[c]->rate > 0 && cands[c]->rate < AUTODETECT_RATE_MIN)
@@ -26038,29 +29270,49 @@ retry_with_fullpass:
         fullbytes = cands[c]->hashlen;  /* full output length for iteration */
 
         for (uc = 0; uc <= 1; uc++) {
-            cands[c]->compute(pass, passlen, NULL, 0, iterbuf);
-
-            for (iter = 2; iter <= Maxiter; iter++) {
-                if (uc)
-                    prmd5UC(iterbuf, hexiter, fullbytes * 2);
+            int bidx;
+            /* Iterate the OUTERMOST hash, not the whole construction: for a
+             * composite type, re-running compute over the hex applies every
+             * inner step again and diverges from mdxfind at x02.  And seed the
+             * chain from EVERY registered base -- a multi-emit type (hx.8 Note
+             * [24]) emits more than one digest per password, and seeding only
+             * the primary left the other shapes stuck at base depth.  Both
+             * corrections already applied to the composed and hinted paths. */
+            hashfn_t _itf = cands[c]->iter_fn ? cands[c]->iter_fn :
+                            cands[c]->outer_fn ? cands[c]->outer_fn :
+                            cands[c]->compute;
+            for (bidx = 0; bidx < 3; bidx++) {
+                if (bidx == 1 && !cands[c]->compute_alt) continue;
+                if (bidx == 2 && !cands[c]->compute_alt2) continue;
+                if (bidx == 0)
+                    cands[c]->compute(pass, passlen, NULL, 0, iterbuf);
+                else if (bidx == 1)
+                    cands[c]->compute_alt(pass, passlen, NULL, 0, iterbuf);
                 else
-                    prmd5(iterbuf, hexiter, fullbytes * 2);
-                cands[c]->compute((unsigned char *)hexiter, fullbytes * 2,
-                                  NULL, 0, computed);
-                if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
-                    item->verified = 1;
-                    if (uc) {
-                        struct hashtype *uct = find_uc_variant(cands[c]);
-                        item->match_type = uct ? uct : cands[c];
-                    } else {
-                        item->match_type = cands[c];
+                    cands[c]->compute_alt2(pass, passlen, NULL, 0, iterbuf);
+
+                for (iter = 2; iter <= Maxiter; iter++) {
+                    if (uc)
+                        prmd5UC(iterbuf, hexiter, fullbytes * 2);
+                    else
+                        prmd5(iterbuf, hexiter, fullbytes * 2);
+                    _itf((unsigned char *)hexiter, fullbytes * 2,
+                         NULL, 0, computed);
+                    if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
+                        item->verified = 1;
+                        if (uc) {
+                            struct hashtype *uct = find_uc_variant(cands[c]);
+                            item->match_type = uct ? uct : cands[c];
+                        } else {
+                            item->match_type = cands[c];
+                        }
+                        item->match_iter = iter;
+                        *hot_type = item->match_type - Hashtypes;
+                        *hot_iter = iter;
+                        return;
                     }
-                    item->match_iter = iter;
-                    *hot_type = item->match_type - Hashtypes;
-                    *hot_iter = iter;
-                    return;
+                    memcpy(iterbuf, computed, fullbytes);
                 }
-                memcpy(iterbuf, computed, fullbytes);
             }
         }
     }
@@ -26073,6 +29325,7 @@ retry_with_fullpass:
             int fullbytes;
             const unsigned char *csalt = NULL;
             int csaltlen = 0;
+            int bidx;
 
             fullbytes = ccands[c]->hashlen;
 
@@ -26137,25 +29390,53 @@ retry_with_fullpass:
                 }
             }
 
-            memcpy(iterbuf, computed, fullbytes);
-            {
-                int maxinner = ccands[c]->iter_fn ? Iterstep : Maxiter;
-                for (iter = 2; iter <= maxinner; iter++) {
-                    prmd5(iterbuf, hexiter, fullbytes * 2);
-                    if (ccands[c]->iter_fn)
-                        ccands[c]->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
-                    else
-                        hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                    fullbytes * 2, computed);
-                    if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
-                        item->verified = 1;
-                        item->match_type = ccands[c];
-                        item->match_iter = iter;
-                        *hot_type = ccands[c] - Hashtypes;
-                        *hot_iter = iter;
-                        return;
+            /* Iterate EACH registered base encoding, not just whichever x01 attempt
+             * happened to run last.  This used to seed iterbuf from `computed`,
+             * which after the checks above holds the compute_alt2 result, so for a
+             * multi-emit family (hx.8 Note [24]) only ONE of the three encodings
+             * ever became the iteration base and the other two could not verify
+             * past x01: measured 512 of 768 on the corrected GOSTHEXSALT fixture,
+             * which is exactly 2 of 3 missing. */
+            for (bidx = 0; bidx < 3; bidx++) {
+                if (bidx == 1 && !ccands[c]->compute_alt) continue;
+                if (bidx == 2 && !ccands[c]->compute_alt2) continue;
+                if (bidx == 0)
+                    hash_compute(ccands[c], pass, passlen, csalt, csaltlen, iterbuf);
+                else if (bidx == 1)
+                    ccands[c]->compute_alt(pass, passlen, csalt, csaltlen, iterbuf);
+                else
+                    ccands[c]->compute_alt2(pass, passlen, csalt, csaltlen, iterbuf);
+                {
+                    int maxinner = ccands[c]->iter_fn ? Iterstep : Maxiter;
+                    for (iter = 2; iter <= maxinner; iter++) {
+                        if (ccands[c]->flags & HTF_ITER_RAW) {
+                            hash_by_len(fullbytes, (unsigned char *)iterbuf,
+                                        fullbytes, computed);
+                        } else {
+                        prmd5(iterbuf, hexiter, fullbytes * 2);
+                        { /* iterate the OUTERMOST hash.  hash_by_len picks a primitive from the
+                           * digest WIDTH and is right only by coincidence: 16 bytes gives MD5, so
+                           * MD2MD5 (md2(md5(pass)), outer MD2) iterated as MD5 and diverged from
+                           * mdxfind at x02.  iter_fn stays first because it also marks the -q
+                           * internal-iteration class. */
+                          hashfn_t _itf = ccands[c]->iter_fn ? ccands[c]->iter_fn : ccands[c]->outer_fn;
+                          if (_itf)
+                              _itf((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                          else
+                              hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                          fullbytes * 2, computed);
+                        }
+                        }
+                        if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
+                            item->verified = 1;
+                            item->match_type = ccands[c];
+                            item->match_iter = iter;
+                            *hot_type = ccands[c] - Hashtypes;
+                            *hot_iter = iter;
+                            return;
+                        }
+                        memcpy(iterbuf, computed, fullbytes);
                     }
-                    memcpy(iterbuf, computed, fullbytes);
                 }
             }
         }
@@ -26163,11 +29444,16 @@ retry_with_fullpass:
 
     /* --- Hard pass: iterate salted types --- */
     /* Salt used only in initial computation, iterations are H(hex(prev)) */
-    if (saltbinlen > 0) {
+    /* A present but EMPTY salt field still selects the salted types: the
+     * HMAC KPASS family has an empty default salt on purpose and hmac over
+     * an empty message is well defined, so refusing to try them was a
+     * refusal to compute, not a missing construction. */
+    if (saltbinlen > 0 || item->salt != NULL) {
         ncands = get_candidates_by_hashlen(hashbytes, 1, cands, MAX_CANDIDATES);
         for (c = 0; c < ncands; c++) {
             int fullbytes;
             int maxinner;
+            int bidx;
 
             if (cands[c]->flags & HTF_UC) continue;
 
@@ -26175,24 +29461,51 @@ retry_with_fullpass:
             maxinner = cands[c]->iter_fn ? Iterstep : Maxiter;
 
             /* Compute base with salt */
-            hash_compute(cands[c], pass, passlen, saltbin, saltbinlen, iterbuf);
-
-            for (iter = 2; iter <= maxinner; iter++) {
-                prmd5(iterbuf, hexiter, fullbytes * 2);
-                if (cands[c]->iter_fn)
-                    cands[c]->iter_fn((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+            /* Multi-emit families (hx.8 Note [24]) register up to THREE base
+             * encodings via HT_ALT2 and mdxfind emits a digest for each:
+             * GOSTHEXSALT builds its message with a separator, without one, and
+             * with colons on both sides.  Only the PRIMARY encoding was used as
+             * the iteration base here, so the other two could not verify past
+             * x01 -- measured 512 of 768 on the corrected GOSTHEXSALT fixture.
+             * Iterate each registered encoding in turn. */
+            for (bidx = 0; bidx < 3; bidx++) {
+                if (bidx == 1 && !cands[c]->compute_alt) continue;
+                if (bidx == 2 && !cands[c]->compute_alt2) continue;
+                if (bidx == 0)
+                    hash_compute(cands[c], pass, passlen, saltbin, saltbinlen, iterbuf);
+                else if (bidx == 1)
+                    cands[c]->compute_alt(pass, passlen, saltbin, saltbinlen, iterbuf);
                 else
-                    hash_by_len(fullbytes, (unsigned char *)hexiter,
-                                fullbytes * 2, computed);
-                if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
-                    item->verified = 1;
-                    item->match_type = cands[c];
-                    item->match_iter = iter;
-                    *hot_type = cands[c] - Hashtypes;
-                    *hot_iter = iter;
-                    return;
+                    cands[c]->compute_alt2(pass, passlen, saltbin, saltbinlen, iterbuf);
+                for (iter = 2; iter <= maxinner; iter++) {
+                    if (cands[c]->flags & HTF_ITER_RAW) {
+                        hash_by_len(fullbytes, (unsigned char *)iterbuf,
+                                    fullbytes, computed);
+                    } else {
+                    prmd5(iterbuf, hexiter, fullbytes * 2);
+                    { /* iterate the OUTERMOST hash.  hash_by_len picks a primitive from the
+                       * digest WIDTH and is right only by coincidence: 16 bytes gives MD5, so
+                       * MD2MD5 (md2(md5(pass)), outer MD2) iterated as MD5 and diverged from
+                       * mdxfind at x02.  iter_fn stays first because it also marks the -q
+                       * internal-iteration class. */
+                      hashfn_t _itf = cands[c]->iter_fn ? cands[c]->iter_fn : cands[c]->outer_fn;
+                      if (_itf)
+                          _itf((unsigned char *)hexiter, fullbytes * 2, NULL, 0, computed);
+                      else
+                          hash_by_len(fullbytes, (unsigned char *)hexiter,
+                                      fullbytes * 2, computed);
+                    }
+                    }
+                    if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
+                        item->verified = 1;
+                        item->match_type = cands[c];
+                        item->match_iter = iter;
+                        *hot_type = cands[c] - Hashtypes;
+                        *hot_iter = iter;
+                        return;
+                    }
+                    memcpy(iterbuf, computed, fullbytes);
                 }
-                memcpy(iterbuf, computed, fullbytes);
             }
         }
     }
@@ -26358,7 +29671,11 @@ retry_with_fullpass:
         }
 
         /* Try 6: slow salted compute types skipped by AUTODETECT_RATE_MIN */
-        if (saltbinlen > 0) {
+        /* A present but EMPTY salt field still selects the salted types: the
+         * HMAC KPASS family has an empty default salt on purpose and hmac over
+         * an empty message is well defined, so refusing to try them was a
+         * refusal to compute, not a missing construction. */
+        if (saltbinlen > 0 || item->salt != NULL) {
             ncands = get_candidates_by_hashlen(hashbytes, 1, cands, MAX_CANDIDATES);
             for (c = 0; c < ncands; c++) {
                 if (cands[c]->rate <= 0 || cands[c]->rate >= AUTODETECT_RATE_MIN)
@@ -26386,11 +29703,20 @@ try_fullpass:
     if (!fullpass_retry && item->fullpass &&
         item->fullpass != item->password) {
         fullpass_retry = 1;
+        fp_o_hashlen = item->hashlen;
         /* Shorten hashstr: if fullpass starts inside hashstr, trim it */
         if (item->fullpass > item->hashstr &&
             item->fullpass <= item->hashstr + item->hashlen) {
             item->hashlen = (item->fullpass - 1) - item->hashstr;  /* -1 for colon */
         }
+        fp_o_password    = item->password;
+        fp_o_passlen     = item->passlen;
+        fp_o_salt        = item->salt;
+        fp_o_saltlen     = item->saltlen;
+        fp_o_altsalt     = item->alt_salt;
+        fp_o_altsaltlen  = item->alt_saltlen;
+        fp_o_altpassword = item->alt_password;
+        fp_o_altpasslen  = item->alt_passlen;
         item->password = item->fullpass;
         item->passlen = item->fullpasslen;
         item->salt = NULL;
@@ -26402,6 +29728,21 @@ try_fullpass:
         goto retry_with_fullpass;
     }
 
+    /* The merged reading did not verify either.  Put the line back the way
+     * it arrived so the unresolved report shows the hash and salt as
+     * written, not a truncated hash with a password that swallowed the
+     * salt. */
+    if (fullpass_retry && !item->verified && fp_o_password) {
+        item->hashlen      = fp_o_hashlen;
+        item->password     = fp_o_password;
+        item->passlen      = fp_o_passlen;
+        item->salt         = fp_o_salt;
+        item->saltlen      = fp_o_saltlen;
+        item->alt_salt     = fp_o_altsalt;
+        item->alt_saltlen  = fp_o_altsaltlen;
+        item->alt_password = fp_o_altpassword;
+        item->alt_passlen  = fp_o_altpasslen;
+    }
 }
 
 /* ---- Output formatting ---- */
@@ -26446,6 +29787,83 @@ static int emit_user_matches(struct workitem *item, int *outpos);
  */
 static int userdef_tag_is_known(const char *name);
 
+/*
+ * John-native output shapes for types whose John spelling is NOT the generic
+ * "$name$hash$salt" that john_label_for() drives.
+ *
+ * These are the exact inverses of the wrapper recognisers in john_unwrap(), so
+ * a line read from John comes back out in John's own form under -J 2. %H is the
+ * digest, %S the salt or username; everything else is literal. Note the ordering
+ * differences -- IPB2 and WBB3 put the salt FIRST, and md5ns has no wrapper at
+ * all -- which is exactly why the generic emitter cannot serve them.
+ */
+static const struct { const char *type; const char *pat; } JohnNative[] = {
+    { "WBB3",       "$wbb3$*1*%S*%H"    },
+    { "IPB2",       "$IPB2$%S$%H"       },
+    { "MSCACHE",    "M$%S#%H"           },
+    { "JUNIPERSSG", "%S$%H"             },
+    { "ORACLE7",    "O$%S#%H"           },
+    { "AS400-DES",  "$as400des$%S*%H"   },
+    { "AS400SSHA1", "$as400ssha1$%H$%S" },
+    { NULL, NULL }
+};
+
+static const char *john_native_pattern(const char *tname)
+{
+    int i;
+    if (!tname) return NULL;
+    for (i = 0; JohnNative[i].type; i++)
+        if (!strcmp(JohnNative[i].type, tname)) return JohnNative[i].pat;
+    return NULL;
+}
+
+/*
+ * Recover (hash, salt) for a John-native emit.
+ *
+ * A COMPUTE type carries the salt in item->salt and needs nothing here. A
+ * VERIFY type parses its own hashstr, so item->salt is NULL and both fields
+ * remain inside hashstr in whatever shape that type registers. Splitting them
+ * back out is the only extra step John-native output needs for those.
+ *
+ * Returns 1 when both fields were located.
+ */
+static int john_native_split(const char *tname, const char *hs, int hl,
+                             const char **hash, int *hashl,
+                             const char **salt, int *saltl)
+{
+    const char *c;
+
+    if (!strcmp(tname, "AS400-DES") || !strcmp(tname, "AS400SSHA1")) {
+        /* ours: $as400$<alg>$*<user>*<hash> */
+        const char *st = memchr(hs, '*', (size_t)hl);
+        const char *e2;
+        if (!st) return 0;
+        e2 = memchr(st + 1, '*', (size_t)(hs + hl - st - 1));
+        if (!e2) return 0;
+        *salt = st + 1; *saltl = (int)(e2 - st - 1);
+        *hash = e2 + 1; *hashl = (int)(hs + hl - e2 - 1);
+        return (*saltl > 0 && *hashl > 0);
+    }
+    /* WBB3, ORACLE7, JUNIPERSSG: ours is <hash>:<salt-or-user> */
+    c = memchr(hs, ':', (size_t)hl);
+    if (!c) {
+        /* JUNIPERSSG also ACCEPTS John's own <user>$<hash> on input, in which
+         * case hashstr is already John-native and carries no colon. Split on
+         * the '$' instead so the pattern reproduces it unchanged. */
+        if (!strcmp(tname, "JUNIPERSSG")) {
+            const char *d = memchr(hs, '$', (size_t)hl);
+            if (!d) return 0;
+            *salt = hs;    *saltl = (int)(d - hs);
+            *hash = d + 1; *hashl = (int)(hs + hl - d - 1);
+            return (*saltl > 0 && *hashl > 0);
+        }
+        return 0;
+    }
+    *hash = hs;    *hashl = (int)(c - hs);
+    *salt = c + 1; *saltl = (int)(hs + hl - c - 1);
+    return (*saltl > 0 && *hashl > 0);
+}
+
 static void format_output(struct workitem *item, char *outbuf, int *outlen)
 {
     int pos = 0;
@@ -26454,6 +29872,7 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     int passlen;
     int dec_len;
     const char *johnfmt;
+    int john_native;
 
     /* Decode $HEX[] on the fly if present; pass through $TESTVEC[] verbatim */
     if (item->passlen >= 9 && strncmp(item->password, "$TESTVEC[", 9) == 0) {
@@ -26478,11 +29897,40 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
      * and is NOT uniformly parseable by a John-only consumer.
      */
     johnfmt = NULL;
+    john_native = 0;
     if ((JohnOut == 2 || (JohnOut == 1 && item->john_in)) &&
-        item->match_type && item->match_type->name)
-        johnfmt = john_label_for(item->match_type->name, item->match_iter);
+        item->match_type && item->match_type->name) {
+        const char *jpat = john_native_pattern(item->match_type->name);
+        const char *jh = item->hashstr; int jhl = item->hashlen;
+        const char *js = item->salt;    int jsl = item->saltlen;
+        /* A verify type keeps both fields inside hashstr; split them out. */
+        if (jpat && !(js && jsl > 0)) {
+            if (!john_native_split(item->match_type->name, jh, jhl,
+                                   &jh, &jhl, &js, &jsl))
+                jpat = NULL;
+        }
+        if (jpat && js && jsl > 0) {
+            const char *q;
+            for (q = jpat; *q; q++) {
+                if (q[0] == '%' && q[1] == 'H') {
+                    memcpy(outbuf + pos, jh, (size_t)jhl);
+                    pos += jhl; q++;
+                } else if (q[0] == '%' && q[1] == 'S') {
+                    memcpy(outbuf + pos, js, (size_t)jsl);
+                    pos += jsl; q++;
+                } else {
+                    outbuf[pos++] = *q;
+                }
+            }
+            john_native = 1;
+        } else {
+            johnfmt = john_label_for(item->match_type->name, item->match_iter);
+        }
+    }
 
-    if (johnfmt) {
+    if (john_native) {
+        /* the whole hash field was written from the pattern above */
+    } else if (johnfmt) {
         int jl = strlen(johnfmt);
         outbuf[pos++] = '$';
         memcpy(outbuf + pos, johnfmt, jl);
@@ -26495,14 +29943,24 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
         memcpy(outbuf + pos, tname, tlen);
         pos += tlen;
         if (item->match_iter > 0) {
-            outbuf[pos++] = 'x';
-            outbuf[pos++] = '0' + (item->match_iter / 10) % 10;
-            outbuf[pos++] = '0' + item->match_iter % 10;
+            /* Variable width, minimum two digits -- matches mdxfind.
+             * The previous hardcoded two-digit form emitted x00 for 100,
+             * x01 for 101 and so on, silently mislabelling EVERY iteration
+             * of 100 or more. The gp corpus carries crack files as deep as
+             * x3992000, and mdxfind has always emitted those correctly, so
+             * the two tools disagreed wherever iter >= 100. */
+            char itb[24];
+            int ilen = snprintf(itb, sizeof(itb), "x%02d", item->match_iter);
+            if (ilen > 0 && ilen < (int)sizeof(itb)) {
+                memcpy(outbuf + pos, itb, ilen);
+                pos += ilen;
+            }
         }
         outbuf[pos++] = ' ';
     }
 
     /* Hash (preserve original case); the separator was written above */
+    if (!john_native) {
     memcpy(outbuf + pos, item->hashstr, item->hashlen);
     pos += item->hashlen;
 
@@ -26518,6 +29976,7 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
         memcpy(outbuf + pos, ModeDefaultSalt, ModeDefaultSaltLen);
         pos += ModeDefaultSaltLen;
     }
+}
 
     /* Colon + password (with $HEX[] if needed, $TESTVEC[] verbatim) */
     outbuf[pos++] = ':';
@@ -26955,16 +30414,201 @@ static const char *john_unwrap(const char *line, int linelen,
     const char *hptype = NULL;
     int n = 0, i, hlen, taillen, pos = 0;
 
+    /*
+     * A username in its OWN leading column: John writes several formats as
+     * "<user>:$dynamic_N$<hash>[$<salt>]:<pass>" rather than marking the name
+     * with $U inside the wrapper.  dynamic_1034 (PostgreSQL) and dynamic_1602
+     * are both this shape, and because the line does not START with $dynamic_
+     * the wrapper was never recognised and the format could not be read at all.
+     *
+     * Split the column off, unwrap the remainder, then splice the name back in
+     * as the positional field -- the same slot $U feeds, so the type's verifier
+     * reads it the same way.  The unwrap writes straight into out[] and the
+     * splice is done in place, so this costs no second buffer.
+     *
+     * Recursion is depth 1: the remainder begins with $dynamic_, so it cannot
+     * re-enter this branch.
+     */
+    {
+        const char *c = memchr(line, ':', (size_t)linelen);
+        if (c && c > line &&
+            memchr(line, '$', (size_t)(c - line)) == NULL &&
+            (int)((line + linelen) - (c + 1)) > 9 &&
+            memcmp(c + 1, "$dynamic_", 9) == 0) {
+            int ulen = (int)(c - line);
+            int sublen = 0;
+            const char *ty = john_unwrap(c + 1,
+                                         (int)((line + linelen) - (c + 1)),
+                                         out, outsz, &sublen);
+            const char *lc = NULL;
+            int head, plen, k;
+            if (!ty) return NULL;
+            for (k = 0; k < sublen; k++) if (out[k] == ':') lc = out + k;
+            head = lc ? (int)(lc - out) : sublen;
+            plen = lc ? (sublen - head) : 0;
+            if (head + 1 + ulen + plen >= outsz) return NULL;
+            memmove(out + head + 1 + ulen, out + head, (size_t)plen);
+            out[head] = ':';
+            memcpy(out + head + 1, line, (size_t)ulen);
+            *outlen = head + 1 + ulen + plen;
+            out[*outlen] = 0;
+            return ty;
+        }
+    }
+
+    /*
+     * John wrappers that carry the SAME algorithm we already have, spelled
+     * differently. Each is rewritten into the form the existing type registers,
+     * and each returns "" rather than naming a type: naming one sets item->hint,
+     * and with a hint the hash/salt boundary is taken from the LAST colon, which
+     * mangles any password containing one. Auto-detect resolves them correctly
+     * from the rewritten line.
+     *
+     *   $wbb3$*N*SALT*HASH      -> HASH:SALT                 (WBB3)
+     *   $as400ssha1$HASH$USER   -> $as400$ssha1$*USER*HASH   (AS400SSHA1)
+     *   $as400des$USER*HASH     -> $as400$des$*USER*HASH     (AS400-DES)
+     *   $IPB2$SALT$HASH         -> HASH:SALT                 (IPB2)
+     *   O$USER#HASH             -> HASH:USER                 (ORACLE7)
+     *
+     * The hash part of each carries no ':', so the FIRST colon ends it and
+     * everything after is the password, copied verbatim.
+     */
+    {
+        const char *tail2 = memchr(line, ':', (size_t)linelen);
+        int hplen = tail2 ? (int)(tail2 - line) : linelen;
+        int tlen  = tail2 ? (int)(line + linelen - tail2) : 0;
+        char hp[MAXLINE];
+        int np = 0;
+
+        if (hplen > 0 && hplen < (int)sizeof(hp)) {
+            memcpy(hp, line, (size_t)hplen); hp[hplen] = 0;
+
+            #define UW_EMIT2(A,ALEN,B,BLEN) do {                              \
+                if ((ALEN) + 1 + (BLEN) + tlen >= outsz) return NULL;          \
+                memcpy(out, (A), (size_t)(ALEN)); np = (ALEN);                 \
+                out[np++] = ':';                                               \
+                memcpy(out + np, (B), (size_t)(BLEN)); np += (BLEN);           \
+                if (tlen) { memcpy(out + np, tail2, (size_t)tlen); np += tlen; }\
+                out[np] = 0; *outlen = np; return "";                          \
+            } while (0)
+
+            if (hplen > 8 && !memcmp(hp, "$wbb3$*", 7)) {
+                char *p1 = strchr(hp + 7, '*');            /* after the N field */
+                char *p2 = p1 ? strchr(p1 + 1, '*') : NULL;
+                if (p1 && p2)
+                    UW_EMIT2(p2 + 1, (int)(hp + hplen - p2 - 1), p1 + 1, (int)(p2 - p1 - 1));
+            }
+            if (hplen > 14 && !memcmp(hp, "$as400ssha1$", 12)) {
+                char *d = strchr(hp + 12, '$');
+                if (d) {
+                    int ul = (int)(hp + hplen - d - 1), hl = (int)(d - hp - 12);
+                    if (14 + ul + hl + tlen < outsz) {
+                        np = snprintf(out, (size_t)outsz, "$as400$ssha1$*%.*s*%.*s",
+                                      ul, d + 1, hl, hp + 12);
+                        if (tlen) { memcpy(out + np, tail2, (size_t)tlen); np += tlen; }
+                        out[np] = 0; *outlen = np; return "";
+                    }
+                }
+            }
+            if (hplen > 12 && !memcmp(hp, "$as400des$", 10)) {
+                char *st = strchr(hp + 10, '*');
+                if (st) {
+                    int ul = (int)(st - hp - 10), hl = (int)(hp + hplen - st - 1);
+                    if (12 + ul + hl + tlen < outsz) {
+                        np = snprintf(out, (size_t)outsz, "$as400$des$*%.*s*%.*s",
+                                      ul, hp + 10, hl, st + 1);
+                        if (tlen) { memcpy(out + np, tail2, (size_t)tlen); np += tlen; }
+                        out[np] = 0; *outlen = np; return "";
+                    }
+                }
+            }
+            if (hplen > 8 && !memcmp(hp, "$IPB2$", 6)) {
+                char *d = strchr(hp + 6, '$');
+                if (d)
+                    UW_EMIT2(d + 1, (int)(hp + hplen - d - 1), hp + 6, (int)(d - hp - 6));
+            }
+            /* M$USER#HASH -- John's dominant mscash spelling. The username
+             * may itself contain '#' (John ships M$#january#...), so split at
+             * the LAST one, not the first. */
+            if (hplen > 4 && hp[0] == 'M' && hp[1] == '$') {
+                char *h = NULL, *q;
+                for (q = hp + 2; *q; q++) if (*q == '#') h = q;
+                if (h && h > hp + 2)
+                    UW_EMIT2(h + 1, (int)(hp + hplen - h - 1), hp + 2, (int)(h - hp - 2));
+            }
+            if (hplen > 4 && hp[0] == 'O' && hp[1] == '$') {
+                char *h = strchr(hp + 2, '#');
+                if (h)
+                    UW_EMIT2(h + 1, (int)(hp + hplen - h - 1), hp + 2, (int)(h - hp - 2));
+            }
+            #undef UW_EMIT2
+        }
+    }
+
+    /*
+     * $NT$ and $LM$ are John's canonical wrappers for the two Windows
+     * primitives, and they appear in real potfiles: a harvest of 1,003,754
+     * lines carried 1,103 of them, every one a correct crack that hashpipe
+     * rejected because the wrapper kept the digest from reaching the length
+     * filter as 32 hex characters.
+     *
+     * Same shape as $dynamic_N$ -- strip the wrapper, hand back the bare
+     * line, and name the type so the caller makes it the hint. Both digests
+     * are plain hex with no salt, so the hash/salt boundary question the
+     * dynamic path has to answer does not arise here.
+     *
+     * The tail is copied verbatim. These passwords very often contain ':'
+     * (the harvested ones are timestamp-like, "9:13:2 33:1:7"), and the
+     * existing parser already keeps everything after the first colon as the
+     * password and re-encodes it as $HEX[] on output.
+     */
+    if (linelen > 4 && (!memcmp(line, "$NT$", 4) || !memcmp(line, "$LM$", 4))) {
+        /*
+         * Return "" -- NOT the type name. Naming a type makes the caller set
+         * item->hint, and with a hint parse_line takes the hash/salt boundary
+         * from the LAST colon, so a password containing ':' (which is the norm
+         * for these lines) lands partly in the hash field. That reported the
+         * harvested vector as NTLMH where the same digest unwrapped by hand
+         * reports NTLMx01. The bare digest needs no steering: auto-detect
+         * resolves it correctly, and the caller's "if (*jt)" guard exists
+         * precisely so an unwrapper can decline to name a type.
+         */
+        const char *ty = "";
+        int rest = linelen - 4;
+        if (rest >= outsz) return NULL;
+        memcpy(out, line + 4, (size_t)rest);
+        out[rest] = 0;
+        *outlen = rest;
+        return ty;
+    }
+
     if (linelen < 12 || memcmp(line, "$dynamic_", 9) != 0) return NULL;
     p = line + 9;
     for (q = p; q < line + linelen && isdigit((unsigned char)*q); q++)
         n = n * 10 + (*q - '0');
     if (q == p || q >= line + linelen || *q != '$') return NULL;
-    if (n >= 1000) return NULL;          /* user-defined; not ours to guess */
     if (snprintf(fmt, sizeof(fmt), "dynamic_%d", n) >= (int)sizeof(fmt)) return NULL;
 
     for (i = 0; i < JOHN_MAP_COUNT; i++)
         if (!strcmp(JohnMap[i].john, fmt)) { hptype = JohnMap[i].hptype; break; }
+    if (!hptype) {
+        /*
+         * Config-defined dynamics -- John reports these as "UserFormat" because
+         * it read them from dynamic.conf rather than compiling them in, so the
+         * NUMBERING belongs to that file and not to John.  They are consulted
+         * here, on input, and nowhere else.
+         *
+         * That asymmetry is deliberate.  Reading is self-correcting: this only
+         * rewrites the line into a candidate shape and the verify still has to
+         * reproduce the digest, so a machine whose dynamic.conf numbers things
+         * differently just fails to verify -- exactly what it did before this
+         * table existed.  Emitting has no such safety net, so john_label_for()
+         * must keep using JohnMap[] alone or it would stamp a John name on a
+         * crack on the strength of a local numbering.
+         */
+        for (i = 0; i < JOHN_MAP_LOCAL_COUNT; i++)
+            if (!strcmp(JohnMapLocal[i].john, fmt)) { hptype = JohnMapLocal[i].hptype; break; }
+    }
     if (!hptype) return NULL;
 
     /* strip the xNN suffix to find the type, and with it the hash width */
@@ -26973,7 +30617,14 @@ static const char *john_unwrap(const char *line, int linelen,
       while (xp > base && isdigit((unsigned char)*xp)) xp--;
       if (*xp == 'x' && xp > base) *xp = 0; }
     ht = find_type_by_name(base);
-    if (!ht || ht->hashlen <= 0) return NULL;
+        /* A verify type has hashlen 0 and parses its own hashstr; rejecting it
+         * here dropped every John format whose construction happens to be
+         * implemented as one -- dynamic_15, 35 and 36 all map to verify types
+         * (MD5USERMD5PASSSALT, SHA1UCUSERPASS, SHA1USERCOLONPASS) and so were
+         * refused before any field was even looked at. The digest-width check
+         * below is already conditional on hashlen > 0, so it simply does not
+         * apply to them. */
+        if (!ht) return NULL;
 
     /*
      * Find the hash/salt boundary from the DATA, not from the declared type:
@@ -27010,22 +30661,86 @@ static const char *john_unwrap(const char *line, int linelen,
         for (r = tail; r < line + linelen; r++) if (*r == ':') lc = r;
         { const char *s = tail + 1;
           int slen = (int)((lc ? lc : line + linelen) - s);
+          char fld[MAXLINE];
+          int flen = 0;
           if (slen < 0) return NULL;
-          if (slen >= 5 && memcmp(s, "$HEX$", 5) == 0) {
+          /*
+           * Decode "$HEX$" FIRST.  John uses it to escape the ':' and whitespace
+           * that would collide with our own line format, and it may wrap the "$U"
+           * user token itself: dynamic_35 ships both "$$UU1" and the identical
+           * "$HEX$24555531".  Stripping the marker before decoding misses the
+           * second form.
+           */
+          /* The salt pointer already skipped the separator, so a hex-wrapped
+           * field arrives as "HEX$..." rather than "$HEX$...". Accept both. */
+          if ((slen >= 5 && memcmp(s, "$HEX$", 5) == 0) ||
+              (slen >= 4 && memcmp(s, "HEX$", 4) == 0)) {
+              int hoff = (s[0] == '$') ? 5 : 4;
+
               int j;
-              if ((slen - 5) & 1) return NULL;
-              if (pos + 1 + (slen - 5) / 2 >= outsz) return NULL;
-              out[pos++] = ':';
-              for (j = 5; j < slen; j += 2) {
+              if ((slen - hoff) & 1) return NULL;
+              if ((slen - hoff) / 2 >= (int)sizeof(fld)) return NULL;
+              for (j = hoff; j < slen; j += 2) {
                   int hi = hexval(s[j]), lo = hexval(s[j + 1]);
                   if (hi < 0 || lo < 0) return NULL;
-                  out[pos++] = (char)((hi << 4) | lo);
+                  fld[flen++] = (char)((hi << 4) | lo);
               }
           } else {
-              if (pos + 1 + slen >= outsz) return NULL;
-              out[pos++] = ':';
-              memcpy(out + pos, s, slen); pos += slen;
+              if (slen >= (int)sizeof(fld)) return NULL;
+              memcpy(fld, s, (size_t)slen); flen = slen;
           }
+          /*
+           * "$U" marks the field as a USERNAME rather than a salt.  Strip the
+           * marker and pass the name through in the same positional field:
+           * hashpipe has no separate user column on input, and the verifier for
+           * the type decides how to read what is there -- SHA1UCUSERPASS and
+           * MANGOS read it as a user, MD5SALTPASS as a salt.  Keeping the marker
+           * made every $U format arrive with a salt of "$Uadministrator" and fail
+           * as a confident unresolved, the same failure the salt-truncation rule
+           * above exists to prevent.
+           */
+          /*
+           * John also marks a SECOND SALT with "$$2": dynamic_16 ships
+           * <hash>$<salt>$$2<salt2>. It takes the same positional slot as a
+           * username and the verifier for the type decides how to read it,
+           * so both markers follow the same path.
+           *
+           * The marker may also FOLLOW another field: dynamic_15 ships
+           * <hash>$<salt>$$U<user>, a salt AND a user. Handling only a leading
+           * "$U" left the username inside the salt and the format could never
+           * verify. tools/john_map_gen.sh 1.3 carries the mirrored change.
+           */
+          {
+              char *uu = NULL;
+              int k2;
+              for (k2 = 0; k2 + 2 < flen; k2++)
+                  if (fld[k2] == '$' && fld[k2+1] == '$' &&
+                      (fld[k2+2] == 'U' || fld[k2+2] == '2'))
+                      { uu = fld + k2; break; }
+              if (uu) {
+                  int slen2 = (int)(uu - fld);
+                  int ulen  = flen - slen2 - 3;
+                  if (ulen < 0 || pos + 2 + slen2 + ulen >= outsz) return NULL;
+                  out[pos++] = ':';
+                  memcpy(out + pos, fld, (size_t)slen2); pos += slen2;
+                  out[pos++] = ':';
+                  memcpy(out + pos, uu + 3, (size_t)ulen); pos += ulen;
+                  if (lc) {
+                      int plen = (int)(line + linelen - lc);
+                      if (pos + plen >= outsz) return NULL;
+                      memcpy(out + pos, lc, plen); pos += plen;
+                  }
+                  out[pos] = 0; *outlen = pos;
+                  return hptype ? hptype : "";
+              }
+          }
+          if (flen >= 2 && fld[0] == '$' && fld[1] == 'U') {
+              memmove(fld, fld + 2, (size_t)(flen - 2));
+              flen -= 2;
+          }
+          if (pos + 1 + flen >= outsz) return NULL;
+          out[pos++] = ':';
+          memcpy(out + pos, fld, (size_t)flen); pos += flen;
           if (lc) {
               int plen = (int)(line + linelen - lc);
               if (pos + plen >= outsz) return NULL;
@@ -27101,6 +30816,7 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     type_end = NULL;
     item->hint = NULL;
     item->hint_iter = 0;
+    item->walk_deferred = 0;
 
     {
         const char *sp = memchr(p, ' ', linelen);
@@ -27148,6 +30864,12 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     }
 
     /* Now p points to hash[:salt]:password portion */
+
+    /* Salt recovered from a '$' inside the hash field. Held separately because
+     * the colon logic below unconditionally rewrites item->salt from the colon
+     * count, which would otherwise discard it. */
+    const char *_dollar_salt = NULL;
+    int _dollar_saltlen = 0;
 
     /* Find colons */
     colon1 = NULL;
@@ -27394,12 +31116,14 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
         }
     }
     /* Fallback: if -m selected exactly one verify type, use that */
-    if (!item->hint && ModeCount > 0) {
+    int _multi_verify = (ModeCount == 0);
+    if (ModeCount > 0) {
         int _m, _nv = 0, _vi = -1;
         for (_m = 0; _m < ModeCount; _m++)
             if (Hashtypes[ModeList[_m]].verify) { _nv++; _vi = _m; }
-        if (_nv == 1)
+        if (_nv == 1 && !item->hint)
             item->hint = &Hashtypes[ModeList[_vi]];
+        _multi_verify = (_nv >= 2);
     }
 
     /* Non-hex verify types skip hex validation.
@@ -27418,6 +31142,101 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
         /* Validate hash is hex and even length */
         if (item->hashlen < 2 || (item->hashlen & 1) ||
             !is_hex(hashstart, item->hashlen)) {
+            /*
+             * '$' inside the hash field. Several John formats separate fields
+             * there with '$' rather than ':' -- leet is <salt>$<hash>, md5ns is
+             * <user>$<hash>, ipb2 after its wrapper is <salt>$<hash>. The field
+             * is not hex as a whole, but one side of a '$' is.
+             *
+             * Like ':', a '$' also occurs inside salts and passwords, so no one
+             * position can be assumed: walk them and take the first split whose
+             * other side is an even-length hex run. Both orders are tried, since
+             * the hash is on the right in leet and md5ns but not in every shape.
+             * A split yielding no valid digest is not taken, and one yielding the
+             * wrong digest still has to verify, so this cannot mis-attribute --
+             * it only lets the line be considered at all.
+             */
+            int _is_wrapped;
+            /*
+             * NOT for structured/MCF hashes. A field starting with '$', '{' or
+             * '(' is a wrapper format owned by a verify type -- $6$, $P$, $S$,
+             * $argon2id$, {SSHA} and so on -- and every one of them contains
+             * '$' by construction. Splitting those here hijacked them from the
+             * verify path and cost 49 formats: phpass, sha512crypt, Argon2,
+             * Drupal7, RACF, mscash2, sapb, sapg and the rest. The separator
+             * walk is only for BARE fields, where John puts the salt or user
+             * beside the digest with no wrapper: leet is <salt>$<hash>, md5ns
+             * is <user>$<hash>.
+             */
+            _is_wrapped = 0;
+            if (hashstart[0] == '{' || hashstart[0] == '(') {
+                _is_wrapped = 1;
+            } else if (hashstart[0] == '$') {
+                /* "$<name>$" is a wrapper; "$$$$" is not. Only a well-formed
+                 * wrapper is excluded, so the all-'$' salts genbad-style tests
+                 * generate still reach the walk. */
+                int _w;
+                for (_w = 1; _w < item->hashlen && hashstart[_w] != '$'; _w++)
+                    if (!isalnum((unsigned char)hashstart[_w]) &&
+                        hashstart[_w] != '_' && hashstart[_w] != '-') break;
+                if (_w > 1 && _w < item->hashlen && hashstart[_w] == '$') _is_wrapped = 1;
+            }
+            if (_multi_verify && !item->hint && !_is_wrapped &&
+                (memchr(hashstart, '$', (size_t)item->hashlen) ||
+                 memchr(hashstart, '#', (size_t)item->hashlen) ||
+                 memchr(hashstart, '*', (size_t)item->hashlen)))
+                item->walk_deferred = 1;
+            if (!_is_wrapped && !(_multi_verify && !item->hint) &&
+                (memchr(hashstart, '$', (size_t)item->hashlen) ||
+                 memchr(hashstart, '#', (size_t)item->hashlen) ||
+                 memchr(hashstart, '*', (size_t)item->hashlen))) {
+                int _dk, _took = 0;
+                for (_dk = 0; _dk < item->hashlen && !_took; _dk++) {
+                    int _ll, _rl;
+                    /* John uses '#' (oracle, HMAC message#digest) and '*'
+                     * (as400) as field separators inside the hash field just as
+                     * it uses '$'. All three get the same treatment. */
+                    if (hashstart[_dk] != '$' && hashstart[_dk] != '#' &&
+                        hashstart[_dk] != '*') continue;
+                    _ll = _dk;
+                    _rl = item->hashlen - _dk - 1;
+                    /*
+                     * Both the hash and the salt must be expressed as offsets
+                     * into item->line, the batch-owned copy -- NOT as pointers
+                     * into `line`, which is a transient buffer reused by the
+                     * next line in the same batch. Pointing the salt at `line`
+                     * verified correctly one line at a time and then dropped
+                     * 6 of 9 identical lines when they arrived as a batch,
+                     * because an earlier item's salt had been overwritten by a
+                     * later line before the item was ever verified.
+                     */
+                    if (_rl >= 2 && !(_rl & 1) && is_hex(hashstart + _dk + 1, _rl)) {
+                        int _hoff = (hashstart + _dk + 1) - line;     /* right = hash */
+                        int _soff = hashstart - line;                 /* left  = salt */
+                        item->hashstr = item->line + _hoff;
+                        item->hashlen = _rl;
+                        item->salt    = item->line + _soff;
+                        item->saltlen = _ll;
+                        _took = 1;
+                    } else if (_ll >= 2 && !(_ll & 1) && is_hex(hashstart, _ll)) {
+                        int _hoff = hashstart - line;                 /* left  = hash */
+                        int _soff = (hashstart + _dk + 1) - line;     /* right = salt */
+                        item->hashstr = item->line + _hoff;
+                        item->hashlen = _ll;
+                        item->salt    = item->line + _soff;
+                        item->saltlen = _rl;
+                        _took = 1;
+                    }
+                }
+                if (_took) {
+                    item->hash_is_uc = has_uppercase_hex(item->hashstr, item->hashlen);
+                    _dollar_salt    = item->salt;
+                    _dollar_saltlen = item->saltlen;
+                    goto hash_parsed;
+                }
+            }
+
+
             /* Non-hex: accept if any selected/registered mode is a verify type */
             int _m, _found = 0;
             for (_m = 0; _m < ModeCount; _m++)
@@ -27521,6 +31340,10 @@ hash_parsed:
         item->saltlen = 0;
         item->password = item->rest;
         item->passlen = item->restlen;
+        if (_dollar_salt) {           /* salt came from '$', not from a colon */
+            item->salt = (char *)_dollar_salt;
+            item->saltlen = _dollar_saltlen;
+        }
     } else if (ncolons == 2) {
         /* hash:salt:password — but might be hash:password_with_colon */
         item->salt = item->rest;
@@ -27788,6 +31611,106 @@ static int parse_mode_spec(const char *spec)
             (p[4] == ',' || p[4] == '\0')) {
             ModeAuto = 1;
             p += 4;
+            continue;
+        }
+
+        /*
+         * A bare TYPE NAME, with or without its xNN iteration suffix.
+         *
+         * mdxfind's -M has always taken names; hashpipe's -m took only eN and
+         * hashcat numbers, which made it unusable by any caller that already knows
+         * the type as a NAME. cmiyc-intake is exactly that caller: it reads the type
+         * from the solution file's extension (MD5x01, USER_BWTDTx01), then threw it
+         * away and let hashpipe auto-identify across every registered type. For a
+         * 32-hex digest with a short salt that shape matches many candidates,
+         * including expensive KDFs -- measured at 23.9s for 20 lines that take 0.007s
+         * when the type is named.
+         *
+         * Tried FIRST and only accepted on a successful lookup, so eN, u<id> and bare
+         * hashcat numbers all still fall through to their own branches below.
+         */
+        {
+            const char *ns = p;
+            char nbuf[80];
+            int nl = 0;
+            while (p[nl] && p[nl] != ',') nl++;
+            if (nl > 0 && nl < (int)sizeof(nbuf)) {
+                struct hashtype *nt;
+                memcpy(nbuf, ns, (size_t)nl);
+                nbuf[nl] = '\0';
+                /* strip a trailing xNN: the iteration count is a -i concern, not a
+                 * type identity, and the extension carries it. */
+                { char *xp = nbuf + strlen(nbuf) - 1;
+                  while (xp > nbuf && isdigit((unsigned char)*xp)) xp--;
+                  if (*xp == 'x' && xp > nbuf) *xp = '\0'; }
+                nt = find_type_by_name(nbuf);
+                if (nt) {
+                    if (count >= cap) {
+                        int *nl2;
+                        cap *= 2;
+                        nl2 = (int *)realloc(list, cap * sizeof(int));
+                        if (!nl2) { perror("realloc"); free(list); return -1; }
+                        list = nl2;
+                    }
+                    list[count++] = (int)(nt - Hashtypes);
+                    p += nl;
+                    continue;
+                }
+            }
+        }
+
+        /* USER_<name>[xNN] -- a user-defined type named the way it is REPORTED, which
+         * is the form a solution file's extension carries. Stored verbatim and
+         * resolved against the display name in main, beside the u<id> form. */
+        if (strncasecmp(p, "USER_", 5) == 0) {
+            const char *ns = p;
+            int nl = 0;
+            while (p[nl] && p[nl] != ',') nl++;
+            if (nl <= 0 || nl >= (int)sizeof(UserPrefIds[0])) {
+                fprintf(stderr, "hashpipe: -m: bad USER_ name\n");
+                free(list); return -1;
+            }
+            if (UserPrefIdCount >= USERPREF_MAX) {
+                fprintf(stderr, "hashpipe: -m: too many user entries (max %d)\n",
+                    USERPREF_MAX);
+                free(list); return -1;
+            }
+            memcpy(UserPrefIds[UserPrefIdCount], ns, (size_t)nl);
+            UserPrefIds[UserPrefIdCount][nl] = '\0';
+            UserPrefIdCount++;
+            p += nl;
+            continue;
+        }
+
+        /* u<id> = user-defined type (ordering hint; see UserPrefIds above) */
+        if ((*p == 'u' || *p == 'U') &&
+            strncasecmp(p, "USER_", 5) != 0) {
+            const char *idstart;
+            int idlen;
+            p++;
+            idstart = p;
+            while (*p && *p != ',') p++;
+            idlen = (int)(p - idstart);
+            if (idlen <= 0) {
+                fprintf(stderr, "hashpipe: -m: expected an id after 'u'\n");
+                free(list);
+                return -1;
+            }
+            if (idlen >= (int)sizeof(UserPrefIds[0])) {
+                fprintf(stderr, "hashpipe: -m: user id too long (max %d)\n",
+                    (int)sizeof(UserPrefIds[0]) - 1);
+                free(list);
+                return -1;
+            }
+            if (UserPrefIdCount >= USERPREF_MAX) {
+                fprintf(stderr, "hashpipe: -m: too many u<id> entries (max %d)\n",
+                    USERPREF_MAX);
+                free(list);
+                return -1;
+            }
+            memcpy(UserPrefIds[UserPrefIdCount], idstart, (size_t)idlen);
+            UserPrefIds[UserPrefIdCount][idlen] = '\0';
+            UserPrefIdCount++;
             continue;
         }
 
@@ -28068,7 +31991,8 @@ static void usage(int brief)
         "  -i N   Max iteration count for hard pass (default: 128)\n"
         "  -q N   Iteration step size (reserved, default: 128)\n"
         "  -m S   Only try types in S (e.g., -m e1,e8,1000); add 'auto' to fallback\n"
-        "         Bare numbers are hashcat modes; eN selects internal index\n"
+        "         Bare numbers are hashcat modes; eN selects internal index\n"        "         u<id> names a user-defined type: ORDERING ONLY -- it emits that\n"
+        "         type first. User types are always tried; -m cannot restrict them\n"
         "  -o F   Append verified results to file (default: stdout)\n"
         "  -O F   Write verified results to file (truncate)\n"
         "  -e F   Append unresolved lines to file (default: stderr)\n"
@@ -28240,11 +32164,24 @@ static int userdef_tag_is_known(const char *name)
     return 0;
 }
 
+/* Was this user-type index named by -m u<id>?  Used to skip it on the second
+ * pass, so a preferred type is emitted once, first. */
+static int user_is_preferred(int idx)
+{
+    int i;
+    for (i = 0; i < UserPrefCount; i++)
+        if (UserPref[i] == idx) return 1;
+    return 0;
+}
+
 static int emit_user_matches(struct workitem *item, int *outpos)
 {
     int nuser = userdef_count();
+    const char *fdig, *fsalt;   /* digest and salt located by a stored form */
+    int fdiglen, fsaltlen;
     int matched = 0;
     int u;
+    int uu;
     const unsigned char *cand;
     int candlen;
     const char *rest_p = NULL;      /* raw tail, retained for the salt split */
@@ -28297,14 +32234,41 @@ static int emit_user_matches(struct workitem *item, int *outpos)
       else          { cand = (const unsigned char *)rp; candlen = rlen; }
     }
 
-    for (u = 0; u < nuser; u++) {
+    /* -m u<id> types first, then everything else exactly once. Ordering
+     * only: every type is still tried, and every match still emitted. */
+    for (uu = 0; uu < UserPrefCount + nuser; uu++) {
+        if (uu < UserPrefCount) {
+            u = UserPref[uu];
+        } else {
+            u = uu - UserPrefCount;
+            if (user_is_preferred(u)) continue;   /* emitted on pass 1 */
+        }
         struct userdef_type *ut = userdef_get_by_index(u);
         hx_val r;
         int j, eq;
 
         if (!ut || !ut->prog) continue;
-        if (ut->diglen_hex != item->hashlen) continue;   /* hashlen filter */
         if (!UserVMs[u].prog) continue;                  /* init failed    */
+
+        /*
+         * Stored form. Without one the whole field IS the digest, which is the
+         * historical assumption. With one, the field is cut per the declaration
+         * and the digest is only a part of it -- KoreLogic's bwtdt stores an
+         * 8-hex salt followed by its 32-hex digest in a single 40-character
+         * field, so the plain hashlen filter below would reject it (32 != 40)
+         * before the type was ever tried.
+         */
+        fdig = item->hashstr; fdiglen = item->hashlen;
+        fsalt = NULL; fsaltlen = 0;
+        if (ut->form.npieces) {
+            if (!userdef_form_split(&ut->form, item->hashstr, item->hashlen,
+                                    &fdig, &fdiglen, &fsalt, &fsaltlen,
+                                    NULL, NULL))
+                continue;                /* field does not match this form */
+            if (fdiglen != ut->diglen_hex) continue;
+        } else {
+            if (ut->diglen_hex != item->hashlen) continue;   /* hashlen filter */
+        }
 
         /* Salted types: split the retained tail into salt and password. The
          * salt was previously passed as "" for every user type, so any
@@ -28312,7 +32276,12 @@ static int emit_user_matches(struct workitem *item, int *outpos)
          * computed over an empty salt and never matched. */
         vsalt = ""; vsaltlen = 0;
         vcand = cand; vcandlen = candlen;
-        if (ut->slot_mask & USERDEF_SLOT_SALT) {
+        if (fsalt) {
+            /* The form already located the salt inside the hash field, so the
+             * tail is the password in full -- do NOT also split it on a colon,
+             * which would eat a password that contains one. */
+            vsalt = fsalt; vsaltlen = fsaltlen;
+        } else if (ut->slot_mask & USERDEF_SLOT_SALT) {
             const char *colon = memchr(rest_p, ':', (size_t)rest_l);
             int dec2;
             if (!colon) continue;            /* no salt field present */
@@ -28328,14 +32297,14 @@ static int emit_user_matches(struct workitem *item, int *outpos)
 
         r = hx_vm_run(&UserVMs[u], (const char *)vcand, vcandlen,
                       vsalt, vsaltlen, "", 0, "", 0, "", 0);
-        if (!r.data || r.len != item->hashlen) continue;
+        if (!r.data || r.len != fdiglen) continue;
 
         /* The hx VM emits lowercase hex (ROLE_HEX); the input may be upper-
          * case, so compare case-insensitively over the hex digest length. */
         eq = 1;
-        for (j = 0; j < item->hashlen; j++) {
+        for (j = 0; j < fdiglen; j++) {
             if (tolower((unsigned char)r.data[j]) !=
-                tolower((unsigned char)item->hashstr[j])) { eq = 0; break; }
+                tolower((unsigned char)fdig[j])) { eq = 0; break; }
         }
         if (!eq) continue;
 
@@ -28354,7 +32323,22 @@ static int emit_user_matches(struct workitem *item, int *outpos)
             synth.name  = ut->dispname;     /* "USER_<name>" */
             item->match_type = &synth;
             item->match_iter = 1;           /* x01 -- one hx evaluation */
-            if (ut->slot_mask & USERDEF_SLOT_SALT) {
+            if (fsalt) {
+                /*
+                 * A stored form put the salt INSIDE the hash field, which is
+                 * printed in full, so printing it again as its own column would
+                 * duplicate it -- and skipping over it in the tail, as the salted
+                 * branch below does, truncates the plaintext by the salt width
+                 * plus one. Report the stored form verbatim followed by the whole
+                 * tail, so the line emitted is the shape that was read and feeds
+                 * straight back in.
+                 */
+                synth.flags      = 0;
+                item->salt       = NULL;
+                item->saltlen    = 0;
+                item->password   = item->rest ? item->rest : save_pass;
+                item->passlen    = item->rest ? item->restlen : save_passlen;
+            } else if (ut->slot_mask & USERDEF_SLOT_SALT) {
                 /* Report hash:salt:password, matching what mdxfind emits for
                  * a salted user type. Feeding the unsplit tail here printed
                  * the salt as part of the plaintext, and because that tail
@@ -28791,9 +32775,38 @@ int main(int argc, char **argv)
     if (modespec) {
         int mc = parse_mode_spec(modespec);
         if (mc < 0) exit(1);
-        if (mc == 0 && !ModeAuto) {
+        if (mc == 0 && !ModeAuto && UserPrefIdCount == 0) {
             fprintf(stderr, "hashpipe: -m: no types selected\n");
             exit(1);
+        }
+        /* Resolve -m u<id> now: userdef_load() ran above, and struct
+         * userdef_type is complete here (unlike in parse_mode_spec). */
+        {
+            int k, i, n = userdef_count();
+            for (k = 0; k < UserPrefIdCount; k++) {
+                int found = -1;
+                for (i = 0; i < n; i++) {
+                    struct userdef_type *ut = userdef_get_by_index(i);
+                    if (!ut) continue;
+                    if (strcmp(ut->idstr, UserPrefIds[k]) == 0) { found = i; break; }
+                    {   /* USER_<name>, with or without its xNN suffix */
+                        char nb[160];
+                        char *xp;
+                        snprintf(nb, sizeof(nb), "%s", UserPrefIds[k]);
+                        xp = nb + strlen(nb) - 1;
+                        while (xp > nb && isdigit((unsigned char)*xp)) xp--;
+                        if (*xp == 'x' && xp > nb) *xp = '\0';
+                        if (strcasecmp(nb, ut->dispname) == 0) { found = i; break; }
+                    }
+                }
+                if (found < 0) {
+                    const char *why = userdef_skip_reason(UserPrefIds[k]);
+                    fprintf(stderr, "hashpipe: -m: unknown user-defined type u%s%s%s\n",
+                        UserPrefIds[k], why ? ": " : "", why ? why : "");
+                    exit(1);
+                }
+                UserPref[UserPrefCount++] = found;
+            }
         }
     }
 
