@@ -556,6 +556,26 @@ make deps      # pull and build all dependencies from source
 make hashpipe
 ```
 
+Three compression libraries -- zlib, liblzma and libbzip2 -- are taken from the
+system rather than built by `make deps`, so install their development packages
+first.  They are needed by the 7ZIP (e1000) verifier:
+
+```bash
+sudo apt install zlib1g-dev liblzma-dev libbz2-dev     # Debian / Ubuntu
+sudo dnf install zlib-devel xz-devel bzip2-devel       # Fedora / RHEL
+sudo port install zlib xz bzip2                        # macOS / MacPorts
+```
+
+Without the headers the build stops at `fatal error: lzma.h: No such file or
+directory`.  The build prefers each library's static archive where one is
+present and falls back to linking it dynamically, so no manual setup is needed
+either way.  To force one or the other:
+
+```bash
+make hashpipe COMPRESS='-lz -llzma -lbz2'                  # dynamic
+make hashpipe COMPRESS='/path/libz.a /path/liblzma.a /path/libbz2.a'
+```
+
 `make deps` clones each dependency from its authoritative GitHub repository, pins it to a verified commit hash, and builds a static library.  This requires git, a C compiler, make, and autotools (for libmhash and libJudy).  Built artifacts are placed in the hashpipe source tree.
 
 If you already have the required static libraries (from a previous `make deps` or a manual build), `make hashpipe` is sufficient.
@@ -596,6 +616,12 @@ hashpipe requires the following static libraries:
 - Argon2 (`argon2/argon2.a`)
 - libJudy (`libJudy.a`)
 - yescrypt (`yescrypt/*.o`)
+
+and these three from the system, which `make deps` does not build:
+
+- zlib (`libz.a` or `-lz`)
+- liblzma (`liblzma.a` or `-llzma`)
+- libbzip2 (`libbz2.a` or `-lbz2`)
 
 ### Supported Platforms
 

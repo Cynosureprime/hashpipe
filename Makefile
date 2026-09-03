@@ -8,6 +8,8 @@ TOPDIR := $(shell pwd)
 # ---- Platform detection ----
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
+# Debian/Ubuntu keep system archives under /usr/lib/<triplet>; empty elsewhere.
+MULTIARCH := $(shell $(CC) -print-multiarch 2>/dev/null)
 
 # Architecture defines
 ifeq ($(UNAME_M),x86_64)
@@ -27,21 +29,22 @@ endif
 # OS-specific flags
 ifeq ($(UNAME_S),Darwin)
   OSOPT = -DMACOSX
-  ICONV = /opt/local/lib/libiconv.a
-  COMPRESS = /opt/local/lib/libz.a /opt/local/lib/liblzma.a /opt/local/lib/libbz2.a
+  LIBSEARCH = . /opt/local/lib /usr/local/lib /usr/lib
+  ICONVNAME = iconv
   LDEXTRA =
   INCEXTRA = -I/opt/local/include
 else ifeq ($(UNAME_S),FreeBSD)
   OSOPT =
-  ICONV = /usr/local/lib/libiconv.a
-  COMPRESS = libz.a /usr/lib/liblzma.a /usr/lib/libbz2.a
+  LIBSEARCH = . /usr/local/lib /usr/lib
+  ICONVNAME = iconv
   LDEXTRA = -Wl,--allow-multiple-definition
   INCEXTRA = -I/usr/local/include
 else
   # Linux and others
   OSOPT =
-  ICONV =
-  COMPRESS = libz.a liblzma.a libbz2.a
+  # glibc provides iconv itself, so no separate library is needed.
+  LIBSEARCH = . /usr/lib/$(MULTIARCH) /usr/local/lib /usr/lib
+  ICONVNAME =
   LDEXTRA = -ldl
   INCEXTRA = -I/usr/local/include
 endif
@@ -61,9 +64,25 @@ LDFLAGS = -pthread -O3
 # verifier can only test AES padding, which at a small pad size is a few bits
 # wide and confirms wrong passwords.
 #
-# These are named as explicit .a paths rather than -lz -llzma -lbz2 ON PURPOSE:
-# -l would prefer the shared object and give the binary a runtime dependency.
-# Every other library here is static for the same reason.
+# Static is PREFERRED, not required. On the release build host these archives
+# are staged in the tree, so the shipped binary carries no runtime dependency
+# on them -- that is why they are named as paths rather than -lz -llzma -lbz2,
+# since -l would prefer the shared object.
+#
+# A fresh clone has none of them staged, and zlib/liblzma/libbzip2 are system
+# libraries that `make deps` deliberately does not build. So each is resolved
+# in turn: an archive in the source tree, then one in the system library
+# directories, and failing both the ordinary -l form. That makes a clean clone
+# build with no manual setup while keeping the fully static release link.
+#
+# Override explicitly if you want to force one or the other:
+#   make COMPRESS='-lz -llzma -lbz2'                    # dynamic
+#   make COMPRESS='/path/to/libz.a /path/to/liblzma.a /path/to/libbz2.a'
+#   make ICONV=-liconv
+pick_lib = $(firstword $(wildcard $(addsuffix /$(1),$(LIBSEARCH))) -l$(2))
+
+COMPRESS = $(call pick_lib,libz.a,z) $(call pick_lib,liblzma.a,lzma) $(call pick_lib,libbz2.a,bz2)
+ICONV = $(if $(ICONVNAME),$(call pick_lib,lib$(ICONVNAME).a,$(ICONVNAME)))
 LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
        gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a \
        argon2/argon2.a libJudy.a $(ICONV) $(COMPRESS)
