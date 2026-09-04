@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.191 2026/09/04 20:11:50 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.192 2026/09/04 22:05:26 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.192  2026/09/04 22:05:26  dlr
+ * Make -c reject a mislabelled line on every path, not only the hinted one. The hot list is a cross-line cache carried between batches, and three hot paths accepted a match and returned before the label check ran, so one MD5x02 line that verified let a following MD5x03 line over an md5-1 digest come back as MD5x01 -- while that same line alone was correctly refused. Separately, five type scans that exist to identify an UNLABELLED pair also answered for types the label never named, needing no batch at all: a bcrypt digest labelled SHA512CRYPT was re-emitted as BCRYPT. Both are the mode silently correcting a wrong label instead of rejecting it. hot_label_ok now requires a cache hit to agree with the label on type and depth, and the scans skip any type other than the hinted one under -c. Neither -m nor single-line input isolated either defect. Corpus unchanged at 7234771 verified, 0 unresolved, no slowdown.
+ *
  * Revision 1.191  2026/09/04 20:11:50  dlr
  * Make -c honour the DEPTH in a label, not just the type. Two independent paths ignored it, so a line whose xNN was wrong verified anyway and was re-emitted carrying the depth actually found, the mode silently CORRECTING a wrong label instead of rejecting it. Reported by Waffle against MD5x05 on an md5 to the one hash, which came back as MD5x01. First path: the hinted easy pass tests the BASE depth and returns on a match without consulting hint_iter, so any label naming a depth other than the base was never checked against. It now skips the base checks when the label asks for a different depth, scoped to those checks alone; guarding the whole block instead also skipped the depth-specific check below it and rejected correctly labelled lines. Second path, and the larger one: a verify type walks the iteration chain inside its own verify function and reports where it landed in verify_iter, which nothing compared against the label. Measured with a corpus of real lines relabelled to a depth they are not, 216 lines across 105 types were accepted with a wrong depth, failing in BOTH directions, and 104 of those types were HTV. Fixed with a single check in hash_verify, the wrapper every acceptance site calls, rather than 104 per type edits: WS->expect_iter carries the labelled depth and is zero outside -c, so no other mode changes. hash_verify also now clears verify_iter before dispatch, since not every verify function assigns it and a stale value could be read as this call answer. Both of its return paths are checked; patching only one left two types leaking through the $HEX salt decode branch. New regress/testhash.wrongiter and gen_wrongiter.py generate the wrong label corpus. testhash.orig cannot test this: every label in it is correct, so it proves only that good input is accepted, and the whole value of -c is the refusing half. Verified: 7234771 of 7234771 accepted with correct labels in 98 seconds, 1545 of 1545 rejected with wrong ones, self-test 1026 passed 0 failed 2 skipped, and the identify path unchanged. Note -c rejects a comment line, since a leading hash is not a valid label; that needs documenting.
  *
@@ -232,7 +235,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.191 20
  * Fix the composed-path raw-iteration test, which decided iteration from the INNERMOST chain step instead of the outermost. Every RAW type in the catalogue is an outer hash over an inner raw digest, so chain[0] is raw while the outer step emits hex; testing chain[0] made all of them iterate on binary and diverge from mdxfind past x01. No chain currently ends in a raw step so the test is false throughout today, but it stays a test rather than a constant so a future chain that does end raw keeps working. With mdxfind.c 1.549 the two tools now agree across the whole RAW family: 27 of 27 generated lines at three depths for nine types.
  *
  * Revision 1.120  2026/08/30 13:24:08  dlr
- * Fix e447 SHA256RAWSALTPASS, which hashpipe could recognize only at x01. Two causes. First, the type was registered without HTF_ITER_RAW, so it hex-iterated where the construction sha256_bin(salt . pass) iterates the raw digest; mdxfind found x01 through x03 while hashpipe found only x01. Second, adding the flag fixed the targeted -m path but not auto-detect, because the raw branch added in 1.119 covered only one of the iteration call sites: the two candidate-scan paths still hex-iterated unconditionally. Both now honour HTF_ITER_RAW. Verified against Daves three vectors: auto-detect now reports x02 and x03, and the -m e447 labels are identical to mdxfind at all three depths. The x01 line reports as SHA256SALTPASS because the two types are numerically identical at x01; only the iteration role differs, so their bytecode is not equal and the pair is not in the catalog duplicate list. NOT changed: MD5RAW through SHA512RAW and MD5RAWMD5RAW show a one-round offset against current mdxfind, but hashpipes definition agrees with the 65 existing crack files in the gp corpus, so the definition apparently shifted in mdxfind at some point and this needs a decision rather than a silent change.
+ * Fix e447 SHA256RAWSALTPASS, which hashpipe could recognize only at x01. Two causes. First, the type was registered without HTF_ITER_RAW, so it hex-iterated where the construction sha256_bin(salt . pass) iterates the raw digest; mdxfind found x01 through x03 while hashpipe found only x01. Second, adding the flag fixed the targeted -m path but not auto-detect, because the raw branch added in 1.119 covered only one of the iteration call sites: the two candidate-scan paths still hex-iterated unconditionally. Both now honour HTF_ITER_RAW. Verified against Waffles three vectors: auto-detect now reports x02 and x03, and the -m e447 labels are identical to mdxfind at all three depths. The x01 line reports as SHA256SALTPASS because the two types are numerically identical at x01; only the iteration role differs, so their bytecode is not equal and the pair is not in the catalog duplicate list. NOT changed: MD5RAW through SHA512RAW and MD5RAWMD5RAW show a one-round offset against current mdxfind, but hashpipes definition agrees with the 65 existing crack files in the gp corpus, so the definition apparently shifted in mdxfind at some point and this needs a decision rather than a silent change.
  *
  * Revision 1.119  2026/08/30 06:08:19  dlr
  * Sync the 3 John-sourced types added in mdxfind.c 1.548, plus two fixes to shared machinery that adding them exposed. First: the salted iteration path always hex-encoded the previous digest, so a raw-iterating salted type could not verify past x01. The composed path already had this via is_raw. Adds HTF_ITER_RAW and a raw branch, set only on SHA512RAWPASSSALT. Second: the emitted iteration suffix was built with two hardcoded digits, so match_iter 100 printed as x00, 101 as x01, and so on. Every iteration of 100 or more was silently mislabelled, and mdxfind has always printed these correctly, so the two tools disagreed for any deep iteration. The gp corpus carries crack files as deep as x3992000. Now variable width with a two-digit minimum. Verified both tools emit SHA512RAWPASSSALTx100 for the BlackBerry ES10 vectors and that two-digit labels are unchanged.
@@ -837,7 +840,6 @@ static void hp_rc4(hp_rc4_key *k, size_t len, const unsigned char *in, unsigned 
     }
     k->i = i; k->j = j;
 }
-
 
 /* ---- MurmurHash64A (inline, from mdxfind.c) ---- */
 
@@ -5892,7 +5894,6 @@ static int verify_mysql5md5(const char *h, int hl, const unsigned char *p, int p
 static int verify_sql5(const char *h, int hl, const unsigned char *p, int pl)
 { return sql5_engine(h, hl, p, pl, 0); }
 
-
 /* NULL (e425) is a passthrough diagnostic: the candidate is copied into a
  * zeroed 16-byte buffer and reported as-is, and each further depth overwrites
  * byte 0 with the depth number.  The compute produced only the base form. */
@@ -6110,7 +6111,6 @@ static int verify_md5rawuc(const char *h, int hl, const unsigned char *p, int pl
 { return md5uc_engine(h, hl, p, pl, 0); }
 static int verify_md5ucmd5(const char *h, int hl, const unsigned char *p, int pl)
 { return md5uc_engine(h, hl, p, pl, 1); }
-
 
 static void compute_md5_pad100(const unsigned char *in, int inlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
@@ -9886,7 +9886,6 @@ static void compute_sha1sha256cap(const unsigned char *pass, int passlen,
     SHA1((unsigned char *)hx, 64, dest);
 }
 
-
 /* SHA1SHA1CAPSALT (e666): emit(sha1(cap(sha1(pass), N) . salt)), N = each
  * lowercase position.  Every lowercase position of the 40-character hex is
  * capitalised in turn and a digest emitted for each, so a single compute can
@@ -10169,7 +10168,6 @@ static struct chain_step chain_sha1md5ucmd5ucmd5ucmd5uc[] = { SU_MD5, SU_MD5, SU
 /* So: SHA1UC(hex(WRL(pass))) — SHA1 applied to hex of WRL, UC output */
 static struct chain_step chain_sha1ucwrl[]         = { SU_WRL, S_SHA1 };
 
-
 /* SHA1MD5UCSHA1UCMD5UC */
 static struct chain_step chain_sha1md5ucsha1ucmd5uc[] = { SU_MD5, SU_SHA1, SU_MD5, S_SHA1 };
 /* SHA1MD5MD5UCMD5UC: SHA1(hexUC(rhash_msg(RHASH_MD5, hexUC(MD5(hex(MD5(pass))))))) */
@@ -10430,7 +10428,6 @@ static struct chain_step chain_sha1md5raw[]        = { S_MD5R, S_MD5, S_SHA1 };
 /* or: SHA256 inner, SHA256UC intermediate, SHA1 outer, "xSHA256" = extra SHA256 step */
 /* SHA1SHA256UCxSHA256: read R-to-L: SHA256 → x (iter) → SHA256UC → SHA1 */
 /* The 'x' is just an iteration marker, not a separate hash. Skip */
-
 
 /* ---- New compute functions for unregistered types ---- */
 
@@ -17183,7 +17180,6 @@ static int verify_sap_passcode5(const char *hashstr, int hashlen,
  * Algorithm: password → EBCDIC_PC (pad to 8 with 0x2a), used as DES key
  *            username → EBCDIC (pad to 8 with 0x40, fold if >8), used as plaintext
  *            DES-ECB-encrypt(plaintext=username, key=password) == hash */
-
 
 static int verify_as400des(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -27724,6 +27720,30 @@ struct workitem {
     int match_iter;         /* iteration count that matched */
 };
 
+/* -c: the same contract, applied to a hot-list hit.
+ *
+ * The hot list is a CROSS-LINE cache: it is primed by whatever verified
+ * earlier in the batch and carried forward through GlobalHotType, so what it
+ * offers has nothing to do with the line in hand. Three separate hot paths
+ * accepted a hit and returned BEFORE the hinted pass ran its label check, so
+ * a single line that verified was enough to make later lines answer for a
+ * type or a depth they never asked for. One MD5x02 line that verified let the
+ * next line, labelled MD5x03 over an md5^1 digest, come back as MD5x01 --
+ * while the same line alone was correctly refused.
+ *
+ * A cache may only ever confirm what the label already claims, so both halves
+ * of the label are checked here: the type it names and, when it names one,
+ * the depth. Without -c the label is a hint and the cache stays a pure
+ * optimisation, so nothing outside -c changes.
+ */
+static inline int hot_label_ok(const struct workitem *item,
+                               const struct hashtype *ht, int cand_iter)
+{
+    if (!CheckLabel) return 1;
+    if (item->hint && ht != item->hint) return 0;
+    if (item->hint_iter > 0 && cand_iter != item->hint_iter) return 0;
+    return 1;
+}
 
 #define HOT_LIST_MAX 256
 
@@ -27909,7 +27929,6 @@ static void report_unresolved_formats(void)
         fprintf(stderr, "hashpipe:   %-14s %lld line(s)\n",
                 UfmtName[i], UfmtCount[i]);
 }
-
 
 static FILE *Statfp;            /* -s stats output file, NULL if not requested */
 
@@ -28238,6 +28257,8 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             continue;
 
         hot_fast_match:
+            if (!hot_label_ok(item, ht, (ht->flags & HTF_ITER_X0) ? 0 : 1))
+                continue;
             hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
             atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
@@ -28289,6 +28310,13 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             for (m = 0; m < ModeCount; m++) {
                 struct hashtype *ht = &Hashtypes[ModeList[m]];
                 if (!ht->verify || ht == item->hint) continue;
+                /* -c: the label names the type, and that is the contract. These scan
+                 * s exist to identify an UNlabelled pair, so in -c they answer for a
+                 * type the line never claimed -- a bcrypt digest labelled SHA512CRY
+                 * PT came back relabelled BCRYPT, on a single line, no batch needed.
+                 * Same defect as the depth leak, one axis over.
+                 */
+                if (CheckLabel && ht != item->hint) continue;
                 WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
@@ -28303,6 +28331,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             for (v = 0; v < Numtypes; v++) {
                 struct hashtype *ht = &Hashtypes[v];
                 if (!ht->verify || ht == item->hint) continue;
+                if (CheckLabel && ht != item->hint) continue;
                 WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     item->verified = 1;
@@ -28413,6 +28442,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                     for (fv = 0; fv < Numtypes; fv++) {
                         struct hashtype *fht = &Hashtypes[fv];
                         if (!fht->verify) continue;
+                        if (CheckLabel && fht != item->hint) continue;
                         WS->verify_iter = 0;
                         if (hash_verify(fht, item->hashstr, item->hashlen, fvpass, fvpasslen)) {
                             item->verified = 1;
@@ -28452,8 +28482,10 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             for (h = 0; h < *nhot; h++) {
                 struct hashtype *ht = &Hashtypes[hot_list[h].type_idx];
                 if (!ht->verify) continue;
+                if (CheckLabel && ht != item->hint) continue;
                 WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
+                    if (!hot_label_ok(item, ht, WS->verify_iter)) continue;
                     item->verified = 1;
                     item->match_type = ht;
                     item->match_iter = WS->verify_iter;
@@ -28472,6 +28504,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         for (v = 0; v < Numtypes; v++) {
             struct hashtype *ht = &Hashtypes[v];
             if (!ht->verify) continue;
+            if (CheckLabel && ht != item->hint) continue;
             WS->verify_iter = 0;
             if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                 item->verified = 1;
@@ -28522,6 +28555,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             for (v = 0; v < Numtypes; v++) {
                 struct hashtype *ht = &Hashtypes[v];
                 if (!ht->verify) continue;
+                if (CheckLabel && ht != item->hint) continue;
                 WS->verify_iter = 0;
                 if (hash_verify(ht, item->hashstr, item->hashlen, vpass, vpasslen)) {
                     fp_iter = WS->verify_iter;
@@ -28774,6 +28808,9 @@ retry_with_fullpass:
             continue;
 
         hot_match:
+            if (!hot_label_ok(item, ht, ht->verify ? WS->verify_iter
+                                     : ((ht->flags & HTF_ITER_X0) ? 0 : 1)))
+                continue;
             hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
             atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
@@ -31447,7 +31484,6 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 }
             }
 
-
             /* Non-hex: accept if any selected/registered mode is a verify type */
             int _m, _found = 0;
             for (_m = 0; _m < ModeCount; _m++)
@@ -32937,7 +32973,6 @@ int main(int argc, char **argv)
     if (JohnOut > 0 && JohnMapCount() == 0)
         fprintf(stderr, "hashpipe: -J %d selected but no John label table is built in; "
                         "emitting mdxfind format\n", JohnOut);
-
 
     /* Initialize hash types (needed for both benchmark and normal mode) */
     yarn_prefix = "hashpipe";
