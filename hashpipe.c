@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.190 2026/09/04 17:16:30 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.191 2026/09/04 20:11:50 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.191  2026/09/04 20:11:50  dlr
+ * Make -c honour the DEPTH in a label, not just the type. Two independent paths ignored it, so a line whose xNN was wrong verified anyway and was re-emitted carrying the depth actually found, the mode silently CORRECTING a wrong label instead of rejecting it. Reported by Waffle against MD5x05 on an md5 to the one hash, which came back as MD5x01. First path: the hinted easy pass tests the BASE depth and returns on a match without consulting hint_iter, so any label naming a depth other than the base was never checked against. It now skips the base checks when the label asks for a different depth, scoped to those checks alone; guarding the whole block instead also skipped the depth-specific check below it and rejected correctly labelled lines. Second path, and the larger one: a verify type walks the iteration chain inside its own verify function and reports where it landed in verify_iter, which nothing compared against the label. Measured with a corpus of real lines relabelled to a depth they are not, 216 lines across 105 types were accepted with a wrong depth, failing in BOTH directions, and 104 of those types were HTV. Fixed with a single check in hash_verify, the wrapper every acceptance site calls, rather than 104 per type edits: WS->expect_iter carries the labelled depth and is zero outside -c, so no other mode changes. hash_verify also now clears verify_iter before dispatch, since not every verify function assigns it and a stale value could be read as this call answer. Both of its return paths are checked; patching only one left two types leaking through the $HEX salt decode branch. New regress/testhash.wrongiter and gen_wrongiter.py generate the wrong label corpus. testhash.orig cannot test this: every label in it is correct, so it proves only that good input is accepted, and the whole value of -c is the refusing half. Verified: 7234771 of 7234771 accepted with correct labels in 98 seconds, 1545 of 1545 rejected with wrong ones, self-test 1026 passed 0 failed 2 skipped, and the identify path unchanged. Note -c rejects a comment line, since a leading hash is not a valid label; that needs documenting.
+ *
  * Revision 1.190  2026/09/04 17:16:30  dlr
  * Add -c, verify each line against its own leading TYPE label only, and fix the label paths it depends on. Detection is not run and there is no fallback: a pair that does not verify as its label goes to -E, a label naming an unknown type is fatal with INVALID LABEL on stderr and exit 2, and the xNN suffix sets the depth so -i does not bound it. User-defined types are restricted the same way, since emit_user_matches otherwise tries every loaded user type and would re-identify a mislabelled line as something else. Motivation is cost: verifying a pair is one hash, identifying it may be hundreds, and after an mdxfind run the type is already on the line. Full generated corpus, 7234771 lines across 1020 types: over an hour identifying against 98.7 seconds with -c, both resolving every line. Four defects found by running that corpus, all of which also affected -m and had gone unnoticed there. The hinted path lacked the HTF_ITER_RAW rule the ModeList pass carries, so raw-iterating types could not verify past x01. Ten types had no outermost hash registered, so iteration fell back to a primitive chosen by digest width, or in the hinted path to compute, which re-runs the whole construction; eight are now in outer_tab from their hx.8 definitions and six of those had been returning nothing at all under -m. The ModeList plain and UC branches now honour outer_fn. The hinted path tries both hex cases rather than deciding from HTF_UC, which does not always describe the iteration hex. SHA1SALTCX presented a compute it cannot iterate, so a hinted or -m selected line at depth above one was routed to hex iteration and silently failed while an unhinted line took its verify and passed; its compute is cleared and its iteration comment corrected against real corpus data. Self-test now counts and names skipped types instead of passing over them silently, and the failure recap lists what was recorded rather than re-running every test, which printed a second summary and could disagree with the first. Corpus verifies 7234771 of 7234771, self-test 1026 passed 0 failed 2 skipped, 70 type -m sweep matches identify throughout.
  *
@@ -1085,6 +1088,10 @@ struct workspace {
     void *saltbin, *altsaltbin, *colonsalt;
     /* Iteration count reported by verify functions (0 = not set) */
     int verify_iter;
+    /* -c only: the depth the LABEL asked for, or 0 when no depth was named.
+     * hash_verify() compares the depth a verify function actually reached
+     * against this and refuses a mismatch. Set once per item; 0 disables. */
+    int expect_iter;
     /* Benchmark rate for current type (set before calling verify) */
     long long cur_rate;
     /* iconv handle for UTF-7 conversion */
@@ -27343,12 +27350,36 @@ static inline void hash_compute(const struct hashtype *ht,
 /* Verify wrapper: calls ht->verify and increments StatTry */
 static int hex2bin(const char *hex, int hexlen, unsigned char *bin);
 
+/* Did the verify reach the depth the label named?
+ *
+ * Under -c the label is the contract, and its xNN names a DEPTH as well as a
+ * type. A verify type walks the iteration chain inside its own verify function
+ * and reports where it landed in WS->verify_iter, so without this check the
+ * label's depth was never consulted: a line labelled x01 whose hash was really
+ * x05 verified and was re-emitted as x05, the mode silently CORRECTING a wrong
+ * label rather than rejecting it. Measured at 216 lines across 105 types,
+ * failing in both directions.
+ *
+ * A verify function that does not iterate leaves verify_iter at 0, which means
+ * the base depth, so 0 and 1 are the same answer here. */
+static inline int rule_depth_ok(void)
+{
+    int got;
+    if (!WS->expect_iter) return 1;              /* no depth named: nothing to check */
+    got = WS->verify_iter ? WS->verify_iter : 1;
+    return got == WS->expect_iter;
+}
+
 static inline int hash_verify(const struct hashtype *ht,
     const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
+    int _v;
     atomic_fetch_add(&StatTry[ht - Hashtypes], 1);
     WS->cur_rate = ht->rate;
+    /* Reset so a stale depth from a previous call cannot be read as this
+     * call's answer -- not every verify function assigns verify_iter. */
+    WS->verify_iter = 0;
     /* A $HEX[] salt arrives still encoded, and most verify functions parse the
      * salt straight out of hashstr without decoding it, so every non-ASCII
      * salt silently failed for them.  Decode it once here rather than in each
@@ -27362,12 +27393,15 @@ static inline int hash_verify(const struct hashtype *ht,
             if (enc > 0 && (enc & 1) == 0 && pre + enc / 2 < WS_GP_SIZE) {
                 char *rw = (char *)WS->hexsalt;
                 memcpy(rw, hashstr, pre);
-                if (hex2bin(c + 6, enc, (unsigned char *)rw + pre) == enc / 2)
-                    return ht->verify(rw, pre + enc / 2, pass, passlen);
+                if (hex2bin(c + 6, enc, (unsigned char *)rw + pre) == enc / 2) {
+                    _v = ht->verify(rw, pre + enc / 2, pass, passlen);
+                    return (_v && !rule_depth_ok()) ? 0 : _v;
+                }
             }
         }
     }
-    return ht->verify(hashstr, hashlen, pass, passlen);
+    _v = ht->verify(hashstr, hashlen, pass, passlen);
+    return (_v && !rule_depth_ok()) ? 0 : _v;
 }
 
 /* Decode hex string to binary. Returns byte count, or -1 on error. */
@@ -28073,6 +28107,9 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
     int fp_o_altsaltlen = 0, fp_o_altpasslen = 0;
 
     item->verified = 0;
+    /* -c: publish the labelled depth for hash_verify(). Zero for every other
+     * mode, so nothing outside -c changes behaviour. */
+    WS->expect_iter = (CheckLabel && item->hint_iter > 0) ? item->hint_iter : 0;
 
     /* --- Hot list fast path (pre-hint): only needed when a verify-type hint
      * would trap us in the verify path.  For un-hinted items, the normal
@@ -28765,7 +28802,19 @@ retry_with_fullpass:
         struct hashtype *ht = item->hint;
         int bi = ht->base_iter > 1 ? ht->base_iter :
                  (ht->flags & HTF_ITER_X0) ? 0 : 1;
+        /* -c: the label names a type AND a depth, and both are the contract.
+         * This pass tests the BASE depth and returns on a match, so without
+         * this guard a line labelled MD5x05 whose hash is really md5^1 was
+         * accepted here and re-emitted as MD5x01 -- the mode silently
+         * CORRECTING a wrong label instead of rejecting it, which is the one
+         * thing it exists to prevent. When the label names a depth other than
+         * the base, skip this pass and let the depth-specific check below
+         * decide. Without -c the label is only a hint and reporting the depth
+         * actually found is right, so that path is unchanged. */
+        int base_allowed = !(CheckLabel && item->hint_iter > 0 &&
+                             item->hint_iter != bi);
         if (ht->hashlen >= hashbytes) {
+          if (base_allowed) {
             if (ht->flags & HTF_SALTED) {
                 hash_compute(ht, pass, passlen, saltbin, saltbinlen, computed);
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
@@ -28835,6 +28884,10 @@ retry_with_fullpass:
                     }
                 }
             }
+
+          }   /* end base_allowed: under -c a labelled depth skips the base
+               * checks above, but MUST still reach the depth check below --
+               * gating the whole block rejected correctly-labelled lines. */
 
             /* Hinted iteration: if xNN suffix given, iterate to that count */
             if (item->hint_iter > 0) {
