@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 2026/09/02 23:11:35 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.190 2026/09/04 17:16:30 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.190  2026/09/04 17:16:30  dlr
+ * Add -c, verify each line against its own leading TYPE label only, and fix the label paths it depends on. Detection is not run and there is no fallback: a pair that does not verify as its label goes to -E, a label naming an unknown type is fatal with INVALID LABEL on stderr and exit 2, and the xNN suffix sets the depth so -i does not bound it. User-defined types are restricted the same way, since emit_user_matches otherwise tries every loaded user type and would re-identify a mislabelled line as something else. Motivation is cost: verifying a pair is one hash, identifying it may be hundreds, and after an mdxfind run the type is already on the line. Full generated corpus, 7234771 lines across 1020 types: over an hour identifying against 98.7 seconds with -c, both resolving every line. Four defects found by running that corpus, all of which also affected -m and had gone unnoticed there. The hinted path lacked the HTF_ITER_RAW rule the ModeList pass carries, so raw-iterating types could not verify past x01. Ten types had no outermost hash registered, so iteration fell back to a primitive chosen by digest width, or in the hinted path to compute, which re-runs the whole construction; eight are now in outer_tab from their hx.8 definitions and six of those had been returning nothing at all under -m. The ModeList plain and UC branches now honour outer_fn. The hinted path tries both hex cases rather than deciding from HTF_UC, which does not always describe the iteration hex. SHA1SALTCX presented a compute it cannot iterate, so a hinted or -m selected line at depth above one was routed to hex iteration and silently failed while an unhinted line took its verify and passed; its compute is cleared and its iteration comment corrected against real corpus data. Self-test now counts and names skipped types instead of passing over them silently, and the failure recap lists what was recorded rather than re-running every test, which printed a second summary and could disagree with the first. Corpus verifies 7234771 of 7234771, self-test 1026 passed 0 failed 2 skipped, 70 type -m sweep matches identify throughout.
+ *
  * Revision 1.189  2026/09/02 23:11:35  dlr
  * Restore the inline key derivation for RACF; only RVARY uses the table. Moving a2e_pc above its users was right, but switching BOTH sites to it was not: in mdxfind, RVARY reads a2e_pc while RACF derives the key inline from a2e with XOR 0x55, a left shift and an odd-parity fix, and those two disagree for seven of the 256 byte values. Putting RACF on the table broke the one candidate whose first byte is NUL, which is how it surfaced -- as the single remaining unresolved line in a 7.2 million line pass. Each type now follows its own source. RACF 11 of 11, RVARY 11 of 11, RACF-KDFAES 55 of 55 and AS400-DES 11 of 11. Self-test 1026 passed 0 failed.
  *
@@ -115,43 +118,43 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 20
  * Fix a global-buffer-overflow that crashed hashpipe on large inputs, and give 94 more types their outermost iteration hash. The crash first: hot_hit_record guards the WRITE into HotHitTable with slot < HOT_LIST_MAX but increments HotHitCount unconditionally, so once 256 distinct type and salt-length pairs have been seen every further miss still bumps the counter, and the search loop above, bounded by that counter, reads progressively further past the end of a 4096-byte global until it leaves the mapping. Found by AddressSanitizer, which names it exactly: global-buffer-overflow, READ of size 4, 0 bytes after HotHitTable, in verify_item. The invariant was already known and defended in the OTHER reader - the stats loop clamps with nh > HOT_LIST_MAX - and was simply missed here. Fixed both ways: the search bound is clamped, and a full table gives the slot back so the counter cannot drift. This accounts for every symptom seen: a threshold at about 2.55 million lines rather than any particular record, a page-aligned fault address, SIGBUS on one run and SIGSEGV on another with a byte-identical code offset, no narrow input window ever reproducing it, and resident memory flat at 145MB throughout, since this is an index runaway and not a leak. It is pre-existing and predates the outer_fn work below; the first crash was on a binary built before it. How it was found is worth recording. A full-fixture run appeared to complete in 36 minutes 53 seconds having processed only 35 percent of the input, because the harness wrote END unconditionally instead of capturing the exit code, so a crash read as a clean benchmark - exactly the shape of failure the verification discipline exists to catch. Second change: 94 entries added to outer_tab. The hinted-iteration path picks its primitive as iter_fn, else outer_fn, else ht->compute for an unsalted type. With no outer_fn that fallback re-applies the WHOLE construction rather than the outermost hash, which is correct only when a type IS its own outer hash; SHA1UTF16LE computed sha1(utf16le(hex)) where the truth is plain sha1(hex). Every entry was DERIVED, not guessed: for each type, x01 and x02 lines from regress/testhash.orig were paired on matching password and the outer hash identified as the primitive reproducing x02 from hex(x01), minimum 4 pairs per type and no single-sample entry. Strictly additive - of the entries already present, 8 agreed with the derived value and none disagreed. Measured on a per-label sample of the new 7.2 million line fixture: types failing at depth fall from 154 to 64, with 362 of 548 previously failing lines recovered. Self-test 1026 passed 0 failed on both the normal and the ASan build. ASan reproducer clean through 1151519 lines where it previously reported the overflow at about 677000. A full-fixture regression run is in flight and will be reported separately; the 64 types still failing are a separate and understood set, spanning the -q internal-iteration class, the multi-emit families, prefixed formats such as SQL5, and structured types.
  *
  * Revision 1.157  2026/09/01 20:26:18  dlr
- * Make the BCRYPT256 $2k$ path able to match. Real samples finally exist: Dave found 5179 of them in contest/history/2024, and KoreLogic own write-up names the algorithm - "$2k$: Hashes generated using Python passlib.hash.bcrypt_sha256". The stored form is 59 characters, not 60: $2k$ plus cost plus 21 salt characters plus a 31-character checksum. It carries only 21 of the 22 salt characters because the 22nd holds just 2 significant bits, so it is dropped and recovered by trying the four canonical values ".euO" - which is what both tools already enumerate. Three separate defects, each alone enough to guarantee no match, so this path had never worked. First, a hashlen < 60 guard rejected every real hash outright, the stored form being 59. Second, the bcrypt setting was built as $2b$ plus cost plus TWENTY-ONE salt characters, terminated at offset 28, and did not vary across the four candidates - only the HMAC key did. mdxfind writes the candidate character into BOTH the key and the salt (mdxfind.c, linebuf2[MAXLINE+7+21] = extrasalt[x]) and is the authority; the setting is now rebuilt inside the loop and carries the full 22. Third, the result was compared against the stored hash as whole strings, which cannot succeed: crypt_rn returns the ordinary 60-character $2b$ form, so the two differ at the prefix and again from offset 28, where one still has a salt character and the other has begun its checksum. The comparison now aligns the checksums, result+29 against hashstr+28 for 31 characters. Validated against vectors generated INDEPENDENTLY with the python bcrypt and hmac modules rather than by either tool, one per candidate character: 4 of 4 verify, 0 false positives on the same hashes fed a wrong password, and a cost-12 vector matching the contest cost verifies at the DEFAULT -L. The independent generation also validates mdxfind: its -z output for this construction is byte-identical to the python round-trip, which is the first confirmation the algorithm itself is right. Self-test 1026 passed 0 failed; userdef round trip PASS; a plain $2a$ bcrypt still declines e577 and resolves as e450, so the deliberate guard against BCRYPT256 swallowing ordinary bcrypt is intact. NOT fixed here, and mdxfind side: -z generates the construction correctly but emits the 60-character $2b$ form, so it does not round-trip to the stored 59-character $2k$ form and mdxfind cannot crack a real $2k$ hash - the loader files the $2k$ line in JudyJ while the generator looks up a $2b$ string.
+ * Make the BCRYPT256 $2k$ path able to match. Real samples finally exist: Waffle found 5179 of them in contest/history/2024, and KoreLogic own write-up names the algorithm - "$2k$: Hashes generated using Python passlib.hash.bcrypt_sha256". The stored form is 59 characters, not 60: $2k$ plus cost plus 21 salt characters plus a 31-character checksum. It carries only 21 of the 22 salt characters because the 22nd holds just 2 significant bits, so it is dropped and recovered by trying the four canonical values ".euO" - which is what both tools already enumerate. Three separate defects, each alone enough to guarantee no match, so this path had never worked. First, a hashlen < 60 guard rejected every real hash outright, the stored form being 59. Second, the bcrypt setting was built as $2b$ plus cost plus TWENTY-ONE salt characters, terminated at offset 28, and did not vary across the four candidates - only the HMAC key did. mdxfind writes the candidate character into BOTH the key and the salt (mdxfind.c, linebuf2[MAXLINE+7+21] = extrasalt[x]) and is the authority; the setting is now rebuilt inside the loop and carries the full 22. Third, the result was compared against the stored hash as whole strings, which cannot succeed: crypt_rn returns the ordinary 60-character $2b$ form, so the two differ at the prefix and again from offset 28, where one still has a salt character and the other has begun its checksum. The comparison now aligns the checksums, result+29 against hashstr+28 for 31 characters. Validated against vectors generated INDEPENDENTLY with the python bcrypt and hmac modules rather than by either tool, one per candidate character: 4 of 4 verify, 0 false positives on the same hashes fed a wrong password, and a cost-12 vector matching the contest cost verifies at the DEFAULT -L. The independent generation also validates mdxfind: its -z output for this construction is byte-identical to the python round-trip, which is the first confirmation the algorithm itself is right. Self-test 1026 passed 0 failed; userdef round trip PASS; a plain $2a$ bcrypt still declines e577 and resolves as e450, so the deliberate guard against BCRYPT256 swallowing ordinary bcrypt is intact. NOT fixed here, and mdxfind side: -z generates the construction correctly but emits the 60-character $2b$ form, so it does not round-trip to the stored 59-character $2k$ form and mdxfind cannot crack a real $2k$ hash - the loader files the $2k$ line in JudyJ while the generator looks up a $2b$ string.
  *
  * Revision 1.156  2026/09/01 18:49:26  dlr
- * Take the iteration count from the verify function on the hot path, not from an unconditional 1. The hot list carries verify types: the branch at the top of the hot loop calls hash_verify and jumps to hot_match on success. That label then stamped match_iter as 1 for anything without HTF_ITER_X0, discarding whatever the verify reported, while the slow path zeroes verify_iter, calls the same verify and reads the count back. The two disagreed, so the SAME hash could be labelled differently depending on how it was reached - bare on its first sighting, which takes the slow path, and x01 on every later one, which hits the cache. Two changes, both on that path. The hot verify branch now zeroes verify_iter before calling hash_verify, matching the slow path, since a verify that reports no count leaves the slot untouched and would otherwise inherit whatever the thread last verified. And hot_match now reads ht->verify ? WS->verify_iter : the previous expression, so a compute type is still implicitly x01 while a verify type reports its own count. hot_fast_match is deliberately untouched: it skips verify types outright, so the conditional would be dead there. Trigger conditions, which matter because the earlier report understated them: this needed auto-detect AND a repeated hash. Any type hint suppressed it, whether from a leading type token or from -m, so a straight mdxfind pipe into hashpipe never showed it. Dave could not reproduce it from the report for exactly that reason. It surfaced on the John corpus because that corpus carries the same vector under several format names. Measured across all 974 registered example vectors, each fed three times single-threaded: inconsistent labels 10 to 0, with 974 vectors still resolved, 0 lost and 0 first-occurrence labels changed. Types that legitimately report a count keep it and are now consistent across repeats. Affected types were ANDROIDFDE, ARUBAOS, CISCOISE, DOMINO5, HMAILSERVER, MACOSX, MACOSX7, ORACLE11, ORACLE12 and PWSAFE3, all verify types whose function reports no count; mdxfind emits every one of them bare. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; fresh-output sweep over all 74 catalogued HTV types unchanged at 74 of 74 and 111199 of 111199 lines; 0 false positives across 3000 wrong-password lines at -i 3. John corpus 4554 with 0 bodies lost and 0 gained; its 50 label changes are ALL suffix removals on six of the ten types, every one a correction toward mdxfind.
+ * Take the iteration count from the verify function on the hot path, not from an unconditional 1. The hot list carries verify types: the branch at the top of the hot loop calls hash_verify and jumps to hot_match on success. That label then stamped match_iter as 1 for anything without HTF_ITER_X0, discarding whatever the verify reported, while the slow path zeroes verify_iter, calls the same verify and reads the count back. The two disagreed, so the SAME hash could be labelled differently depending on how it was reached - bare on its first sighting, which takes the slow path, and x01 on every later one, which hits the cache. Two changes, both on that path. The hot verify branch now zeroes verify_iter before calling hash_verify, matching the slow path, since a verify that reports no count leaves the slot untouched and would otherwise inherit whatever the thread last verified. And hot_match now reads ht->verify ? WS->verify_iter : the previous expression, so a compute type is still implicitly x01 while a verify type reports its own count. hot_fast_match is deliberately untouched: it skips verify types outright, so the conditional would be dead there. Trigger conditions, which matter because the earlier report understated them: this needed auto-detect AND a repeated hash. Any type hint suppressed it, whether from a leading type token or from -m, so a straight mdxfind pipe into hashpipe never showed it. Waffle could not reproduce it from the report for exactly that reason. It surfaced on the John corpus because that corpus carries the same vector under several format names. Measured across all 974 registered example vectors, each fed three times single-threaded: inconsistent labels 10 to 0, with 974 vectors still resolved, 0 lost and 0 first-occurrence labels changed. Types that legitimately report a count keep it and are now consistent across repeats. Affected types were ANDROIDFDE, ARUBAOS, CISCOISE, DOMINO5, HMAILSERVER, MACOSX, MACOSX7, ORACLE11, ORACLE12 and PWSAFE3, all verify types whose function reports no count; mdxfind emits every one of them bare. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; fresh-output sweep over all 74 catalogued HTV types unchanged at 74 of 74 and 111199 of 111199 lines; 0 false positives across 3000 wrong-password lines at -i 3. John corpus 4554 with 0 bodies lost and 0 gained; its 50 label changes are ALL suffix removals on six of the ten types, every one a correction toward mdxfind.
  *
  * Revision 1.155  2026/09/01 18:17:47  dlr
- * Iterate the BLAKE2 types, correcting a scope error. I had classed BLAKE2B512, BLAKE2B256 and BLAKE2S256 as structured-only and therefore exempt from iteration under Dave rule of 2026-09-01. That was wrong, and Dave caught it: mdxfind emits every one of them in TWO shapes, $BLAKE2$<hex> and a bare hex digest, in equal numbers. The bare form is a plain hex result, so it must iterate. The classification came from sampling only the $BLAKE2$ form in work.res and generalising from it, which is the same mistake as reading one shape and assuming it is the only one. Two defects, both pre-existing. First, the bare form could not be verified at ANY depth, x01 included. Each verify already accepted either shape, but HTV overwrites the earlier HT registration - nulling compute and setting HTF_NONHEX - and the auto-classifier then sees only the $BLAKE2$ example, starts with a dollar sign and pins vclass to HCLASS_PREFIX, so a bare hex line was never offered to the type at all. The three now carry HCLASS_PREFIX | HCLASS_HEX. Second, none of them iterated. The rule was derived from mdxfind own x01, x02 and x03 output rather than assumed, and holds for all three widths: x(n+1) = blake2(hex(x n)), the outermost hash as always. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3: 74 of 74 types and 111199 of 111199 lines now verify, up from 71 of 74 and 111184. Both shapes resolve at every depth for all three types. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; 0 false positives across 3000 wrong-password lines at -i 3, with the positive control now 3000 of 3000 where it was 2994, the six being exactly these BLAKE2 lines. John corpus 4553 to 4554 with ZERO hash bodies lost: one genuine gain, a bare-hex BLAKE2B512 vector that could not previously resolve, and five lines gaining the x01 suffix. That suffix is a CORRECTION - work.res carries 11 BLAKE2B512x01 and no bare form at all, so hashpipe now agrees with mdxfind where it did not before.
+ * Iterate the BLAKE2 types, correcting a scope error. I had classed BLAKE2B512, BLAKE2B256 and BLAKE2S256 as structured-only and therefore exempt from iteration under Waffle rule of 2026-09-01. That was wrong, and Waffle caught it: mdxfind emits every one of them in TWO shapes, $BLAKE2$<hex> and a bare hex digest, in equal numbers. The bare form is a plain hex result, so it must iterate. The classification came from sampling only the $BLAKE2$ form in work.res and generalising from it, which is the same mistake as reading one shape and assuming it is the only one. Two defects, both pre-existing. First, the bare form could not be verified at ANY depth, x01 included. Each verify already accepted either shape, but HTV overwrites the earlier HT registration - nulling compute and setting HTF_NONHEX - and the auto-classifier then sees only the $BLAKE2$ example, starts with a dollar sign and pins vclass to HCLASS_PREFIX, so a bare hex line was never offered to the type at all. The three now carry HCLASS_PREFIX | HCLASS_HEX. Second, none of them iterated. The rule was derived from mdxfind own x01, x02 and x03 output rather than assumed, and holds for all three widths: x(n+1) = blake2(hex(x n)), the outermost hash as always. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3: 74 of 74 types and 111199 of 111199 lines now verify, up from 71 of 74 and 111184. Both shapes resolve at every depth for all three types. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; 0 false positives across 3000 wrong-password lines at -i 3, with the positive control now 3000 of 3000 where it was 2994, the six being exactly these BLAKE2 lines. John corpus 4553 to 4554 with ZERO hash bodies lost: one genuine gain, a bare-hex BLAKE2B512 vector that could not previously resolve, and five lines gaining the x01 suffix. That suffix is a CORRECTION - work.res carries 11 BLAKE2B512x01 and no bare form at all, so hashpipe now agrees with mdxfind where it did not before.
  *
  * Revision 1.154  2026/09/01 18:06:51  dlr
- * Close the last two verify-type gaps found by a full fresh-output sweep. SHA1SHA11CAP had two compare sites that were never converted to iterate, so it read 29 of 29 at x01 and 1 of 29 at x02 and x03; both now go through hex_iter_match. It calls the helper directly rather than the sha1_hex_iter_match wrapper because the function is defined ahead of that wrapper and only hex_iter_match carries a forward declaration. SHA1MD51CAPMD5MD5 has the same dual output shape as e749: of the lines mdxfind emits, 42 report the md5 count in the salt field and 36 are written as a bare 40-character digest with no field at all, and the verify required the field, so those were rejected at every depth including x01. Unlike e749, where the bare form was letter-class only, here BOTH cap strategies appear in it; the count was confirmed by brute force to be 1 in each case rather than assumed. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3, since work.res and testhash.orig remain stale for the eleven types touched by the recent mdxfind fixes: 71 of 74 types and 111184 of 111199 lines verify. The two fixed here went 45 of 60 and 31 of 87 to 60 of 60 and 87 of 87. The only types left are BLAKE2B256, BLAKE2B512 and BLAKE2S256, each at 1 of 6, which is CORRECT and deliberate - their result is a structured $BLAKE2$ string rather than a hex digest, and per Dave rule of 2026-09-01 a structured type does not need to be iterate-able. That accounts for all 15 unresolved lines. Also verified in this pass, after Dave fixed the pepper length argument in mdxfind: e597, e611, e654 and e677 now carry salt and pepper together at every depth and each reads 5 of 5 through x05, where previously the pepper was dropped from x02 onward. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified; 0 false positives across 3000 wrong-password lines at -i 3 against a 2994 of 3000 positive control, the six being BLAKE2 lines above x01.
+ * Close the last two verify-type gaps found by a full fresh-output sweep. SHA1SHA11CAP had two compare sites that were never converted to iterate, so it read 29 of 29 at x01 and 1 of 29 at x02 and x03; both now go through hex_iter_match. It calls the helper directly rather than the sha1_hex_iter_match wrapper because the function is defined ahead of that wrapper and only hex_iter_match carries a forward declaration. SHA1MD51CAPMD5MD5 has the same dual output shape as e749: of the lines mdxfind emits, 42 report the md5 count in the salt field and 36 are written as a bare 40-character digest with no field at all, and the verify required the field, so those were rejected at every depth including x01. Unlike e749, where the bare form was letter-class only, here BOTH cap strategies appear in it; the count was confirmed by brute force to be 1 in each case rather than assumed. Measured by generating fresh output for all 74 catalogued HTV types that mdxfind emits at depth, at -i 3, since work.res and testhash.orig remain stale for the eleven types touched by the recent mdxfind fixes: 71 of 74 types and 111184 of 111199 lines verify. The two fixed here went 45 of 60 and 31 of 87 to 60 of 60 and 87 of 87. The only types left are BLAKE2B256, BLAKE2B512 and BLAKE2S256, each at 1 of 6, which is CORRECT and deliberate - their result is a structured $BLAKE2$ string rather than a hex digest, and per Waffle rule of 2026-09-01 a structured type does not need to be iterate-able. That accounts for all 15 unresolved lines. Also verified in this pass, after Waffle fixed the pepper length argument in mdxfind: e597, e611, e654 and e677 now carry salt and pepper together at every depth and each reads 5 of 5 through x05, where previously the pepper was dropped from x02 onward. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified; 0 false positives across 3000 wrong-password lines at -i 3 against a 2994 of 3000 positive control, the six being BLAKE2 lines above x01.
  *
  * Revision 1.153  2026/09/01 17:18:38  dlr
  * Accept the second emitted shape of SHA1MD5x1CAP (e749). mdxfind writes this type two ways. The single-position CAP variants report the md5 iteration count in the salt field, giving hash colon N colon password, but the six letter-class variants - one per hex letter a through f - are written with NO salt field at all. The verify function required the field and returned 0 without it, so those six were rejected at EVERY depth, x01 included. This was mis-scoped in 1.152 as a pre-existing verify gap of unknown cause; it is a parse gap with a known cause. A bare 40-character digest is now taken as a letter-class line whose count was not written, with the count defaulting to 1, which is what mdxfind emits. Both CAP strategies were already implemented and are unchanged. Measured: freshly generated e749 output at -i 3 goes from 39 of 57 to 57 of 57, complete at every depth, and the work.res x01 lines go from 0 of 6 to 12 of 12. False positives: 0 against 3000 distinct 40-character hex digests taken from work.res and fed a wrong password, with the correct-password control at 57 of 57 - worth measuring deliberately because accepting a bare digest widens what this verify will consider. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified. Recorded, NOT fixed here, because it is pre-existing and lives in shared dispatch rather than in any one type: identical input lines can receive different iteration labels. Both hot-path labels stamp match_iter as 1 unconditionally, while the slow verify path takes it from WS verify_iter, so a verify type whose function never sets verify_iter reads bare on first sight and x01 on every repeat. Reproducible single-threaded with three identical copies of one line. Affects 11 of the 291 registered verify vectors, and the correct answer differs per type: work.res carries 11 bare MACOSX and 11 bare MACOSX7 with no xNN form, so there the repeats are wrong, while SHA1SHA11CAP appears 1235 times with xNN and never bare, so there the FIRST occurrence is wrong. The other eight are absent from work.res and have no ground truth. This is what made the MACOSX label appear to flip between runs across 1.151 and 1.152; it is deterministic, and a claim in 1.152 that the label had been confirmed order-independent was based on an isolated single-line test that could not reproduce the condition.
  *
  * Revision 1.152  2026/09/01 17:02:18  dlr
- * Iterate SHA1SHA1TRUNC-SHA1PASS-3 (e684), completing the TRUNC family at depth. e684 hand-rolls its own left and right compare rather than sharing verify_sha1_truncnosalt, and sits outside the regions converted in 1.149, so it was the last TRUNC type still matching only at x01. Both compare sites now call sha1_hex_iter_match. This lands together with Dave fixes to the two mdxfind buffer-aliasing sites reported with 1.149 and 1.150 - the sha1trunc label and the md6 TRUNC case scratched their iteration hex into newbuf while newbuf still held the salt string, so the reported N was destroyed from x02 onward for e626, e644, e656, e657, e661, e684, e750 and e755. Fresh mdxfind output now carries a numeric N at every depth where e626 previously gave 22 of 42 at x02. Measured on freshly generated mdxfind output for all 31 TRUNC types at -i 3, since testhash.orig and work.res have not been regenerated and remain stale for these types: 46350 of 46350 lines resolve, every type complete, with 165 lines reporting an alias label. Every alias is a case where mdxfind can generate a byte-identical hash under the reported type - the fixed-N uNN families, the full-width parents whose cut is a no-op, the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair, and SHA1SHA1TRUNC at N=40 reporting as SHA1x02, which is arithmetically the same value. Paired false-positive control on the same corpus fed a wrong password: 0 of 46237, against 46350 of 46350 on the matching correct-password run. e726 SHA1SALTSHA256TRUNCMD5 also resolves against fresh output; its earlier failure was a stale fixture value, not a defect. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified. The John run shows two label changes, MACOSXx01 to MACOSX and MACOSX7x01 to MACOSX7. These are CORRECTIONS: work.res carries 11 bare MACOSX and 11 bare MACOSX7 with no xNN form at all, so hashpipe now agrees with mdxfind where it previously did not, and the 1.146 note asserting that mdxfind emits the x01 suffix for these was wrong. The new labels were confirmed stable and order-independent rather than the result of residual verify_iter state.
+ * Iterate SHA1SHA1TRUNC-SHA1PASS-3 (e684), completing the TRUNC family at depth. e684 hand-rolls its own left and right compare rather than sharing verify_sha1_truncnosalt, and sits outside the regions converted in 1.149, so it was the last TRUNC type still matching only at x01. Both compare sites now call sha1_hex_iter_match. This lands together with Waffle fixes to the two mdxfind buffer-aliasing sites reported with 1.149 and 1.150 - the sha1trunc label and the md6 TRUNC case scratched their iteration hex into newbuf while newbuf still held the salt string, so the reported N was destroyed from x02 onward for e626, e644, e656, e657, e661, e684, e750 and e755. Fresh mdxfind output now carries a numeric N at every depth where e626 previously gave 22 of 42 at x02. Measured on freshly generated mdxfind output for all 31 TRUNC types at -i 3, since testhash.orig and work.res have not been regenerated and remain stale for these types: 46350 of 46350 lines resolve, every type complete, with 165 lines reporting an alias label. Every alias is a case where mdxfind can generate a byte-identical hash under the reported type - the fixed-N uNN families, the full-width parents whose cut is a no-op, the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair, and SHA1SHA1TRUNC at N=40 reporting as SHA1x02, which is arithmetically the same value. Paired false-positive control on the same corpus fed a wrong password: 0 of 46237, against 46350 of 46350 on the matching correct-password run. e726 SHA1SALTSHA256TRUNCMD5 also resolves against fresh output; its earlier failure was a stale fixture value, not a defect. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified. The John run shows two label changes, MACOSXx01 to MACOSX and MACOSX7x01 to MACOSX7. These are CORRECTIONS: work.res carries 11 bare MACOSX and 11 bare MACOSX7 with no xNN form at all, so hashpipe now agrees with mdxfind where it previously did not, and the 1.146 note asserting that mdxfind emits the x01 suffix for these was wrong. The new labels were confirmed stable and order-independent rather than the result of residual verify_iter state.
  *
  * Revision 1.151  2026/09/01 15:32:24  dlr
- * Iterate SHA11SALTMD5UC (e718) and SHA11SALTMD5SHA256 (e763). Both were held out of the 1.150 conversion because mdxfind could not produce correct iterated values for them: lacking a case in the iteration switch they fell to the default arm, mymd5, which writes 16 bytes into a 20-byte SHA1 digest and left bytes 16 through 19 stale from the previous round. The signature was visible in the data as 960 of 960 x01-to-x02 pairs sharing their last 8 hex characters, where control types showed 0 of 960. Dave has since added both cases in mdxfind and regenerated the fixture, so the two are now convertible. Neither routes through try_1salt_5combo; each hand-unrolls the same five salt-placement combinations, so all ten compare sites are converted individually to hex_iter_match with ITER_SHA1. Measured on Dave regenerated 48000-line fixture, which carries 9600 lines at each of x01 through x05: hashpipe -E /dev/null -m e718,e763 -i 5 goes from 9600 to 48000 of 48000, every depth complete where before only x01 resolved. Label agreement confirmed separately on an independently generated 4800-line fixture, since the regenerated one was withdrawn mid-check: 4800 identical labels, 0 differing, 0 unresolved. False positives on the 48000-line fixture fed a wrong password: 0. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against 1.150.
+ * Iterate SHA11SALTMD5UC (e718) and SHA11SALTMD5SHA256 (e763). Both were held out of the 1.150 conversion because mdxfind could not produce correct iterated values for them: lacking a case in the iteration switch they fell to the default arm, mymd5, which writes 16 bytes into a 20-byte SHA1 digest and left bytes 16 through 19 stale from the previous round. The signature was visible in the data as 960 of 960 x01-to-x02 pairs sharing their last 8 hex characters, where control types showed 0 of 960. Waffle has since added both cases in mdxfind and regenerated the fixture, so the two are now convertible. Neither routes through try_1salt_5combo; each hand-unrolls the same five salt-placement combinations, so all ten compare sites are converted individually to hex_iter_match with ITER_SHA1. Measured on Waffle regenerated 48000-line fixture, which carries 9600 lines at each of x01 through x05: hashpipe -E /dev/null -m e718,e763 -i 5 goes from 9600 to 48000 of 48000, every depth complete where before only x01 resolved. Label agreement confirmed separately on an independently generated 4800-line fixture, since the regenerated one was withdrawn mid-check: 4800 identical labels, 0 differing, 0 unresolved. False positives on the 48000-line fixture fed a wrong password: 0. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against 1.150.
  *
  * Revision 1.150  2026/09/01 15:20:37  dlr
- * Extend internal xNN iteration to the non-TRUNC verify types. Generalises the 1.149 helper into hex_iter_match with an outer-hash kind - SHA1, MD5, MD4 or NTLM, that last being md4(utf16le(x)) per the rule recorded in 1.146 that md4(utf16le(X)) iterates as NTLM and not as plain md4. The kind for every type was DERIVED FROM MEASUREMENT, not from the name or the hx.8 expression: for each candidate, x01 and x02 lines were paired from work.res on matching salt and password and the outer hash identified by which primitive reproduces x02 from hex(x01). Sample sizes ran to 40960 pairs per type, and the derivation contradicted the naming convention twice - MD4UTF16DESCRYPT is NTLM-outer despite its name reading outer-first, and hx.8 lists it as descrypt-outer. 32 verify functions converted, plus try_1salt_5combo, which is shared by the SHA11SALT and MD51SALT families and picks its kind from its existing use_sha1 argument, so seven more types inherit the fix through it. try_1salt_5combo also built its message, digest and candidate on the STACK and is now on WS slots. Measured on work.res: HTV types verifying at x02 and x03 go from 23 of 76 to 56 of 76. All 20 that remain are accounted for and none is an iteration defect. Three are BLAKE2, whose result is structured rather than a hex digest and which therefore must NOT iterate under Dave rule of 2026-09-01. Eight TRUNC types are blocked by the mdxfind newbuf aliasing bug reported with 1.149. Two, SHA11SALTMD5SHA256 and SHA11SALTMD5UC, carry an mdxfind partial-digest-copy bug: across 960 of 960 x01-to-x02 pairs the last 8 hex characters are IDENTICAL, so only 16 of the 20 SHA1 bytes are updated on iteration, while control types MD51SALTMD5UC and SHA11SALTMD5 show 0 of 960. That is the same signature as the GOSTHEXSALT defect. Four PEPPER types cannot be verified from their emitted line at all, since the expression needs both salt and pepper but only one field is written. Two, SHA1MD5SALTPASSPEPPER and SHA1MD5x1CAP, fail at x01 as well and so are a pre-existing verify gap rather than anything to do with iteration. One, e726, has a work.res value current mdxfind does not reproduce. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the 1.149 run, so 0 lost, 0 gained, 0 attribution changes; 0 false positives across 636 wrong-password lines at -i 3, which matters more here than usual because iteration hands a wrong password Maxiter chances to collide.
+ * Extend internal xNN iteration to the non-TRUNC verify types. Generalises the 1.149 helper into hex_iter_match with an outer-hash kind - SHA1, MD5, MD4 or NTLM, that last being md4(utf16le(x)) per the rule recorded in 1.146 that md4(utf16le(X)) iterates as NTLM and not as plain md4. The kind for every type was DERIVED FROM MEASUREMENT, not from the name or the hx.8 expression: for each candidate, x01 and x02 lines were paired from work.res on matching salt and password and the outer hash identified by which primitive reproduces x02 from hex(x01). Sample sizes ran to 40960 pairs per type, and the derivation contradicted the naming convention twice - MD4UTF16DESCRYPT is NTLM-outer despite its name reading outer-first, and hx.8 lists it as descrypt-outer. 32 verify functions converted, plus try_1salt_5combo, which is shared by the SHA11SALT and MD51SALT families and picks its kind from its existing use_sha1 argument, so seven more types inherit the fix through it. try_1salt_5combo also built its message, digest and candidate on the STACK and is now on WS slots. Measured on work.res: HTV types verifying at x02 and x03 go from 23 of 76 to 56 of 76. All 20 that remain are accounted for and none is an iteration defect. Three are BLAKE2, whose result is structured rather than a hex digest and which therefore must NOT iterate under Waffle rule of 2026-09-01. Eight TRUNC types are blocked by the mdxfind newbuf aliasing bug reported with 1.149. Two, SHA11SALTMD5SHA256 and SHA11SALTMD5UC, carry an mdxfind partial-digest-copy bug: across 960 of 960 x01-to-x02 pairs the last 8 hex characters are IDENTICAL, so only 16 of the 20 SHA1 bytes are updated on iteration, while control types MD51SALTMD5UC and SHA11SALTMD5 show 0 of 960. That is the same signature as the GOSTHEXSALT defect. Four PEPPER types cannot be verified from their emitted line at all, since the expression needs both salt and pepper but only one field is written. Two, SHA1MD5SALTPASSPEPPER and SHA1MD5x1CAP, fail at x01 as well and so are a pre-existing verify gap rather than anything to do with iteration. One, e726, has a work.res value current mdxfind does not reproduce. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the 1.149 run, so 0 lost, 0 gained, 0 attribution changes; 0 false positives across 636 wrong-password lines at -i 3, which matters more here than usual because iteration hands a wrong password Maxiter chances to collide.
  *
  * Revision 1.149  2026/09/01 15:07:47  dlr
- * Let verify types walk the mdxfind xNN chain internally. Dave rule 2026-09-01: if the result is a hex-type hash it must be iterate-able; a structured result does not. The generic iteration paths skip verify types outright, since a verify function returns a boolean rather than a digest, so every HTV type could only ever match at x01 - 76 of them appear in work.res at xNN>=2 across about 1.6M lines. New helper sha1_hex_iter_match walks x(n+1) = sha1(hex40(x n)), the rule mdxfind implements literally, and reports the depth through verify_iter. Wired into the whole TRUNC family: both cut directions of verify_sha1_truncnosalt and verify_sha1_truncsalt, trunc_nosalt_verify, the CAP pair e656 and e657, and the 1SALT pair e638 and e639. The three BLAKE2 types are structured and deliberately excluded. Two further fixes. trunc_nosalt_verify built its digest, hex and candidate on the STACK; it was the last verify function doing so and is now on WS slots, closing the class that 1.141 and 1.142 opened. e601 SHA1PASS-TRUNC was registered with flags 0 although it is sha1(sha1(pass) . cut(pass,0,3)), so the unsalted iteration branch re-applied the WHOLE construction to the hex instead of the outermost hash - it now carries HTF_COMPOSED and an outer_fn of compute_sha1, which is one concrete instance of the mis-flagged-registration class still outstanding. Measured on work.res, mdxfind own output: TRUNC types verifying at x02 and x03 go from 0 of 30 to 21 of 30. The 9 that remain are NOT hashpipe defects. Eight are blocked by an mdxfind buffer aliasing bug reported separately - the sha1trunc label and the md6 TRUNC case use newbuf as BOTH the salt string and the iteration hex scratch, so from x02 the reported salt is the first saltlen characters of the previous hex rather than N. Reproducible in fresh output: e626 emits 42 of 42 numeric salts at x01 but only 22 of 42 at x02, the rest hex fragments such as 8f taken from its own x01 hash 8f357f8a. The control is e622, which scratches into mdbuf instead and emits 88 of 88 numeric at x02, all verifying. The ninth, e726, carries a work.res value current mdxfind does not reproduce and needs the fixture regenerated. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the pre-change run, so 0 lost, 0 gained and 0 attribution changes; 0 false positives across 1397 wrong-password lines run at -i 3, where iteration gives a wrong password Maxiter chances to collide and none does.
+ * Let verify types walk the mdxfind xNN chain internally. Waffle rule 2026-09-01: if the result is a hex-type hash it must be iterate-able; a structured result does not. The generic iteration paths skip verify types outright, since a verify function returns a boolean rather than a digest, so every HTV type could only ever match at x01 - 76 of them appear in work.res at xNN>=2 across about 1.6M lines. New helper sha1_hex_iter_match walks x(n+1) = sha1(hex40(x n)), the rule mdxfind implements literally, and reports the depth through verify_iter. Wired into the whole TRUNC family: both cut directions of verify_sha1_truncnosalt and verify_sha1_truncsalt, trunc_nosalt_verify, the CAP pair e656 and e657, and the 1SALT pair e638 and e639. The three BLAKE2 types are structured and deliberately excluded. Two further fixes. trunc_nosalt_verify built its digest, hex and candidate on the STACK; it was the last verify function doing so and is now on WS slots, closing the class that 1.141 and 1.142 opened. e601 SHA1PASS-TRUNC was registered with flags 0 although it is sha1(sha1(pass) . cut(pass,0,3)), so the unsalted iteration branch re-applied the WHOLE construction to the hex instead of the outermost hash - it now carries HTF_COMPOSED and an outer_fn of compute_sha1, which is one concrete instance of the mis-flagged-registration class still outstanding. Measured on work.res, mdxfind own output: TRUNC types verifying at x02 and x03 go from 0 of 30 to 21 of 30. The 9 that remain are NOT hashpipe defects. Eight are blocked by an mdxfind buffer aliasing bug reported separately - the sha1trunc label and the md6 TRUNC case use newbuf as BOTH the salt string and the iteration hex scratch, so from x02 the reported salt is the first saltlen characters of the previous hex rather than N. Reproducible in fresh output: e626 emits 42 of 42 numeric salts at x01 but only 22 of 42 at x02, the rest hex fragments such as 8f taken from its own x01 hash 8f357f8a. The control is e622, which scratches into mdbuf instead and emits 88 of 88 numeric at x02, all verifying. The ninth, e726, carries a work.res value current mdxfind does not reproduce and needs the fixture regenerated. Regression gates: self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified with a byte-identical diff against the pre-change run, so 0 lost, 0 gained and 0 attribution changes; 0 false positives across 1397 wrong-password lines run at -i 3, where iteration gives a wrong password Maxiter chances to collide and none does.
  *
  * Revision 1.148  2026/09/01 14:39:50  dlr
- * Complete the TRUNC family: enumerate the truncation length N for the thirteen types that could not. These were registered as fixed 16-byte compute chains with no notion of N, two of them marked placeholder in the source, so they could never match anything mdxfind emits - the same defect fixed for e723/e750/e755 in an earlier pass, and the last of that class. New helper verify_sha1_truncnosalt parses the stored digest:N, hashes the leading N characters of the intermediate hex and, for the ten types that emit it, the trailing N as well. hx.8 Note [24] now documents that two-cut emission. No concat buffer is needed since the cut is a substring, and all buffers are WS slots, never the stack. Converted to HTV: e622 SHA1SHA256TRUNC, e623 SHA1SHA256TRUNCMD5, e626 SHA1SHA1TRUNC, e630 SHA1SHA256UCTRUNC, e635 SHA1WRLTRUNC, e636 SHA1SHA512TRUNC, e644 SHA1MD6TRUNC, e653 SHA1WRLUCTRUNC, e661 SHA1SHA1UCTRUNC, e689 SHA1SHA512UCTRUNC, e710 SHA1SHA3-256TRUNC, e745 SHA1SHA384TRUNC, e746 SHA1RMD160TRUNC. Each test vector is generated by mdxfind at a mid-range N so it exercises real truncation rather than the degenerate full-width case. Also fixes e672 SHA1WRLUCTRUNCSALT, which hex-encoded its whirlpool digest with prmd5 instead of prmd5UC despite the UC in its name; its registered vector had been generated by the matching mdxfind bug and so passed the self-test while both sides were wrong. Replaced with the corrected value from Dave regenerated fixture. Measured over every line mdxfind -z emits for all 31 TRUNC types: 15431 of 15431 verify, up from 200 of 360 on the earlier sample. The 44 lines that report a different label are all legitimate aliases where mdxfind can generate a byte-identical hash with the reported type - the fixed-N uNN families, the full-width parents where the cut is a no-op, and the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair. Self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified, unchanged, with no line attributed to any changed type; 0 false positives across 1397 wrong-password lines.
+ * Complete the TRUNC family: enumerate the truncation length N for the thirteen types that could not. These were registered as fixed 16-byte compute chains with no notion of N, two of them marked placeholder in the source, so they could never match anything mdxfind emits - the same defect fixed for e723/e750/e755 in an earlier pass, and the last of that class. New helper verify_sha1_truncnosalt parses the stored digest:N, hashes the leading N characters of the intermediate hex and, for the ten types that emit it, the trailing N as well. hx.8 Note [24] now documents that two-cut emission. No concat buffer is needed since the cut is a substring, and all buffers are WS slots, never the stack. Converted to HTV: e622 SHA1SHA256TRUNC, e623 SHA1SHA256TRUNCMD5, e626 SHA1SHA1TRUNC, e630 SHA1SHA256UCTRUNC, e635 SHA1WRLTRUNC, e636 SHA1SHA512TRUNC, e644 SHA1MD6TRUNC, e653 SHA1WRLUCTRUNC, e661 SHA1SHA1UCTRUNC, e689 SHA1SHA512UCTRUNC, e710 SHA1SHA3-256TRUNC, e745 SHA1SHA384TRUNC, e746 SHA1RMD160TRUNC. Each test vector is generated by mdxfind at a mid-range N so it exercises real truncation rather than the degenerate full-width case. Also fixes e672 SHA1WRLUCTRUNCSALT, which hex-encoded its whirlpool digest with prmd5 instead of prmd5UC despite the UC in its name; its registered vector had been generated by the matching mdxfind bug and so passed the self-test while both sides were wrong. Replaced with the corrected value from Waffle regenerated fixture. Measured over every line mdxfind -z emits for all 31 TRUNC types: 15431 of 15431 verify, up from 200 of 360 on the earlier sample. The 44 lines that report a different label are all legitimate aliases where mdxfind can generate a byte-identical hash with the reported type - the fixed-N uNN families, the full-width parents where the cut is a no-op, and the historical SHA1SHA1CAPTRUNC to SHA1SHA11CAP pair. Self-test 1026 passed 0 failed; userdef round trip PASS; John corpus 4553 verified, unchanged, with no line attributed to any changed type; 0 false positives across 1397 wrong-password lines.
  *
  * Revision 1.147  2026/09/01 13:16:13  dlr
- * Iterate EVERY registered base encoding for multi-emit families, not just the last one tried. hx.8 Note [24] calls these multi-emit: a type registered with HT_ALT2 computes more than one digest per password and mdxfind emits all of them. GOSTHEXSALT is the case - hexsalt_inner builds its message three ways, with a separator, without one, and with colons on both sides - and mdxfind emits a digest for each. The composed hard pass seeded its iteration base with a memcpy from computed, which at that point holds whichever x01 attempt ran LAST, namely compute_alt2. So exactly one of the three encodings ever became an iteration base and the other two could not verify past x01. Measured on the corrected GOSTHEXSALT fixture: 512 of 768 at x02, which is precisely 2 of 3 missing. Both the composed hard pass and the salted hard pass now compute the base for each registered encoding in turn - primary, compute_alt, compute_alt2 - and run the iteration loop for each. The x01 checks already tried all three; only the iteration base was single-valued. Credit where due: Dave found and fixed the mdxfind side of this, which was the larger bug. GOSTHEXSALT iterations above x01 were computed wrong there, a leftover from when GOST came from rhash, and it copied only 16 of the 32 digest bytes. The tell was visible in the data - across x01 and x02 the first 20 bytes changed while the last 12 were byte-identical, which no real 32-byte digest does - and it was caught because the regression fixture exercises depths the self-test never reaches, the self-test carrying exactly one vector per type at x01. work.res and testhash.orig were regenerated with the corrected values; the isolated fixture is ~/src/mdfind/t. Verified: the whole 38400-line corrected GOSTHEXSALT fixture now resolves 38400 of 38400, where before the fix only the x01 third did. Self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS; per-type pair test 278 of 278 alone and paired; John corpus 0 lost, 0 gained, 0 attribution changes; 0 false positives on the wrong-password corpus. NOT changed, deliberately: mdxfind emits a bare GOSTHEXSALT label where hashpipe emits GOSTHEXSALTx01. Dave judges the regularised form arguably more correct than the historical output and not an error, so it is left alone rather than smuggled into a correctness fix; it belongs with the wider label-suffix decision. Also untouched: the TRUNC family, which enumerates a truncation length N that hashpipe does not currently generate.
+ * Iterate EVERY registered base encoding for multi-emit families, not just the last one tried. hx.8 Note [24] calls these multi-emit: a type registered with HT_ALT2 computes more than one digest per password and mdxfind emits all of them. GOSTHEXSALT is the case - hexsalt_inner builds its message three ways, with a separator, without one, and with colons on both sides - and mdxfind emits a digest for each. The composed hard pass seeded its iteration base with a memcpy from computed, which at that point holds whichever x01 attempt ran LAST, namely compute_alt2. So exactly one of the three encodings ever became an iteration base and the other two could not verify past x01. Measured on the corrected GOSTHEXSALT fixture: 512 of 768 at x02, which is precisely 2 of 3 missing. Both the composed hard pass and the salted hard pass now compute the base for each registered encoding in turn - primary, compute_alt, compute_alt2 - and run the iteration loop for each. The x01 checks already tried all three; only the iteration base was single-valued. Credit where due: Waffle found and fixed the mdxfind side of this, which was the larger bug. GOSTHEXSALT iterations above x01 were computed wrong there, a leftover from when GOST came from rhash, and it copied only 16 of the 32 digest bytes. The tell was visible in the data - across x01 and x02 the first 20 bytes changed while the last 12 were byte-identical, which no real 32-byte digest does - and it was caught because the regression fixture exercises depths the self-test never reaches, the self-test carrying exactly one vector per type at x01. work.res and testhash.orig were regenerated with the corrected values; the isolated fixture is ~/src/mdfind/t. Verified: the whole 38400-line corrected GOSTHEXSALT fixture now resolves 38400 of 38400, where before the fix only the x01 third did. Self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS; per-type pair test 278 of 278 alone and paired; John corpus 0 lost, 0 gained, 0 attribution changes; 0 false positives on the wrong-password corpus. NOT changed, deliberately: mdxfind emits a bare GOSTHEXSALT label where hashpipe emits GOSTHEXSALTx01. Waffle judges the regularised form arguably more correct than the historical output and not an error, so it is left alone rather than smuggled into a correctness fix; it belongs with the wider label-suffix decision. Also untouched: the TRUNC family, which enumerates a truncation length N that hashpipe does not currently generate.
  *
  * Revision 1.146  2026/09/01 06:59:58  dlr
  * Populate outer_fn for composed and salted types from hx.8. Work by mdx-debug; verified independently before check-in. 1.145 gave chained types their outermost iteration primitive but only where a chain existed, so HT registrations carrying a monolithic compute still fell through to hash_by_len and its width guess. This adds a 448-row name-to-function table, applied only where outer_fn is still NULL so HTC-derived values keep priority, and scoped to HTF_COMPOSED and HTF_SALTED since those are the only flags that consult it - a plain unsalted type iterates via ht->compute, which already IS its outermost hash. Strictly additive: 506 lines added, none removed. iter_fn and the -q class are untouched and the five -q types are held out of the table entirely. The table is DERIVED, not typed: scratchpad/gen_outer.py reads every hx.8 row, takes the outermost call, unwraps the non-hash wrappers upper, lower, hex and emit, and maps the primitive to this file compute functions. Four things the derivation exposed. First, troff markup hides expressions: a row reading md5(pass . salt) followed by an italic note failed a whole-string parse, and stripping the markup took resolution from 668 to 807 rows; 22 more sit in T-brace continuation cells. Second, unwrapping the outermost call is NOT sufficient - md4(utf16le(X)) iterates as compute_ntlm, not compute_md4, which is exactly what the HTC chains of that family already carry as their tail; cross-checking every chain tail against the hx.8-derived value found 23 disagreements of that shape, 5 of them HT-only and therefore silently wrong had the check not been made. It is distinct from md5(utf16le(pass) . salt), where the argument is a concatenation and the outer hash really is plain md5. Third, hash_by_len has no else arm, so outside 16, 20, 28, 32, 48 and 64 bytes it writes nothing at all and TIGERMD5 at 24 bytes, the HAV192 and HAV224 families and RMD320 were iterating into an uninitialised buffer. Fourth, the hinted and non-hinted paths disagreed: an unsalted composed type with no outer_fn fell to ht->compute in one and hash_by_len in the other. Judgement calls, recorded rather than guessed: 37 HMAC-outer types are excluded because HMAC is keyed and the salted path would call it with a NULL salt, and mdxfind emits no xNN for any HMAC type in work.res so there is no ground truth; 14 types have no single outermost call and are listed in scratchpad/unresolved_final.txt, of which seven are already at 100 percent on the gate so parsing them buys nothing. Measured against regress/work.res, which is mdxfind own output, testing EVERY line rather than one per label: over all 6514106 lines, verified rises from 2503483 to 2516807, a gain of 13324 with zero lines lost in any group, 62 groups improved and 36 reaching 100 percent. Label mismatches are unchanged at 421701 and a dedicated pass confirms every one is suffix-only, with no cross-type answer to round-trip. Independently reproduced here on a 3506-line per-label sample: 2489 to 2629, and MD2MD5 now verifies at x01, x02 and x03 where before it stopped at x01. Regression gates all hold: self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS; per-type pair test 278 of 278 alone and paired; John corpus 0 lost 0 gained with four attribution CORRECTIONS toward mdxfind - three MD5CAPx01 lines become MD5x02, which independent computation confirms is the right answer, and MACOSX gains the x01 suffix mdxfind emits; 42405 wrong-password lines across all changed groups give 0 false positives.
  *
  * Revision 1.145  2026/09/01 05:41:31  dlr
- * Iterate the OUTERMOST hash for chained types instead of guessing from the digest width. mdxfind rule, stated by Dave: the outermost hash is what iterates, always. hashpipe was calling hash_by_len, which maps the digest WIDTH to a fixed primitive - 16 bytes to MD5, 20 to SHA1, 32 to SHA256, 64 to SHA512 - and is therefore correct only by coincidence, whenever the outer hash happens to be that width default. Measured: MD2MD5 is md2(md5(pass)) per hx.8, outer MD2, 16 bytes, so it was iterated as MD5 and diverged from mdxfind at x02. Confirmed against mdxfind own output that MD2MD5x02 equals md2(hex(x01)), the outermost hash iterating, not the whole chain repeating. New hashtype field outer_fn holds that primitive. It is deliberately NOT iter_fn: iter_fn additionally marks the -q internal-iteration class, since maxinner is Iterstep when iter_fn is set and Maxiter otherwise, so reusing it would have swept every chained type into that class. All five iteration dispatch sites now prefer iter_fn, then outer_fn, then hash_by_len, leaving the -q class and its five types untouched. HTC chain types derive outer_fn automatically from chain[nchain-1].fn, which is already known to be the outermost step - the adjacent is_raw test uses the same element. This pass covers the chain types only. HT registrations carrying HTF_COMPOSED hold a monolithic compute function with nothing to introspect and still fall through to hash_by_len; deriving those from MAKE_COMPOSED resolves only 66 of 253, and function names cannot be trusted for it because the type name is outer-first while the function name is inner-first - SHA1MD5 registers compute_md5sha1. hx.8 is the source for the rest and that work is separate. Measured on a 3506-line sample taken one line per distinct label from regress/work.res, which is mdxfind own output: forced-type verification goes from 2397 to 2489, a gain of 92 with no losses. Four previously failing chain types verify at x02 and x03: MD4SHA1MD5, MD4UTF16MD5MD5, MD4UTF16MD5MD5MD5, MD4UTF16MD5MD5MD5MD5. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278 alone and paired; userdef round trip PASS; John corpus unchanged with 0 lost, 0 gained, 0 attribution changes and 0 false positives.
+ * Iterate the OUTERMOST hash for chained types instead of guessing from the digest width. mdxfind rule, stated by Waffle: the outermost hash is what iterates, always. hashpipe was calling hash_by_len, which maps the digest WIDTH to a fixed primitive - 16 bytes to MD5, 20 to SHA1, 32 to SHA256, 64 to SHA512 - and is therefore correct only by coincidence, whenever the outer hash happens to be that width default. Measured: MD2MD5 is md2(md5(pass)) per hx.8, outer MD2, 16 bytes, so it was iterated as MD5 and diverged from mdxfind at x02. Confirmed against mdxfind own output that MD2MD5x02 equals md2(hex(x01)), the outermost hash iterating, not the whole chain repeating. New hashtype field outer_fn holds that primitive. It is deliberately NOT iter_fn: iter_fn additionally marks the -q internal-iteration class, since maxinner is Iterstep when iter_fn is set and Maxiter otherwise, so reusing it would have swept every chained type into that class. All five iteration dispatch sites now prefer iter_fn, then outer_fn, then hash_by_len, leaving the -q class and its five types untouched. HTC chain types derive outer_fn automatically from chain[nchain-1].fn, which is already known to be the outermost step - the adjacent is_raw test uses the same element. This pass covers the chain types only. HT registrations carrying HTF_COMPOSED hold a monolithic compute function with nothing to introspect and still fall through to hash_by_len; deriving those from MAKE_COMPOSED resolves only 66 of 253, and function names cannot be trusted for it because the type name is outer-first while the function name is inner-first - SHA1MD5 registers compute_md5sha1. hx.8 is the source for the rest and that work is separate. Measured on a 3506-line sample taken one line per distinct label from regress/work.res, which is mdxfind own output: forced-type verification goes from 2397 to 2489, a gain of 92 with no losses. Four previously failing chain types verify at x02 and x03: MD4SHA1MD5, MD4UTF16MD5MD5, MD4UTF16MD5MD5MD5, MD4UTF16MD5MD5MD5MD5. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278 alone and paired; userdef round trip PASS; John corpus unchanged with 0 lost, 0 gained, 0 attribution changes and 0 false positives.
  *
  * Revision 1.144  2026/09/01 00:31:42  dlr
  * Read a John username that arrives in its OWN leading column. John writes several formats as user colon dollar dynamic N dollar hash, marking the name by position rather than with a dollar U token inside the wrapper. Because such a line does not START with dollar dynamic, john_unwrap never recognised the wrapper and the generator skipped the vector outright, so these formats could not be read and could not be mapped. Both sides now split the column off, unwrap the remainder, and splice the name back as the positional field - the same slot dollar U feeds, so the type verifier reads it identically. In hashpipe the unwrap writes straight into the caller buffer and the splice is done in place, so it costs no second buffer; recursion is depth 1 because the remainder begins with dollar dynamic and cannot re-enter the branch. One row gained, dynamic_1034 PostgreSQL MD5, which lands on MD5PASSSALT rather than POSTGRESQL because md5 of pass then user is arithmetically md5 of pass then salt and ties break to the lowest eN, the same situation the header already documents for dynamic_36. Recorded in the generator rather than fixed: when the wrapper ALSO carries a salt field, whether the leading column is the field the type reads is per-format, not general. dynamic_15 needs it kept, because its four sampled vectors mix the two shapes and dropping the name for the leading-column ones failed those vectors and cost the format its row entirely. dynamic_1602 needs the opposite, since QAS-VASAUTH reads hash colon salt and ignores the name. A global rule cannot satisfy both, so the column is used only when the wrapper has no field of its own; dynamic_1602 stays unmapped rather than cost dynamic_15 its row. That tradeoff was found by measuring, not reasoned: the first attempt gained dynamic_1602 and silently lost dynamic_15. Measured: raw John input 4511 to 4553 verified lines, 0 lost, 0 attribution changes, 0 false positives across the 6970-vector corpus fed a wrong password. JohnMap unchanged at 132 rows with zero lost, JohnMapLocal 50 to 51. Self-test 1026 passed 0 failed; genbad 103 of 103; per-type pair test 278 of 278; userdef round trip PASS.
@@ -166,10 +169,10 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 20
  * Fix three stack buffer overflows in verify functions. All three were live smashes on ordinary input at the DEFAULT -L, and all three predate this session - 1.138, 1.139 and 1.140 abort identically. Found when a wrapper-stripped BKS line of 2455 bytes aborted with stack_chk_fail inside verify_samsungsha1, which built its iteration-0 message in a 2048-byte STACK buffer from 1 plus passlen plus saltlen with no bound at all. A long-password stress over all 278 registered verify vectors, each with its own type selected and a 30000-byte password, then found two more: verify_drupal7 taking 8 plus passlen into a 1024-byte stack buffer, and verify_nsec3 taking a length byte plus passlen plus the domain labels plus the salt into a 1024-byte stack wire buffer. In every one of the three the iteration loop immediately below ALREADY used WS->gp1 correctly; only the setup block was missed, which is exactly why this survived review. All three now build in the pre-allocated per-thread workspace and are bounded once against WS_GP_SIZE. nsec3 needed gp3 because gp1 is salt_bin and gp2 is its iteration buffer. Twelve verify functions used the fixed-stack-buffer pattern. NINE carried a correct sizeof bound immediately before the copy and are safe; these THREE omitted it. That ratio is the argument against the pattern itself: the guard is invisible when absent and no build check catches it, whereas a WS slot cannot be sized wrong. The nine bounded sites are left alone here as they are not defects, but new verify functions should use WS buffers from the start. Recorded in the memory notes. Validation: the original crashing line now exits 0; the long-password stress across all 278 types gives 0 crashes where it previously gave 2; per-type pair test still 278 of 278 alone and paired, byte-identical to 1.140; the 6970-vector John corpus under both a strict all-verify -m and bare auto shows 0 lost, 0 gained and 0 attribution changes; self-test 1026 passed 0 failed; genbad 103 of 103; userdef round trip PASS.
  *
  * Revision 1.140  2026/08/31 22:21:34  dlr
- * Fix the residual verify loss: the bare-separator walk truncating non-hex hashes when no type hint is set. Diagnosis by mdx-debug. This is the other half of the class repaired in 1.139, and it survived that fix because it is a different mechanism: the line is never dropped, it is MIS-SPLIT. When two or more verify types are selected, parse_line sets no hint, hex validation of the field fails, and the bare-separator walk takes the first split whose other side is a complete even-length hex run. WPA-EAPOL had its 403-byte field truncated to a 2-byte hash of 00; POSTGRESSCRAM256 to 4096. The verify function then sees a fragment and cannot match. Affected exactly four types, by measurement over all 278 registered verify vectors run individually: WPA-EAPOL, WEB2PY-SHA512, SQLCIPHER, POSTGRESSCRAM256. The predicate needs all five of: field non-hex to the first colon, not a wrapper, contains one of dollar hash star, the walk finds an even-length hex side, and no shape recogniser. That is why WPA-PMKID and WPA-PMK survive with no recogniser at all, the walk simply declines them, and why WERKZEUG and the SAP pair survive despite the walk being willing, a recogniser fires first. The obvious fix, suppressing the walk when several verify types are selected, REGRESSES and was rejected on measurement: of the John corpus, 169 lines are walk-eligible, 103 take the walk and 70 DEPEND on it - HMAC family, mysql-sha1, leet, FormSpring. It costs 4 leet lines under strict and 70 under auto. No local heuristic separates the two groups; one dependent HMAC key is literally Beppe hash Grillo, structurally identical to a SQLCIPHER field. So the walk is DEFERRED rather than suppressed: a new per-item walk_deferred flag records that the split was withheld, and the walk is retried inside the EXISTING all-verify-types-failed recovery, mirroring the adjacent hex recovery. The deferred branch must also restore salt and password exactly as parse_line would have, or 26 mysql-sha1 stress lines are silently lost. The variant chosen also covers bare auto-detect, where the same truncation was not merely losing matches but GENERATING false ones: WPA-EAPOL auto-resolved to HMAC-HAV128x01 and POSTGRESSCRAM256 to SHA1MD5CAPSHA1SALTx01, both from a hash truncated to two bytes. All four now resolve correctly under bare auto. Measured per-type, each vector alone and then paired with a second verify type: 1.138 gave 188 of 278 paired, 1.139 gave 274, this gives 278 of 278 with zero lost. Over the 6970-vector John corpus: strict bundled -m is 0 lost, 0 gained, 0 attribution changes; bare auto is 0 lost, 0 gained with one cosmetic delta where a MACOSX7 line now reports its iteration suffix as x01. Self-test 1026 passed 0 failed, genbad 103 of 103, userdef round trip PASS, and the exhaustive false-positive sweep of all 278 wrong-password lines against all 278 types found 0. Flagged but deliberately NOT fixed, and recorded in the hashpipe memory doc at Dave request: hash_class is assigned from item hint vclass with the comment trust the hint, but three sites set that hint to a placeholder chosen purely by ModeList ordering. Harmless under strict -m since the earlier return fires first, a real hazard under -m with auto. Pre-existing and untouched here.
+ * Fix the residual verify loss: the bare-separator walk truncating non-hex hashes when no type hint is set. Diagnosis by mdx-debug. This is the other half of the class repaired in 1.139, and it survived that fix because it is a different mechanism: the line is never dropped, it is MIS-SPLIT. When two or more verify types are selected, parse_line sets no hint, hex validation of the field fails, and the bare-separator walk takes the first split whose other side is a complete even-length hex run. WPA-EAPOL had its 403-byte field truncated to a 2-byte hash of 00; POSTGRESSCRAM256 to 4096. The verify function then sees a fragment and cannot match. Affected exactly four types, by measurement over all 278 registered verify vectors run individually: WPA-EAPOL, WEB2PY-SHA512, SQLCIPHER, POSTGRESSCRAM256. The predicate needs all five of: field non-hex to the first colon, not a wrapper, contains one of dollar hash star, the walk finds an even-length hex side, and no shape recogniser. That is why WPA-PMKID and WPA-PMK survive with no recogniser at all, the walk simply declines them, and why WERKZEUG and the SAP pair survive despite the walk being willing, a recogniser fires first. The obvious fix, suppressing the walk when several verify types are selected, REGRESSES and was rejected on measurement: of the John corpus, 169 lines are walk-eligible, 103 take the walk and 70 DEPEND on it - HMAC family, mysql-sha1, leet, FormSpring. It costs 4 leet lines under strict and 70 under auto. No local heuristic separates the two groups; one dependent HMAC key is literally Beppe hash Grillo, structurally identical to a SQLCIPHER field. So the walk is DEFERRED rather than suppressed: a new per-item walk_deferred flag records that the split was withheld, and the walk is retried inside the EXISTING all-verify-types-failed recovery, mirroring the adjacent hex recovery. The deferred branch must also restore salt and password exactly as parse_line would have, or 26 mysql-sha1 stress lines are silently lost. The variant chosen also covers bare auto-detect, where the same truncation was not merely losing matches but GENERATING false ones: WPA-EAPOL auto-resolved to HMAC-HAV128x01 and POSTGRESSCRAM256 to SHA1MD5CAPSHA1SALTx01, both from a hash truncated to two bytes. All four now resolve correctly under bare auto. Measured per-type, each vector alone and then paired with a second verify type: 1.138 gave 188 of 278 paired, 1.139 gave 274, this gives 278 of 278 with zero lost. Over the 6970-vector John corpus: strict bundled -m is 0 lost, 0 gained, 0 attribution changes; bare auto is 0 lost, 0 gained with one cosmetic delta where a MACOSX7 line now reports its iteration suffix as x01. Self-test 1026 passed 0 failed, genbad 103 of 103, userdef round trip PASS, and the exhaustive false-positive sweep of all 278 wrong-password lines against all 278 types found 0. Flagged but deliberately NOT fixed, and recorded in the hashpipe memory doc at Waffle request: hash_class is assigned from item hint vclass with the comment trust the hint, but three sites set that hint to a placeholder chosen purely by ModeList ordering. Harmless under strict -m since the earlier return fires first, a real hazard under -m with auto. Pre-existing and untouched here.
  *
  * Revision 1.139  2026/08/31 18:59:08  dlr
- * Fix the ModeList verify pass losing matches when more than one verify type is selected. Diagnosis by mdx-debug; the two HTF_SALTED gates on the hash-colon-salt and hash-colon-alt_salt reconstructions are removed. Chain: parse_line only sets item->hint when EXACTLY one verify type is in -m, so two or more give hint NULL; with hint NULL and a hex-leading hash the parse splits at the FIRST colon, leaving hashstr as the bare digest and moving the salt into item->salt; the verify function then looks for a colon inside hashstr, does not find one, and returns 0. The two reconstruction branches exist to repair precisely this, but were gated on HTF_SALTED, which only 4 of 273 verify types set, so both were effectively dead code. The un-gated slow-queue scan does the same reconstruction correctly, which is why appending auto always worked. HTF_SALTED is meaningless for a verify type since the verify function parses its own hashstr. Both edits sit inside the if (ht->verify) block, so compute types are untouched. Measured on this tree with all 278 registered verify vectors and all 278 verify indices bundled into one -m: stock 189 attributed, fixed 273, so 84 types recovered, ZERO lost and ZERO attribution changes for anything already found. The 3 vectors that resolve to an alias name (SOLARWINDS2 to SOLARWINDS, SHA1MD5x1CAP to SHA1MD51CAP, SHA1SHA1CAPTRUNC to SHA1SHA11CAP) do so identically before and after; those are the intentional historical catalog aliases and are not a regression. False positives: all 84 recovered types re-run with a deliberately wrong password give 0 matches. Self-test 1026 passed 0 failed; genbad 103 of 103; the original reproducer -m e444,e278 now resolves LEET-SHA512-WRL-USER. Cost: verifies that previously short-circuited now actually run, so a bundled 278-type -m goes 2.3s to 3.8s on this fixture; a single-type -m is unchanged at 0.36s. This matters because -m stays STRICT by design per Dave 2026-08-31 - with no auto fallback there is nothing to recover a lost verify, so the gate had to go.
+ * Fix the ModeList verify pass losing matches when more than one verify type is selected. Diagnosis by mdx-debug; the two HTF_SALTED gates on the hash-colon-salt and hash-colon-alt_salt reconstructions are removed. Chain: parse_line only sets item->hint when EXACTLY one verify type is in -m, so two or more give hint NULL; with hint NULL and a hex-leading hash the parse splits at the FIRST colon, leaving hashstr as the bare digest and moving the salt into item->salt; the verify function then looks for a colon inside hashstr, does not find one, and returns 0. The two reconstruction branches exist to repair precisely this, but were gated on HTF_SALTED, which only 4 of 273 verify types set, so both were effectively dead code. The un-gated slow-queue scan does the same reconstruction correctly, which is why appending auto always worked. HTF_SALTED is meaningless for a verify type since the verify function parses its own hashstr. Both edits sit inside the if (ht->verify) block, so compute types are untouched. Measured on this tree with all 278 registered verify vectors and all 278 verify indices bundled into one -m: stock 189 attributed, fixed 273, so 84 types recovered, ZERO lost and ZERO attribution changes for anything already found. The 3 vectors that resolve to an alias name (SOLARWINDS2 to SOLARWINDS, SHA1MD5x1CAP to SHA1MD51CAP, SHA1SHA1CAPTRUNC to SHA1SHA11CAP) do so identically before and after; those are the intentional historical catalog aliases and are not a regression. False positives: all 84 recovered types re-run with a deliberately wrong password give 0 matches. Self-test 1026 passed 0 failed; genbad 103 of 103; the original reproducer -m e444,e278 now resolves LEET-SHA512-WRL-USER. Cost: verifies that previously short-circuited now actually run, so a bundled 278-type -m goes 2.3s to 3.8s on this fixture; a single-type -m is unchanged at 0.36s. This matters because -m stays STRICT by design per Waffle 2026-08-31 - with no auto fallback there is nothing to recover a lost verify, so the gate had to go.
  *
  * Revision 1.138  2026/08/31 16:44:32  dlr
  * Add e1027 SUNMD5, the Solaris crypt, completing the crypt(3) group sourced from John the Ripper. The initial digest is md5 of pass then salt; thereafter 4096 plus the rounds= value are run, each computing md5 of the previous digest, optionally a fixed 1517-byte phrase, and the decimal round number in ASCII. Whether the phrase is included is decided per round by a coin flip derived from bits of the previous digest: two seven-bit indices are assembled from digest bytes and the XOR of the bits they address gives the flip, so roughly half the rounds hash an extra 1517 bytes and the cost is data dependent rather than fixed by rounds= alone. The phrase is 1516 characters of Hamlet PLUS its terminating NUL, because Sun passed sizeof() - dropping the NUL yields a plausible but wrong digest for every candidate. The salt is everything before the LAST dollar sign, which also covers the variant whose salt itself ends in a dollar sign, with no special case. Digest is emitted with the md5crypt transposition, 22 characters. All 8 of John vectors verify in hashpipe and crack in mdxfind, including its 120-character password and the two vectors that share a salt, and mdxfind -z output cracks back in both tools. Two mdxfind-side traps worth recording: Typesalt for these structured types holds the WHOLE stored line, not the salt, so the salt must be re-derived inside the compute case; and the bootstrap FREES JudyJ after copying it into Typesalt, so a JSLG lookup there can never hit - compare the computed encoding against the stored line, as GOST12512CRYPT does. Both mistakes presented identically as a clean 0 of 8 with the hashes correctly loaded. New hx.8 row plus Note [46]; notes contiguous 1 through 46. Types[] APPENDED and verified identical between mdxfind.c and hashpipe.c. Self-test 1026 passed 0 failed; genbad 103 of 103; John corpus sweep shows the new types matching only their own vectors; bench rate measured on dev1.
@@ -377,7 +380,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 20
  * hint: emit_user_matches() already tries every loaded user type, so the tag needs
  * stripping, not steering.
  *
- * Dave: a user-defined type may not be resolvable at all, consider the case that
+ * Waffle: a user-defined type may not be resolvable at all, consider the case that
  * there is no user definition. So this deliberately does NOT fall back to
  * auto-detect on an unknown tag. With nothing loaded the tag stays unrecognised
  * and the line lands in unresolved, which is the honest answer; guessing a
@@ -407,7 +410,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 20
  * Revision 1.112  2026/08/29 03:21:04  dlr
  * Add _uc, a fifth output-role suffix: uppercase hex.
  *
- * Dave: look carefully at the _hex _bin and other hash-output-modifiers, that is
+ * Waffle: look carefully at the _hex _bin and other hash-output-modifiers, that is
  * likely the right place to add it. It was. The suffix mechanism already existed
  * and already did exactly the necessary thing, which is to select a
  * representation of the same digest and set a flag on the CALL instruction, so
@@ -478,7 +481,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.189 20
  * and pepper. prmd5 NUL-terminates at out[32] and the pepper copy immediately
  * overwrites that byte, so the ordering is right.
  *
- * Dave identified the sha1 call as the fault. It is one of the three
+ * Waffle identified the sha1 call as the fault. It is one of the three
  * inconsistent lines and the place the damage shows, but it and the pepper copy
  * are already correct for a digest anchored at linebuf; the misplaced write is
  * the prmd5 destination. Both repairs produce identical output, this one is a
@@ -1030,6 +1033,13 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 
 int Maxiter = 128;
 int Iterstep = 128;
+/* -c: the leading TYPE label is the contract, not a hint. Detection is limited
+ * to the labelled type at the labelled depth, so a corrupted or mislabelled
+ * pair is REJECTED rather than re-identified under some other type. Intended
+ * for validation-only work where the label is derived by trusted tooling --
+ * cmiyc-intake builds it from the solution file's extension -- and where a
+ * wrong label means the upstream naming is broken and should fail loudly. */
+int CheckLabel = 0;
 double MaxVerifyLimit = 1000.0;  /* -L: max estimated seconds per verify (default large = effectively unlimited) */
 
 /* Cost check for iterated verify functions.
@@ -6923,7 +6933,13 @@ static void compute_md5_pass_md5salt(const unsigned char *pass, int passlen, con
 }
 
 /* 521 SHA1SALTCX: SHA1('--' + salt + '----' + pass + '----')
- * Iteration: SHA1('--' + salt + hex(prev) + '--' + pass + '----') */
+ * Iteration: SHA1('--' + salt + '--' + hex(prev) + '--' + pass + '----')
+ *
+ * The iteration line previously omitted the '--' between salt and hex(prev).
+ * verify_sha1saltcx has always had it right; the comment did not. Confirmed
+ * against real corpus lines: an x02 hash reproduces only with the separator
+ * present. Nothing read this comment, but the next person to implement from
+ * it would have got the type wrong. */
 static void compute_sha1saltcx(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -20854,7 +20870,7 @@ static int verify_sha1sha11cap(const char *hashstr, int hashlen,
  * callers below already do, since each candidate re-runs prmd5 into the slot.
  *
  * Applies only where the result is a plain hex digest. Structured results
- * ($BLAKE2$ and the like) do not iterate and must not call this. Dave's rule,
+ * ($BLAKE2$ and the like) do not iterate and must not call this. Waffle's rule,
  * 2026-09-01. */
 static int hex_iter_match(char *computed, const char *hashstr, int kind)
 {
@@ -26014,7 +26030,16 @@ static void init_hashtypes(void)
 
     /* Special salt patterns */
     HT("SHA1SALTCX",        20, HTF_SALTED, compute_sha1saltcx, "b59b77c52921e5df0d007fec2518e0f726ce3aaf:administrator:password123");
-    { int _i = find_type_index("SHA1SALTCX"); if (_i >= 0) Hashtypes[_i].verify = verify_sha1saltcx; }
+    /* SHA1SALTCX verifies through verify_sha1saltcx at EVERY depth, x01
+     * included, so its compute is cleared here. The generic hex iteration
+     * cannot express this chain -- round 2+ re-uses the salt AND the original
+     * password, neither of which the iteration hook receives. While a compute
+     * was present, a hinted or -m-selected line at depth > 1 was routed to hex
+     * iteration and silently failed, while an unhinted line took the verify and
+     * passed: identify resolved these and -c and -m did not. */
+    { int _i = find_type_index("SHA1SALTCX");
+      if (_i >= 0) { Hashtypes[_i].verify = verify_sha1saltcx;
+                     Hashtypes[_i].compute = NULL; } }
     HT("SHA1MD5-PASSMD5SALT",20,HTF_SALTED | HTF_COMPOSED, compute_sha1md5_passmd5salt, "a0ed870e27d9a6c3083bfdd3df948c3269067c7d:salt:password123");
     HT("SHA1MD5SALTMD5PASS",20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5saltmd5pass, "0826e3b77f869ab50fd3f53fe18a8636d36dc639:salt:password123");
     HTV("SHA1-SHA512PASSSHA512SALT", HTF_SALTED, verify_sha1_sha512passsha512salt, "745e294d9926e240a47e0121df6857ae80ff75a2:1122334455667788:password123");
@@ -26457,7 +26482,7 @@ static void init_hashtypes(void)
 
     /* --- outer_fn for HT-registered composed and salted types ---------------
      *
-     * Dave's rule: the OUTERMOST hash of a construction is what iterates.
+     * Waffle's rule: the OUTERMOST hash of a construction is what iterates.
      * HTC chain types derive outer_fn from chain[nchain-1].fn above, but an
      * HT registration carrying HTF_COMPOSED holds one monolithic compute_*
      * function with no chain to introspect, so it fell through to
@@ -26506,6 +26531,34 @@ static void init_hashtypes(void)
     {
         static const struct { const char *name; hashfn_t fn; } outer_tab[] = {
         { "MD5SALT", (hashfn_t)compute_md5 },
+        /* Outermost hash for ten types that had no entry, derived from their
+         * hx.8 definitions. Without one, iteration falls back to a primitive
+         * chosen by digest WIDTH (16 bytes -> MD5), or in the hinted path to
+         * ht->compute, which re-runs the whole construction. Either way these
+         * verified at x01 and nowhere above it, under BOTH -m and -c.
+         *   MD5-4/5/6xMD5      h=md5(pass); md5(h . h ...)      -> md5
+         *   MD5SHA1u32         md5(cut(sha1(pass),0,32))        -> md5
+         *   MD5sub8-24MD5      md5(cut(md5(pass),8,16))         -> md5
+         *   SHA1MD5sub8-24MD5  sha1(md5(cut(md5(pass),8,16)))   -> sha1
+         *   MD5UCBASE64SHA1RAW md5_uc(base64(sha1_bin(pass)))   -> md5
+         *   SHA1UCUTF16LE      sha1_uc(utf16le(pass))           -> sha1
+         *   SHA1SALTCX         iterated SHA-1, hx.8 Note [16]   -> sha1
+         * The _uc forms take their case from HTF_UC, so the outer primitive is
+         * the plain one. */
+        { "MD5-4xMD5", (hashfn_t)compute_md5 },
+        { "MD5-5xMD5", (hashfn_t)compute_md5 },
+        { "MD5-6xMD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1u32", (hashfn_t)compute_md5 },
+        { "MD5sub8-24MD5", (hashfn_t)compute_md5 },
+        { "SHA1MD5sub8-24MD5", (hashfn_t)compute_sha1 },
+        { "MD5UCBASE64SHA1RAW", (hashfn_t)compute_md5 },
+        { "SHA1UCUTF16LE", (hashfn_t)compute_sha1 },
+        /* SHA1SALTCX deliberately has NO outer_fn. Its iteration is
+         *   SHA1("--" . salt . hex(prev) . "--" . pass . "----")
+         * which re-uses the salt AND the original password, while the generic
+         * hook is invoked as itfn(hex, len, NULL, 0, out) -- no salt, no
+         * password. No outer_fn can express it; it needs a dedicated iterating
+         * verify. Listing one here would silently compute the wrong digest. */
         { "MD5RAW", (hashfn_t)compute_md5 },
         { "SHA1RAW", (hashfn_t)compute_sha1 },
         { "SHA224RAW", (hashfn_t)compute_sha224 },
@@ -27623,6 +27676,7 @@ struct workitem {
     int fullpasslen;
     struct hashtype *hint;  /* type hint, or NULL */
     int hint_iter;          /* iteration count from xNN suffix */
+    int label_user;         /* user-type index named by the label, else -1 */
     int walk_deferred;      /* bare-separator split withheld; retry after verify */
     int hash_is_uc;         /* original hex had uppercase */
     int john_in;            /* line arrived in John $dynamic_N$ form (-J 1) */
@@ -28794,7 +28848,15 @@ retry_with_fullpass:
 
                 /* Determine iteration function: iter_fn if set, else compute
                  * (but for salted types, compute includes salt processing
-                 * which is wrong for iteration — use hash_by_len instead) */
+                 * which is wrong for iteration — use hash_by_len instead).
+                 *
+                 * ht->compute is REQUIRED here for plain single-primitive
+                 * types: iterating MD4 means re-running MD4, and dropping to
+                 * hash_by_len instead picks a primitive by digest WIDTH, so
+                 * 16 bytes yields MD5 and every 16-byte non-MD5 type breaks.
+                 * Removing this fallback to help chained types cost 5148 lines
+                 * across ~117 types (MD2, MD4, TIGER, the BLAKE/BMW/SKEIN
+                 * families) and was reverted. */
                 itfn = ht->iter_fn ? ht->iter_fn :
                        ht->outer_fn ? ht->outer_fn :
                        (ht->flags & HTF_SALTED) ? NULL : ht->compute;
@@ -28855,9 +28917,18 @@ retry_with_fullpass:
                  * the base iteration, capping such a type at exactly 1/nbases of its
                  * lines at depth. This is the hinted path's copy of the defect fixed for
                  * the composed and salted hard passes in 1.147. */
-                { int _b;
+                /* Try BOTH hex cases rather than deciding from HTF_UC. That
+                 * flag does not always describe the ITERATION hex: SHA1UCWRL is
+                 * sha1(upper(wrl(pass))), where the upper() applies to an inner
+                 * operand, so forcing uppercase hex here made it verify at x01
+                 * and nowhere above. The ModeList composed branch never
+                 * uppercases and gets these right, which is why they passed
+                 * under -m and failed under -c. Trying both can only add
+                 * matches; a wrong case simply does not compare equal. */
+                { int _b, _uc;
                   const unsigned char *_sb = (ht->flags & HTF_SALTED) ? saltbin : NULL;
                   int _sl = (ht->flags & HTF_SALTED) ? saltbinlen : 0;
+                  for (_uc = 0; _uc <= 1; _uc++) {
                   for (_b = 0; _b < 3; _b++) {
                     if (_b == 1 && !ht->compute_alt)  continue;
                     if (_b == 2 && !ht->compute_alt2) continue;
@@ -28865,7 +28936,15 @@ retry_with_fullpass:
                     else if (_b == 1) ht->compute_alt(pass, passlen, _sb, _sl, iterbuf);
                     else              ht->compute_alt2(pass, passlen, _sb, _sl, iterbuf);
                     for (iter = bi + 1; iter <= target; iter++) {
-                        if (uc)
+                      if (ht->flags & HTF_ITER_RAW) {
+                        /* RAW types iterate the BINARY digest, not its hex --
+                         * the same rule the ModeList salted pass carries. The
+                         * hinted path lacked it, so a raw-iterating type could
+                         * not verify past x01 here either. */
+                        hash_by_len(fullbytes, (unsigned char *)iterbuf,
+                                    fullbytes, computed);
+                      } else {
+                        if (_uc)
                             prmd5UC(iterbuf, hexiter, fullbytes * 2);
                         else
                             prmd5(iterbuf, hexiter, fullbytes * 2);
@@ -28874,6 +28953,7 @@ retry_with_fullpass:
                         else
                             hash_by_len(fullbytes, (unsigned char *)hexiter,
                                         fullbytes * 2, computed);
+                      }
                         memcpy(iterbuf, computed, fullbytes);
                     }
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
@@ -28885,11 +28965,19 @@ retry_with_fullpass:
                         return;
                     }
                   }
+                  }
                 }
             hint_iter_done: ;
             }
         }
     }
+
+    /* -c: the hinted pass above IS the whole of detection. Returning here
+     * leaves the item unverified so it lands in -E, which is the intended
+     * answer: this pair is not what its label claims. User-defined types are
+     * unaffected -- emit_user_matches runs from the batch loop, not from here,
+     * so a userdef label is still matched by its own path. */
+    if (CheckLabel) return;
 
     /* --- ModeList x=1 pass (try -m types only) --- */
     if (ModeCount > 0) {
@@ -29034,6 +29122,7 @@ retry_with_fullpass:
         for (m = 0; m < ModeCount; m++) {
             struct hashtype *ht = &Hashtypes[ModeList[m]];
             int fullbytes;
+            int _b;
 
             if (ht->hashlen < hashbytes) continue;
             if (ht->verify) continue;
@@ -29042,6 +29131,15 @@ retry_with_fullpass:
             /* Unsalted non-composed: iterate + UC variant */
             if (!(ht->flags & (HTF_SALTED | HTF_COMPOSED | HTF_UC))) {
                 int uc;
+                /* Iterate the OUTERMOST hash when one is registered. ht->compute
+                 * is the right iteration function for a plain single-primitive
+                 * type (iterating MD4 means re-running MD4) but NOT for a
+                 * chained one registered with no flags -- MD5-4xMD5 re-ran its
+                 * whole four-block construction every round and so verified at
+                 * x01 and nowhere above it. Falls back to compute exactly as
+                 * before when no outer_fn exists. */
+                hashfn_t _pitf = ht->iter_fn ? ht->iter_fn :
+                                 ht->outer_fn ? ht->outer_fn : ht->compute;
                 for (uc = 0; uc <= 1; uc++) {
                     ht->compute(pass, passlen, NULL, 0, iterbuf);
                     for (iter = 2; iter <= Maxiter; iter++) {
@@ -29049,7 +29147,7 @@ retry_with_fullpass:
                             prmd5UC(iterbuf, hexiter, fullbytes * 2);
                         else
                             prmd5(iterbuf, hexiter, fullbytes * 2);
-                        ht->compute((unsigned char *)hexiter, fullbytes * 2,
+                        _pitf((unsigned char *)hexiter, fullbytes * 2,
                                     NULL, 0, computed);
                         if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                             item->verified = 1;
@@ -29079,10 +29177,14 @@ retry_with_fullpass:
                 !(ht->flags & (HTF_SALTED | HTF_COMPOSED | HTF_NTLM))) {
                 struct hashtype *ucbase = find_uc_base(ht);
                 if (ucbase && ucbase->compute && ucbase->hashlen == fullbytes) {
+                    hashfn_t _uitf = ht->iter_fn ? ht->iter_fn :
+                                     ht->outer_fn ? ht->outer_fn :
+                                     ucbase->outer_fn ? ucbase->outer_fn :
+                                     ucbase->compute;
                     ucbase->compute(pass, passlen, NULL, 0, iterbuf);
                     for (iter = 2; iter <= Maxiter; iter++) {
                         prmd5UC(iterbuf, hexiter, fullbytes * 2);
-                        ucbase->compute((unsigned char *)hexiter, fullbytes * 2,
+                        _uitf((unsigned char *)hexiter, fullbytes * 2,
                                         NULL, 0, computed);
                         if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                             item->verified = 1;
@@ -29110,7 +29212,22 @@ retry_with_fullpass:
                  * end raw keeps working. */
                 int is_raw = (ht->chain && ht->nchain > 0 &&
                               ht->chain[ht->nchain - 1].uc_hex == 2);
-                hash_compute(ht, pass, passlen, NULL, 0, iterbuf);
+                /* Seed the chain from EVERY registered base encoding, not
+                 * just the primary. A multi-emit type (HT_ALT / HT_ALT2)
+                 * produces more than one digest per password and mdxfind emits
+                 * them all, so seeding only from the primary capped such a type
+                 * at exactly 1/nbases of its lines above the base iteration --
+                 * measured at 1/3 for the eleven HT_ALT2 types selected by -m,
+                 * where the x=1 pass already tried all three encodings but this
+                 * one did not. This is the ModeList pass's copy of the defect
+                 * fixed for the hinted path above and for the composed and
+                 * salted hard passes in 1.147. */
+                for (_b = 0; _b < 3; _b++) {
+                if (_b == 1 && !ht->compute_alt)  continue;
+                if (_b == 2 && !ht->compute_alt2) continue;
+                if (_b == 0)      hash_compute(ht, pass, passlen, NULL, 0, iterbuf);
+                else if (_b == 1) ht->compute_alt(pass, passlen, NULL, 0, iterbuf);
+                else              ht->compute_alt2(pass, passlen, NULL, 0, iterbuf);
                 for (iter = 2; iter <= maxinner; iter++) {
                     if (is_raw) {
                         /* RAW types: iterate on binary output directly */
@@ -29141,13 +29258,29 @@ retry_with_fullpass:
                     }
                     memcpy(iterbuf, computed, fullbytes);
                 }
+                }
             }
 
             /* Salted: salt in base computation, iterate without salt */
             if ((ht->flags & HTF_SALTED) && salt_present &&
                 !(ht->flags & HTF_UC)) {
                 int maxinner = ht->iter_fn ? Iterstep : Maxiter;
-                hash_compute(ht, pass, passlen, saltbin, saltbinlen, iterbuf);
+                /* Seed the chain from EVERY registered base encoding, not
+                 * just the primary. A multi-emit type (HT_ALT / HT_ALT2)
+                 * produces more than one digest per password and mdxfind emits
+                 * them all, so seeding only from the primary capped such a type
+                 * at exactly 1/nbases of its lines above the base iteration --
+                 * measured at 1/3 for the eleven HT_ALT2 types selected by -m,
+                 * where the x=1 pass already tried all three encodings but this
+                 * one did not. This is the ModeList pass's copy of the defect
+                 * fixed for the hinted path above and for the composed and
+                 * salted hard passes in 1.147. */
+                for (_b = 0; _b < 3; _b++) {
+                if (_b == 1 && !ht->compute_alt)  continue;
+                if (_b == 2 && !ht->compute_alt2) continue;
+                if (_b == 0)      hash_compute(ht, pass, passlen, saltbin, saltbinlen, iterbuf);
+                else if (_b == 1) ht->compute_alt(pass, passlen, saltbin, saltbinlen, iterbuf);
+                else              ht->compute_alt2(pass, passlen, saltbin, saltbinlen, iterbuf);
                 for (iter = 2; iter <= maxinner; iter++) {
                     if (ht->flags & HTF_ITER_RAW) {
                         /* RAW types iterate the BINARY digest, not its hex.
@@ -29180,6 +29313,7 @@ retry_with_fullpass:
                         return;
                     }
                     memcpy(iterbuf, computed, fullbytes);
+                }
                 }
             }
         }
@@ -29786,6 +29920,7 @@ static int emit_user_matches(struct workitem *item, int *outpos);
  * algorithm. Defined after the userdef.h include below; forward-declared here.
  */
 static int userdef_tag_is_known(const char *name);
+static int userdef_index_by_name(const char *name);
 
 /*
  * John-native output shapes for types whose John spelling is NOT the generic
@@ -30816,10 +30951,20 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
     type_end = NULL;
     item->hint = NULL;
     item->hint_iter = 0;
+    item->label_user = -1;
     item->walk_deferred = 0;
 
     {
         const char *sp = memchr(p, ' ', linelen);
+        if (!sp && CheckLabel) {
+            /* -c: no label at all. Rejecting the batch is deliberate -- under
+             * -c an unlabelled line means the producer is not emitting what
+             * this mode contracts for, and quietly detecting a subset would
+             * reintroduce the full search this mode exists to avoid. */
+            fprintf(stderr, "INVALID LABEL: %.*s\n", linelen, line);
+            fflush(stderr);
+            exit(2);
+        }
         if (sp) {
             /* Candidate type hint before the space */
             type_start = p;
@@ -30846,17 +30991,30 @@ static int parse_line(const char *line, int linelen, struct batch *b, int idx)
                 item->hint = find_type_by_name(typebuf);
                 if (item->hint) {
                     item->hint_iter = iterval;
-                } else if (userdef_tag_is_known(typebuf)) {
+                } else if ((item->label_user =
+                                userdef_index_by_name(typebuf)) >= 0) {
                     /* A loaded user-defined type. It has no Hashtypes[] entry,
                      * so there is no hint to set; the tag simply has to come
                      * off so the digest field is the digest. */
                     item->hint_iter = iterval;
+                } else if (CheckLabel) {
+                    /* -c: the label names no type this build knows. That is a
+                     * broken contract rather than a bad line -- the producer's
+                     * type vocabulary and ours disagree, so every following
+                     * line is suspect too. Fail immediately and loudly. */
+                    fprintf(stderr, "INVALID LABEL: %.*s\n", linelen, line);
+                    fflush(stderr);
+                    exit(2);
                 } else {
                     /* Not a valid type name — treat entire line as hash:pass.
                      * Required, not merely defensive: a password containing a
                      * space puts a space in the line with no tag present. */
                     p = line;
                 }
+            } else if (CheckLabel) {
+                fprintf(stderr, "INVALID LABEL: %.*s\n", linelen, line);
+                fflush(stderr);
+                exit(2);
             } else {
                 p = line;
             }
@@ -32003,6 +32161,11 @@ static void usage(int brief)
         "  -T     Run self-tests on all registered types\n"
         "  -G     As -T, but also emit the generated example vectors\n"
         "  -L N   Max estimated seconds for a single verify (default 1000).\n"
+        "  -c     Verify each line against its own leading TYPE label ONLY.\n"
+        "         No detection and no fallback: a pair that does not verify as\n"
+        "         its label is written to -E. A label naming an unknown type is\n"
+        "         fatal -- INVALID LABEL on stderr and a non-zero exit. The xNN\n"
+        "         suffix sets the iteration depth, so -i does not bound it.\n"
         "         Below this, an expensive verify is DECLINED and the line is\n"
         "         reported unresolved, which looks exactly like a genuine miss\n"
         "  -J N   Output format: 0 mdxfind, 1 John for John input, 2 John where\n"
@@ -32150,18 +32313,23 @@ static const struct { int idx; long long rate; } bench_rates[] = {
 static __thread hx_vm  *UserVMs       = NULL;   /* [userdef_count()] */
 static __thread int     UserVMs_count = 0;      /* allocated length   */
 
-static int userdef_tag_is_known(const char *name)
+static int userdef_index_by_name(const char *name)
 {
     int n, i;
 
-    if (!name || !*name) return 0;
+    if (!name || !*name) return -1;
     n = userdef_count();
     for (i = 0; i < n; i++) {
         struct userdef_type *ut = userdef_get_by_index(i);
         if (ut && ut->dispname[0] && strcasecmp(ut->dispname, name) == 0)
-            return 1;
+            return i;
     }
-    return 0;
+    return -1;
+}
+
+static int userdef_tag_is_known(const char *name)
+{
+    return userdef_index_by_name(name) >= 0;
 }
 
 /* Was this user-type index named by -m u<id>?  Used to skip it on the second
@@ -32195,6 +32363,14 @@ static int emit_user_matches(struct workitem *item, int *outpos)
 
     if (nuser <= 0) return 0;               /* no user types loaded */
     if (!item->hashstr || item->hashlen <= 0) return 0;
+
+    /* -c: detection is limited to the label, and this function otherwise tries
+     * EVERY loaded user type. Without the two gates here a line labelled with a
+     * built-in type could still be emitted as a user type, and a mislabelled
+     * user line would be re-identified as a different user type -- both exactly
+     * what -c exists to prevent. A built-in label leaves label_user at -1, so
+     * the first test also covers it. */
+    if (CheckLabel && item->label_user < 0) return 0;
 
     /* Lazily build this thread's per-user-type hx_vm array. */
     if (UserVMs_count < nuser) {
@@ -32247,6 +32423,7 @@ static int emit_user_matches(struct workitem *item, int *outpos)
         hx_val r;
         int j, eq;
 
+        if (CheckLabel && u != item->label_user) continue;
         if (!ut || !ut->prog) continue;
         if (!UserVMs[u].prog) continue;                  /* init failed    */
 
@@ -32576,7 +32753,7 @@ int main(int argc, char **argv)
       }
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DYJ:")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DYJ:c")) != -1) {
         switch (opt) {
         case 'J':
             /*
@@ -32603,6 +32780,9 @@ int main(int argc, char **argv)
         case 'i':
             Maxiter = atoi(optarg);
             if (Maxiter < 1) Maxiter = 1;
+            break;
+        case 'c':
+            CheckLabel = 1;
             break;
         case 'q':
             Iterstep = atoi(optarg);
@@ -32841,8 +33021,20 @@ int main(int argc, char **argv)
     if (TestAll) {
         int _m, _pass = 0, _fail = 0, _skip = 0;
         int _ntests = (ModeCount > 0) ? ModeCount : Numtypes;
+        /* Failures are recorded as they happen so the recap below can list
+         * them without recomputing. The recap used to re-run every test,
+         * which doubled the work and could print a DIFFERENT digest than the
+         * one that actually failed: a miscompiled library reading stale
+         * buffer state is not a pure function of its input, so the two passes
+         * disagreed and a type appeared twice with two different values. */
+        int _nfail = 0;
+        int *_failt;
+        char (*_failhex)[MAX_HASH_BYTES * 2 + 1];
         struct workspace *_ws = (struct workspace *)calloc(1, sizeof(*_ws));
         if (!_ws) { perror("calloc"); exit(1); }
+        _failt = (int *)calloc(_ntests > 0 ? _ntests : 1, sizeof(int));
+        _failhex = calloc(_ntests > 0 ? _ntests : 1, MAX_HASH_BYTES * 2 + 1);
+        if (!_failt || !_failhex) { perror("calloc"); exit(1); }
         _ws->testvec = malloc(TESTVECSIZE + 16);
         ws_init_rhash(_ws);
         WS = _ws;
@@ -32854,7 +33046,12 @@ int main(int argc, char **argv)
             int passlen;
 
             if (!ht->example) {
-                if (!GenExamples) continue;
+                if (!GenExamples) {
+                    printf("e%-4d %-30s SKIP (no test vector)\n",
+                        _t, ht->name ? ht->name : "(unnamed)");
+                    _skip++;
+                    continue;
+                }
                 /* -G mode: generate test vector for this type */
                 if ((ht->compute && ht->hashlen > 0) || ht->nchain > 0) {
                     unsigned char gdest[MAX_HASH_BYTES];
@@ -32884,7 +33081,12 @@ int main(int argc, char **argv)
 
             ex = ht->example;
             clast = strrchr(ex, ':');
-            if (!clast) continue;
+            if (!clast) {
+                printf("e%-4d %-30s SKIP (malformed test vector)\n",
+                    _t, ht->name ? ht->name : "(unnamed)");
+                _skip++;
+                continue;
+            }
 
             pass = (const unsigned char *)(clast + 1);
             passlen = strlen(clast + 1);
@@ -32906,6 +33108,9 @@ int main(int argc, char **argv)
                     _pass++;
                 } else {
                     printf("e%-4d %-30s FAIL\n", _t, ht->name);
+                    _failt[_nfail] = _t;
+                    _failhex[_nfail][0] = 0;
+                    _nfail++;
                     _fail++;
                 }
             } else if ((ht->compute && ht->hashlen > 0) || ht->nchain > 0) {
@@ -32924,7 +33129,12 @@ int main(int argc, char **argv)
 
                 /* Parse hash[:salt]:password */
                 c1 = strchr(ex, ':');
-                if (!c1) { _skip++; continue; }
+                if (!c1) {
+                    printf("e%-4d %-30s SKIP (malformed test vector)\n",
+                        _t, ht->name ? ht->name : "(unnamed)");
+                    _skip++;
+                    continue;
+                }
 
                 if (c1 < clast) {
                     /* hash:salt:password — extract salt */
@@ -32947,58 +33157,34 @@ int main(int argc, char **argv)
                     _pass++;
                 } else {
                     printf("e%-4d %-30s FAIL (got %s)\n", _t, ht->name, hexout);
+                    _failt[_nfail] = _t;
+                    snprintf(_failhex[_nfail], MAX_HASH_BYTES * 2 + 1, "%s", hexout);
+                    _nfail++;
                     _fail++;
                 }
             }
         }
-        printf("\n%d passed, %d failed, %d skipped\n", _pass, _fail, _skip);
-        if (_fail > 0) {
-            printf("\n");
-            for (_m = 0; _m < _ntests; _m++) {
-                int _t = (ModeCount > 0) ? ModeList[_m] : _m;
-                struct hashtype *ht = &Hashtypes[_t];
-                const char *ex, *clast;
-                const unsigned char *tpass;
-                int tpasslen;
-                if (!ht->example) continue;
-                ex = ht->example;
-                clast = strrchr(ex, ':');
-                if (!clast) continue;
-                tpass = (const unsigned char *)(clast + 1);
-                tpasslen = strlen(clast + 1);
-                if (ht->verify) {
-                    char tmp[512];
-                    int hashstrlen = (int)(clast - ex);
-                    if (hashstrlen >= (int)sizeof(tmp)) continue;
-                    memcpy(tmp, ex, hashstrlen);
-                    tmp[hashstrlen] = 0;
-                    if (!ht->verify(tmp, hashstrlen, tpass, tpasslen))
-                        printf("e%-4d %-30s FAIL\n", _t, ht->name);
-                } else if ((ht->compute && ht->hashlen > 0) || ht->nchain > 0) {
-                    unsigned char dest2[MAX_HASH_BYTES];
-                    char hexout2[MAX_HASH_BYTES * 2 + 1];
-                    const char *c1 = strchr(ex, ':');
-                    const unsigned char *salt2 = NULL;
-                    int saltlen2 = 0, hashlen2;
-                    if (!c1) continue;
-                    if (ht->hashlen > MAX_HASH_BYTES) continue;
-                    if (c1 < clast) {
-                        hashlen2 = (int)(c1 - ex);
-                        salt2 = (const unsigned char *)(c1 + 1);
-                        saltlen2 = (int)(clast - c1 - 1);
-                    } else {
-                        hashlen2 = (int)(c1 - ex);
-                    }
-                    memset(dest2, 0, sizeof(dest2));
-                    hash_compute(ht, tpass, tpasslen, salt2, saltlen2, dest2);
-                    prmd5(dest2, hexout2, ht->hashlen * 2);
-                    hexout2[ht->hashlen * 2] = 0;
-                    if (strncasecmp(hexout2, ex, hashlen2) != 0)
-                        printf("e%-4d %-30s FAIL (got %s)\n", _t, ht->name, hexout2);
-                }
+        /* Recap the failures from what was recorded above, then print the
+         * summary exactly once. This block used to re-run every test and
+         * print both the failures and the summary a second time: with a
+         * miscompiled library the recomputation disagreed with the first
+         * pass, so one type was listed twice with two different digests and
+         * a reader counted more failing types than there were. */
+        if (_nfail > 0) {
+            printf("\nFailed:\n");
+            for (_m = 0; _m < _nfail; _m++) {
+                struct hashtype *ht = &Hashtypes[_failt[_m]];
+                const char *nm = ht->name ? ht->name : "(unnamed)";
+                if (_failhex[_m][0])
+                    printf("e%-4d %-30s FAIL (got %s)\n",
+                        _failt[_m], nm, _failhex[_m]);
+                else
+                    printf("e%-4d %-30s FAIL\n", _failt[_m], nm);
             }
-            printf("\n%d passed, %d failed, %d skipped\n", _pass, _fail, _skip);
         }
+        printf("\n%d passed, %d failed, %d skipped\n", _pass, _fail, _skip);
+        free(_failt);
+        free(_failhex);
         ws_free_rhash(_ws);
         free(_ws->testvec);
         free(_ws);

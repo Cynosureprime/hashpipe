@@ -1,6 +1,15 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.3 $
+.\" $Revision: 1.6 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.6  2026/09/04 17:16:45  dlr
+.\" Document -c, which verifies each line against its own leading TYPE label and rejects what does not match. Covers the failure modes, deliberately loud where -m is silent: an unknown label is fatal with INVALID LABEL on stderr and exit 2, a line with no label is treated the same, and a pair that simply does not verify goes to -E with the run still completing 0. Records that the xNN suffix sets the depth so -i does not bound it, and that user-defined types are restricted the same way. Adds a Why this mode exists subsection giving the reasoning: verifying is one hash, identifying may be hundreds, and after an mdxfind run the type is already on the line, measured over the full generated corpus at over an hour against 98.7 seconds with both resolving all 7234771 lines. Notes the trade of recall for strictness and the two pass recipe that recovers it. EXIT STATUS now covers 2 and distinguishes an invalid label from a line that merely failed to verify. TH to 1.190.
+.\"
+.\" Revision 1.5  2026/08/31 18:15:06  dlr
+.\" Document that -m selection is strict by design: it is a filter, not a hint. A type not listed is never tried and there is no fallback to auto-detection unless auto appears in the spec. Records the failure mode, which is the operationally important part: an omitted type sends the line to stderr as unresolved, reported exactly like a failed verify, with nothing distinguishing a wrong type selection from a wrong password. Same shape of silent negative as the -L cost guard, and it wants the same discipline - append auto when the type is uncertain, and when measuring coverage over a bundled type list. Waffle decision 2026-08-31, after weighing making -m a preference instead; strict is the better fit for how the tool is actually used.
+.\"
+.\" Revision 1.4  2026/08/29 18:06:35  dlr
+.\" Three updates for hashpipe.c 1.114. The -X -p mode now decodes $HEX[...], closing the divergence with the standalone hx command that the page previously recorded as current behaviour; shows the two invocations agreeing, with the pre-1.114 behaviour kept as one sentence since it explains older output. Makes -s dual use explicit: one handler assigns both statfile and hx_salt, the meaning is decided by mode alone, both cannot be had in one invocation and there is no diagnostic if the other meaning was expected; the hx-mode entry cross-references it. Bumps TH to 1.114. Page covers 25 of 25.
+.\"
 .\" Revision 1.3  2026/08/29 17:35:32  dlr
 .\" Two additions. Show the $HEX[] wrapper on output with a verified pair of equivalent invocations, plain colon-bearing password and hex-wrapped, both yielding the same line, and state that the password is everything after the preceding field so a colon parses. Separately, record that -X mode does NOT decode $HEX[] on -p, unlike the standalone hx command running the same language: a wrapped argument is hashed as the literal text. Verified -- hashpipe -X md5(pass) -p $HEX[616c706861] returns md5 of the literal string, while hx -p with the same argument returns md5 of alpha.
 .\"
@@ -10,7 +19,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-08-29" "hashpipe 1.113" "Password Recovery"
+.TH HASHPIPE 1 "2026-09-04" "hashpipe 1.190" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -99,6 +108,84 @@ ranges.  The token
 anywhere in the list re-enables full auto-detection as a fallback after the
 listed types fail.  Restricting the type set is the single most effective
 way to speed up a large run.
+.IP
+Selection is
+.I strict
+by design:
+.B \-m
+is a filter, not a hint.  A type that is not listed is never tried, and there is
+no fallback to auto-detection unless
+.B auto
+appears in
+.IR spec .
+.IP
+The failure mode follows from that.  If the correct type is not in the list, the
+line goes to standard error as unresolved \(em reported exactly like a failed
+verify, with nothing to distinguish
+.I "the right type was not selected"
+from
+.IR "the password does not match" .
+This is the same shape of silent negative that
+.B \-L
+produces, and it wants the same discipline: append
+.B auto
+whenever the type is uncertain, and whenever measuring coverage over a bundled
+type list, where an omitted type under-reports silently rather than erroring.
+.TP
+.B \-c
+Verify each line against its own leading
+.I TYPE
+label and nothing else.  Detection is not run and there is no fallback: a pair
+that does not verify as the type its label names is written to
+.B \-E
+as unresolved.
+.IP
+The label is the one
+.BR mdxfind (1)
+already emits \(em its output is
+.I "TYPE hash[:salt]:password"
+\(em so a solution file feeds straight back in.  Tools that derive the type
+from a filename produce the same shape; the contest intake script builds it
+from the solution file's extension.
+.IP
+This is the mirror image of
+.BR \-m .
+Where
+.B \-m
+applies one filter to the whole run,
+.B \-c
+takes the type from each line, so a mixed file of many types costs one verify
+per line rather than a search.  Where an omitted type under
+.B \-m
+produces a silent negative,
+.B \-c
+is deliberately loud: a label naming a type this build does not know is
+.I fatal.
+The offending line is printed to standard error as
+.IP
+.RS
+.B "INVALID LABEL: " \fIline\fP
+.RE
+.IP
+and the process exits non-zero (2) immediately, on the reasoning that the
+producer's type vocabulary and this build's disagree, so every following line
+is equally unjudgeable.  A line carrying no label at all is treated the same
+way.
+.IP
+The
+.I xNN
+suffix sets the iteration depth, so
+.B \-i
+does not bound it: a label of
+.I x1000000
+performs a million rounds because the label asked for them.  This mode is an
+explicit verifier, and the cost is the operator's to choose.
+.IP
+User-defined types are restricted the same way.  A label naming a user type
+tries only that type, and a label naming a built-in type does not try user
+types at all \(em without which a mislabelled line could still be re-identified
+as something else, which is the one thing this mode exists to prevent.  A user
+label with no user definition loaded is an invalid label and therefore fatal.
 .TP
 .BI \-i " count"
 Maximum iteration depth for the hard pass.  Default 128.
@@ -128,6 +215,40 @@ has no such guard, so its negative results on these types are real.
 .TP
 .BI \-t " count"
 Worker thread count.  Defaults to the number of CPUs.
+.SS "Why this mode exists"
+.PP
+Verifying a pair is cheap; finding which of a thousand-odd types produced it is
+not.  Auto-detection must try candidate types in turn, and for an ambiguous
+digest width that includes expensive ones, so the cost per line is a search
+rather than a single hash.  When the type is already known \(em and after an
+.BR mdxfind (1)
+run it always is, because the label is right there on the line \(em that search
+is pure waste.
+.PP
+Measured on the full generated regression corpus, 7,234,771 lines across 1,020
+types on one machine:
+.PP
+.RS
+.PD 0
+.TP 16
+auto\-detect
+more than 1 hour
+.TP 16
+.B \-c
+98.7 seconds
+.PD
+.RE
+.PP
+Both resolve all 7,234,771 lines.  Per type the gap is wider still \(em an
+iterated salted type measured 2.41 seconds identifying against 0.01 seconds
+when the type was known, about 240 to 1 \(em because the saving scales with how
+many candidates a shape admits and how costly the wrong ones are.
+.PP
+The trade is recall for speed and strictness.  A mislabelled but otherwise
+correct solution is rejected rather than recovered.  Where that matters, run
+.B \-c
+first and re-run only its rejects without it: the second pass sees a few
+hundred lines instead of millions, so it costs almost nothing and gets both.
 .SS "Output routing"
 .TP
 .BI \-o " file"
@@ -155,7 +276,22 @@ but truncate first.
 .BI \-s " file"
 Append run statistics to
 .IR file .
-In hx expression mode this same option supplies the salt instead.
+.IP
+.B \-s
+is
+.IR "dual use" .
+A single option handler assigns its argument to both the statistics file and
+the hx salt, and which one takes effect depends only on the mode: in a normal
+verification run it is a filename, and in hx expression mode \(em
+.B \-X
+or
+.B \-F
+\(em it is the value bound to the
+.B salt
+variable.  It is listed again under
+.B "hx expression mode"
+below for that reason.  There is no way to have both in one invocation, and
+no diagnostic if you expect the other meaning.
 .TP
 .BI \-J " 0|1|2"
 Output format.
@@ -215,24 +351,32 @@ Evaluate for this single password.  Without
 .BR \-p ,
 passwords are read one per line from standard input.
 .IP
-Unlike the rest of
-.BR hashpipe ,
-and unlike the standalone
-.BR hx (1)
-command, this mode does
-.I not
-decode
 .BI $HEX[ ... ]
-on the password.  A hex-wrapped argument is hashed as the literal text
-.RB \(lq $HEX[...] \(rq,
-brackets and all.  Pass the raw bytes instead, or use
+is decoded before use, so a password containing a colon, a control character
+or a high-bit byte can be supplied on a command line.  This matches the
+standalone
 .BR hx (1)
-if the input has to be hex-wrapped.
+command exactly:
+.PP
+.RS
+.nf
+$ hashpipe \-X 'md5(pass)' \-p '$HEX[616c706861]'
+2c1743a391305fbf367df8e4f069f9f9
+
+$ hx \-p '$HEX[616c706861]' 'md5(pass)'
+2c1743a391305fbf367df8e4f069f9f9
+.fi
+.RE
+.IP
+Before hashpipe.c 1.114 this mode did not decode, and hashed the literal
+text
+.RB \(lq $HEX[...] \(rq
+brackets and all, while the standalone command decoded.  The two now agree.
 .TP
 .BI \-s " salt"
 Bind the
 .B salt
-variable.
+variable.  Same option as the statistics file above; see there.
 .TP
 .BI \-S " salt2"
 Bind the
@@ -325,6 +469,17 @@ Path whose directory component holds
 0 on normal completion, 1 on a usage or argument error.
 .B \-V
 exits 0.
+.PP
+.B \-T
+exits 1 if any self-test failed.
+.B \-c
+exits 2 on an invalid label, immediately and before the remaining input is
+read; that status distinguishes a broken type vocabulary from an ordinary
+error, and a line failing to verify under
+.B \-c
+is not an error at all \(em it goes to
+.B \-E
+and the run completes 0.
 .SH EXAMPLES
 Confirm a build is sound:
 .PP

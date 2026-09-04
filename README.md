@@ -26,6 +26,8 @@ hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u 
 
 **`-m S`** — Only try types in S; `eN` for internal index, bare number for hashcat mode (e.g., `-m e1,1000`); add `auto` to fall back to auto-detect.  Selection is **strict by design**: `-m` is a filter, not a hint — a type that is not listed is never tried, and there is no fallback unless `auto` is present.  If the correct type is not in the list, the line is reported as unresolved on stderr exactly like a failed verify, with nothing to distinguish *the right type was not selected* from *the password does not match*.  This is the same shape of silent negative that `-L` produces: append `auto` whenever the type is uncertain, and whenever measuring coverage over a bundled type list, where an omitted type under-reports silently rather than erroring.
 
+**`-c`** — Verify each line against its own leading `TYPE` label only.  No detection and no fallback: a pair that does not verify as its label is written to `-E`.  A label naming an unknown type is fatal (`INVALID LABEL` on stderr, exit 2).  The `xNN` suffix sets the iteration depth, so `-i` does not bound it.  See [Label-Only Verification](#label-only-verification--c).
+
 **`-o F`** — Append verified results to file (default: stdout)
 
 **`-O F`** — Write verified results to file, truncating if it exists (default: stdout)
@@ -187,6 +189,67 @@ e31    MD5SALT                             9923327      9923255
 ```
 
 The **Hot List** section shows which `(algorithm, salt_length)` pairs were resolved via the hot list fast path.  **Algorithm Tries** shows total compute/verify calls per type.  **Solutions** shows how many hashes each type solved, and how many of those were hot list hits.
+
+## Label-Only Verification (`-c`)
+
+`hashpipe` normally identifies the algorithm itself, trying every registered type whose
+digest length matches.  That search is the expensive part: verifying one pair is a single
+hash, while identifying it may be hundreds of them, and for an ambiguous digest width the
+candidates include costly KDFs.
+
+When the type is already known the search is pure waste — and after an `mdxfind` run it
+always is, because `mdxfind` writes the type on the line:
+
+```
+TYPE[xNN] hash[:salt]:password
+```
+
+`-c` takes that label as the contract.  Detection is not run, there is no fallback, and a
+pair that does not verify as the type its label names is written to `-E` as unresolved.
+
+### Why it exists
+
+Measured on the full generated regression corpus — 7,234,771 lines across 1,020 types, one
+machine, both resolving every line:
+
+| mode | wall clock |
+|---|---|
+| auto-detect | more than 1 hour |
+| `-c` | **98.7 seconds** |
+
+Per type the gap is wider still: an iterated salted type measured 2.41s identifying against
+0.01s when the type was known, roughly 240:1.  The saving scales with how many candidates a
+digest shape admits and how expensive the wrong ones are.
+
+This matters for validation-only work — checking a large batch of solutions that are already
+paired and already typed, where the question is "are these right?" rather than "what are
+these?".
+
+### Strictness is the point
+
+Where `-m` is a filter applied to the whole run, `-c` takes the type per line, so a mixed
+file of many types costs one verify per line rather than a search.  And where an omitted
+type under `-m` produces a silent negative, `-c` is deliberately loud:
+
+- A label naming a type this build does not know is **fatal** — `INVALID LABEL: <line>` on
+  stderr and exit 2, immediately.  The reasoning is that the producer's type vocabulary and
+  this build's disagree, so every following line is equally unjudgeable.  A line with no
+  label at all is treated the same way.
+- A **mislabelled** pair is rejected rather than re-identified.  That is the trade: recall
+  for speed and strictness.
+- The `xNN` suffix sets the depth, so a label of `x1000000` performs a million rounds.  This
+  is an explicit verifier; the cost is the operator's to choose.
+- User-defined types are restricted the same way.  A user label tries only that type; a
+  built-in label does not try user types at all.
+
+Where the recall matters, run `-c` first and re-run only its rejects without it.  The second
+pass sees a few hundred lines instead of millions, so it costs almost nothing and recovers
+mislabelled-but-valid solutions:
+
+```bash
+hashpipe -c -O verified.txt -E maybe.txt < solutions.txt
+hashpipe    -O verified2.txt -E rejected.txt < maybe.txt
+```
 
 ## Pot(files) considered harmful
 
