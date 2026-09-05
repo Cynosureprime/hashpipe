@@ -12,7 +12,7 @@ Uses [yarn.c](https://github.com/madler/pigz) for threading and OpenSSL for hash
 
 ```
 hashpipe [-t N] [-i N] [-q N] [-m S] [-L secs] [-J N] [-o|-O outfile] [-e|-E errfile] [-s statfile]
-         [-b spec] [-B] [-T] [-G] [-D] [-Y] [-V] [-h] [file ...]
+         [-b spec] [-B] [-T] [-G] [-N] [-D] [-Y] [-V] [-h] [file ...]
 hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u user]
 ```
 
@@ -47,6 +47,8 @@ hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u 
 **`-T`** — Run self-tests on all registered types
 
 **`-G`** — As `-T`, but also emit the generated example vectors
+
+**`-N`** — Print the type table as TSV: index, name, hashcat modes, flags, self-test vector. One row per type, meant to be consumed rather than read — `gen-hash-types.sh` turns it into `HASH_TYPES.md`. The vector is emitted exactly as `-T` verifies it, so a passing self-test proves every row is correct for that build.
 
 **`-D`** — Disassemble the compiled hx program and exit
 

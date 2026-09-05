@@ -1,6 +1,14 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.6 $
+.\" $Revision: 1.7 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.7  2026/09/05 02:09:20  dlr
+.\" Document -N, the type-table listing option.
+.\"
+.\" Prints index, name, hashcat modes, flags and the self-test vector as TSV, one
+.\" row per type. It exists so HASH_TYPES.md can be generated from the binary
+.\" rather than parsed out of hashpipe.c, where rules such as HTF_UC are applied
+.\" at render time and an external parser has to reimplement them.
+.\"
 .\" Revision 1.6  2026/09/04 17:16:45  dlr
 .\" Document -c, which verifies each line against its own leading TYPE label and rejects what does not match. Covers the failure modes, deliberately loud where -m is silent: an unknown label is fatal with INVALID LABEL on stderr and exit 2, a line with no label is treated the same, and a pair that simply does not verify goes to -E with the run still completing 0. Records that the xNN suffix sets the depth so -i does not bound it, and that user-defined types are restricted the same way. Adds a Why this mode exists subsection giving the reasoning: verifying is one hash, identifying may be hundreds, and after an mdxfind run the type is already on the line, measured over the full generated corpus at over an hour against 98.7 seconds with both resolving all 7234771 lines. Notes the trade of recall for strictness and the two pass recipe that recovers it. EXIT STATUS now covers 2 and distinguishes an invalid label from a line that merely failed to verify. TH to 1.190.
 .\"
@@ -315,6 +323,22 @@ fail counts.  This is the first thing to run after a build.
 As
 .BR \-T ,
 but also emit the generated example vectors.
+.TP
+.B \-N
+Print the type table as tab-separated values: index, name, hashcat modes
+(or
+.BR n/a ),
+flag letters, and the self-test vector.  One row per type, with a leading
+comment line naming the build.  This is meant to be consumed rather than
+read: it is what
+.I gen-hash-types.sh
+turns into
+.IR HASH_TYPES.md .
+The vector is emitted exactly as
+.B \-T
+verifies it, so a passing self-test is proof that every row is correct for the
+build that produced it.  Types that share a compute function with another type
+and carry no vector of their own print an empty final field.
 .TP
 .B \-B
 Benchmark every registered type.

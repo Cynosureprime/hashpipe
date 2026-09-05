@@ -14,10 +14,26 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.192 2026/09/04 22:05:26 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.193 2026/09/05 02:09:56 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.193  2026/09/05 02:09:56  dlr
+ * Add -N, printing the type table as TSV for downstream consumers.
+ *
+ * Emits one row per type: index, name, hashcat modes, flag letters and the
+ * self-test vector, with a leading comment naming the build. Reuses the -h
+ * listing's skip rules, flag letters and Maphashcat lookup, and runs after
+ * init_hashtypes() and the userdef load so the table is complete.
+ *
+ * The point is that HASH_TYPES.md can now be GENERATED from the binary instead
+ * of parsed out of this file. Parsing the HT() macros externally cannot be made
+ * reliable: examples are stored as written while rules such as HTF_UC are
+ * applied at render time, so an outside parser reimplements the rendering and
+ * quietly gets the rest wrong -- measured at 942 of 969 rows before that
+ * approach was abandoned. -T verifies every vector -N prints, so a passing
+ * self-test proves the emitted table.
+ *
  * Revision 1.192  2026/09/04 22:05:26  dlr
  * Make -c reject a mislabelled line on every path, not only the hinted one. The hot list is a cross-line cache carried between batches, and three hot paths accepted a match and returned before the label check ran, so one MD5x02 line that verified let a following MD5x03 line over an md5-1 digest come back as MD5x01 -- while that same line alone was correctly refused. Separately, five type scans that exist to identify an UNLABELLED pair also answered for types the label never named, needing no batch at all: a bcrypt digest labelled SHA512CRYPT was re-emitted as BCRYPT. Both are the mode silently correcting a wrong label instead of rejecting it. hot_label_ok now requires a cache hit to agree with the label on type and depth, and the scans skip any type other than the hinted one under -c. Neither -m nor single-line input isolated either defect. Corpus unchanged at 7234771 verified, 0 unresolved, no slowdown.
  *
@@ -31761,6 +31777,7 @@ struct bench_result {
 static int BenchAll;                    /* -B flag */
 static int TestAll;                     /* -T flag */
 static int GenExamples;                 /* -G flag */
+static int ListTable;                   /* -N flag */
 static char *BenchSpec;                 /* -b spec */
 static int *BenchSelected;             /* malloc'd [Numtypes] boolean */
 static int BenchCount;                 /* number of selected types */
@@ -32248,6 +32265,8 @@ static void usage(int brief)
         "  -b S   Benchmark selected types (e.g., -b e1-10,e15)\n"
         "  -B     Benchmark all registered types\n"
         "  -T     Run self-tests on all registered types\n"
+        "  -N     Print the type table as TSV: index, name, hashcat modes,\n"
+        "         flags, self-test vector. Intended for generating catalogs.\n"
         "  -G     As -T, but also emit the generated example vectors\n"
         "  -L N   Max estimated seconds for a single verify (default 1000).\n"
         "  -c     Verify each line against its own leading TYPE label ONLY.\n"
@@ -32842,7 +32861,7 @@ int main(int argc, char **argv)
       }
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGTVhX:F:p:S:P:u:DYJ:c")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:c")) != -1) {
         switch (opt) {
         case 'J':
             /*
@@ -32912,6 +32931,9 @@ int main(int argc, char **argv)
         case 'G':
             GenExamples = 1;
             TestAll = 1;
+            break;
+        case 'N':
+            ListTable = 1;
             break;
         case 'T':
             TestAll = 1;
@@ -33018,6 +33040,53 @@ int main(int argc, char **argv)
     /* -Y: the load report (if any) has now been printed; exit before reading
      * stdin, so this is a pure "validate userdef.txt" mode. */
     if (show_userdef) exit(0);
+
+    /*
+     * -N: print the type table for downstream consumers, one row per type,
+     * tab separated: index, name, hashcat modes (or "n/a"), flag letters,
+     * self-test vector (empty for the types that share a compute function
+     * with another type and carry none of their own).
+     *
+     * This exists so HASH_TYPES.md and anything else needing the table can be
+     * GENERATED from the binary rather than parsed out of this file. Parsing
+     * the HT() macros externally cannot be made reliable: the example is
+     * stored as written and rules such as HTF_UC are applied when hashpipe
+     * renders it, so an outside parser must reimplement them and silently
+     * gets the remainder wrong. The vector is emitted verbatim -- it is the
+     * string the self-test checks, so -T proves every row printed here.
+     */
+    if (ListTable) {
+        int ti, mv;
+        printf("# index\tname\thashcat\tflags\tvector\n");
+        printf("# %s\n", Version);
+        for (ti = 0; ti < Numtypes; ti++) {
+            struct hashtype *ht = &Hashtypes[ti];
+            char flags[16], hcbuf[64];
+            int fp = 0, hci = 0;
+
+            if (!ht->name) continue;
+            if (!ht->compute && !ht->verify && ht->nchain == 0) continue;
+
+            if (ht->flags & HTF_SALTED)   flags[fp++] = 's';
+            if (ht->flags & HTF_UC)       flags[fp++] = 'u';
+            if (ht->flags & HTF_NTLM)     flags[fp++] = 'n';
+            if (ht->flags & HTF_COMPOSED) flags[fp++] = 'c';
+            if (ht->flags & HTF_NONHEX)   flags[fp++] = 'v';
+            if (ht->verify)               flags[fp++] = 'V';
+            if (fp == 0) flags[fp++] = '-';
+            flags[fp] = '\0';
+
+            for (mv = 0; Maphashcat[mv].hc != 65535; mv++) {
+                if (Maphashcat[mv].mdx == ti) {
+                    if (hci) hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, ",");
+                    hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, "%d", Maphashcat[mv].hc);
+                }
+            }
+            printf("e%d\t%s\t%s\t%s\t%s\n", ti, ht->name,
+                hci ? hcbuf : "n/a", flags, ht->example ? ht->example : "");
+        }
+        exit(0);
+    }
 
     /* Allocate stat counters (unconditional) */
     StatTry = calloc(Numtypes, sizeof(_Atomic uint64_t));
