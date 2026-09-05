@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.193 2026/09/05 02:09:56 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.194 2026/09/05 13:39:25 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.194  2026/09/05 13:39:25  dlr
+ * Fix the emitted iteration depth for types whose base value is not x01. MD5CAP registers base_iter 2 because mdxfind loops x from 2 for it, so its first emitted value IS x02 and MD5CAPx01 cannot exist -- yet the hot-list, ModeList and auto-detect stamps all wrote a flat 1, and the search ladders count rounds from 1, so the whole ladder came out one short. Hand-rolled, md5 of cap0 of hex of the previous value for rosetta gives x02 bd62daf8, x03 5b66e149, x04 09b20846, x05 358b12ea; all four verify under -c as x02 through x05, while auto and -m e353 emitted them as x01 through x04. So the mode documented for feeding mdxfind output straight back in refused hashpipes own output: -c on MD5CAPx01 sends it to -E, correctly, because no such value exists. Two helpers, base_depth and iter_depth, replace the flat stamps at 17 base sites and 7 ladder sites; both are the identity when base_iter is 1 or less, which is every other type in the catalog, so nothing else moves. MD5RAWUC is the only other base_iter 2 registration and is a verify type reporting through verify_iter, confirmed unchanged against its own registered vector. The hinted and -c paths already read base_iter and are untouched. Measured: the 44 MD5CAP lines in testhash.orig, whose labels are mdxfinds own, go from 0 of 44 to 44 of 44 agreeing under -m e353; auto-detect over a 1743 line corpus stays at 1318 with bodies byte-identical, 0 lost, 0 gained, and exactly 4 label corrections; a 7 index -m over the same corpus stays at 112 with 2 corrections; the full 7234771 line corpus under -c resolves 7234771 with 0 unresolved and its output is identical as a set to the pre-change run; self-test 1026 passed 0 failed 2 skipped; testhash.wrongiter rejects 1545 of 1545 and testhash.rightlabel accepts 10 of 10, both unchanged. Not run: the userdef round trip, since MDXFIND_CACHE is unset in this session and hashpipe therefore loaded no user-defined types.
+ *
  * Revision 1.193  2026/09/05 02:09:56  dlr
  * Add -N, printing the type table as TSV for downstream consumers.
  *
@@ -27752,6 +27755,34 @@ struct workitem {
  * the depth. Without -c the label is a hint and the cache stays a pure
  * optimisation, so nothing outside -c changes.
  */
+/* Depth of a type's BASE value, and the depth reached after N rounds of a
+ * search ladder.
+ *
+ * Nearly every type's base value is x01, but a type registered with
+ * base_iter >= 2 has no lower form. mdxfind loops x from 2 for MD5CAP, so its
+ * first emitted value IS x02 and MD5CAPx01 cannot exist. The hinted pass and
+ * -c already read base_iter; the hot-list, ModeList and auto-detect stamps did
+ * not, and emitted MD5CAPx01 -- a label -c itself refuses, so hashpipe output
+ * did not round-trip through the mode documented for exactly that. The search
+ * ladders count rounds from 1, so a type whose base is x02 also came out one
+ * short at every deeper depth: the hand-rolled chain md5(cap0(hex(prev))) for
+ * rosetta verified as x02 x03 x04 x05 under -c and was emitted x01 x02 x03 x04.
+ *
+ * Both helpers are the identity when base_iter <= 1, which is every other type
+ * in the catalog, so no other type moves. MD5RAWUC is the only other
+ * base_iter 2 registration and is a verify type, reporting through verify_iter.
+ */
+static inline int base_depth(const struct hashtype *ht)
+{
+    if (ht->base_iter > 1) return ht->base_iter;
+    return (ht->flags & HTF_ITER_X0) ? 0 : 1;
+}
+
+static inline int iter_depth(const struct hashtype *ht, int iter)
+{
+    return ht->base_iter > 1 ? ht->base_iter + iter - 1 : iter;
+}
+
 static inline int hot_label_ok(const struct workitem *item,
                                const struct hashtype *ht, int cand_iter)
 {
@@ -28273,13 +28304,13 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
             continue;
 
         hot_fast_match:
-            if (!hot_label_ok(item, ht, (ht->flags & HTF_ITER_X0) ? 0 : 1))
+            if (!hot_label_ok(item, ht, base_depth(ht)))
                 continue;
             hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
             atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
             item->verified = 1;
             item->match_type = ht;
-            item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+            item->match_iter = base_depth(ht);
             *hot_type = hot_list[h].type_idx;
             *hot_iter = item->match_iter;
             if (h > 0) {
@@ -28825,7 +28856,7 @@ retry_with_fullpass:
 
         hot_match:
             if (!hot_label_ok(item, ht, ht->verify ? WS->verify_iter
-                                     : ((ht->flags & HTF_ITER_X0) ? 0 : 1)))
+                                     : (base_depth(ht))))
                 continue;
             hot_hit_record(hot_list[h].type_idx, hot_list[h].salt_len);
             atomic_fetch_add(&StatHotHit[hot_list[h].type_idx], 1);
@@ -28837,7 +28868,7 @@ retry_with_fullpass:
              * first sighting goes down the slow path and reads verify_iter
              * while every later one hits this cache. */
             item->match_iter = ht->verify ? WS->verify_iter
-                                          : ((ht->flags & HTF_ITER_X0) ? 0 : 1);
+                                          : (base_depth(ht));
             *hot_type = hot_list[h].type_idx;
             *hot_iter = item->match_iter;
             /* Promote matched entry to front of hot list */
@@ -29147,7 +29178,7 @@ retry_with_fullpass:
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                     item->verified = 1;
                     item->match_type = ht;
-                    item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                    item->match_iter = base_depth(ht);
                     *hot_type = ModeList[m];
                     *hot_iter = item->match_iter;
                     return;
@@ -29159,7 +29190,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        item->match_iter = base_depth(ht);
                         *hot_type = ModeList[m];
                         *hot_iter = item->match_iter;
                         return;
@@ -29171,7 +29202,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        item->match_iter = base_depth(ht);
                         *hot_type = ModeList[m];
                         *hot_iter = item->match_iter;
                         return;
@@ -29182,7 +29213,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        item->match_iter = base_depth(ht);
                         *hot_type = ModeList[m];
                         *hot_iter = item->match_iter;
                         return;
@@ -29193,7 +29224,7 @@ retry_with_fullpass:
                 if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                     item->verified = 1;
                     item->match_type = ht;
-                    item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                    item->match_iter = base_depth(ht);
                     *hot_type = ModeList[m];
                     *hot_iter = item->match_iter;
                     return;
@@ -29204,7 +29235,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        item->match_iter = base_depth(ht);
                         *hot_type = ModeList[m];
                         *hot_iter = item->match_iter;
                         return;
@@ -29215,7 +29246,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, ht->hashlen)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = (ht->flags & HTF_ITER_X0) ? 0 : 1;
+                        item->match_iter = base_depth(ht);
                         *hot_type = ModeList[m];
                         *hot_iter = item->match_iter;
                         return;
@@ -29263,7 +29294,7 @@ retry_with_fullpass:
                             } else {
                                 item->match_type = ht;
                             }
-                            item->match_iter = iter;
+                            item->match_iter = iter_depth(ht, iter);
                             *hot_type = item->match_type - Hashtypes;
                             *hot_iter = iter;
                             return;
@@ -29295,7 +29326,7 @@ retry_with_fullpass:
                         if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                             item->verified = 1;
                             item->match_type = ht;
-                            item->match_iter = iter;
+                            item->match_iter = iter_depth(ht, iter);
                             *hot_type = ModeList[m];
                             *hot_iter = iter;
                             return;
@@ -29357,7 +29388,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = iter;
+                        item->match_iter = iter_depth(ht, iter);
                         *hot_type = ModeList[m];
                         *hot_iter = iter;
                         return;
@@ -29413,7 +29444,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = ht;
-                        item->match_iter = iter;
+                        item->match_iter = iter_depth(ht, iter);
                         *hot_type = ModeList[m];
                         *hot_iter = iter;
                         return;
@@ -29441,7 +29472,7 @@ retry_with_fullpass:
             if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
                 item->verified = 1;
                 item->match_type = cands[c];
-                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                item->match_iter = base_depth(cands[c]);
                 *hot_type = cands[c] - Hashtypes;
                 *hot_iter = item->match_iter;
                 return;
@@ -29459,7 +29490,7 @@ retry_with_fullpass:
         if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
             item->verified = 1;
             item->match_type = cands[c];
-            item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+            item->match_iter = base_depth(cands[c]);
             *hot_type = cands[c] - Hashtypes;
             *hot_iter = item->match_iter;
             return;
@@ -29470,7 +29501,7 @@ retry_with_fullpass:
             if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
                 item->verified = 1;
                 item->match_type = cands[c];
-                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                item->match_iter = base_depth(cands[c]);
                 *hot_type = cands[c] - Hashtypes;
                 *hot_iter = item->match_iter;
                 return;
@@ -29481,7 +29512,7 @@ retry_with_fullpass:
             if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
                 item->verified = 1;
                 item->match_type = cands[c];
-                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                item->match_iter = base_depth(cands[c]);
                 *hot_type = cands[c] - Hashtypes;
                 *hot_iter = item->match_iter;
                 return;
@@ -29546,7 +29577,7 @@ retry_with_fullpass:
                         } else {
                             item->match_type = cands[c];
                         }
-                        item->match_iter = iter;
+                        item->match_iter = iter_depth(cands[c], iter);
                         *hot_type = item->match_type - Hashtypes;
                         *hot_iter = iter;
                         return;
@@ -29670,7 +29701,7 @@ retry_with_fullpass:
                         if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                             item->verified = 1;
                             item->match_type = ccands[c];
-                            item->match_iter = iter;
+                            item->match_iter = iter_depth(ccands[c], iter);
                             *hot_type = ccands[c] - Hashtypes;
                             *hot_iter = iter;
                             return;
@@ -29739,7 +29770,7 @@ retry_with_fullpass:
                     if (hash_match(hashbin, hashbytes, computed, fullbytes)) {
                         item->verified = 1;
                         item->match_type = cands[c];
-                        item->match_iter = iter;
+                        item->match_iter = iter_depth(cands[c], iter);
                         *hot_type = cands[c] - Hashtypes;
                         *hot_iter = iter;
                         return;
@@ -29902,7 +29933,7 @@ retry_with_fullpass:
             if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
                 item->verified = 1;
                 item->match_type = cands[c];
-                item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                item->match_iter = base_depth(cands[c]);
                 *hot_type = cands[c] - Hashtypes;
                 *hot_iter = item->match_iter;
                 hot_list_add(hot_list, nhot, *hot_type, -1);
@@ -29924,7 +29955,7 @@ retry_with_fullpass:
                 if (hash_match(hashbin, hashbytes, computed, cands[c]->hashlen)) {
                     item->verified = 1;
                     item->match_type = cands[c];
-                    item->match_iter = (cands[c]->flags & HTF_ITER_X0) ? 0 : 1;
+                    item->match_iter = base_depth(cands[c]);
                     *hot_type = cands[c] - Hashtypes;
                     *hot_iter = item->match_iter;
                     hot_list_add(hot_list, nhot, *hot_type, item->saltlen);
