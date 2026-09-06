@@ -1,6 +1,9 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.7 $
+.\" $Revision: 1.8 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.8  2026/09/06 15:00:48  dlr
+.\" Clear the two mandoc warnings. The bare .IP before the INVALID LABEL display was vacuous -- mandoc skipped it and warned, so the blank line separating the prose from the display appeared under groff and not under mandoc. Replaced with .sp, which both renderers honour: groff output is byte-identical to before and mandoc now shows the separation it had been dropping, so the two agree. The .PP immediately after .SS "Why this mode exists" is redundant and reported as "skipping paragraph macro: PP after SS"; removed, with no rendered change in either renderer. Same class as rling.1 rev 1.2. groff -ww and mandoc -T lint are now both clean.
+.\"
 .\" Revision 1.7  2026/09/05 02:09:20  dlr
 .\" Document -N, the type-table listing option.
 .\"
@@ -170,7 +173,7 @@ produces a silent negative,
 is deliberately loud: a label naming a type this build does not know is
 .I fatal.
 The offending line is printed to standard error as
-.IP
+.sp
 .RS
 .B "INVALID LABEL: " \fIline\fP
 .RE
@@ -224,7 +227,6 @@ has no such guard, so its negative results on these types are real.
 .BI \-t " count"
 Worker thread count.  Defaults to the number of CPUs.
 .SS "Why this mode exists"
-.PP
 Verifying a pair is cheap; finding which of a thousand-odd types produced it is
 not.  Auto-detection must try candidate types in turn, and for an ambiguous
 digest width that includes expensive ones, so the cost per line is a search
