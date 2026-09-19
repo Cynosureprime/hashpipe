@@ -14,10 +14,28 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.199 2026/09/19 13:39:17 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.200 2026/09/19 13:59:02 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.200  2026/09/19 13:59:02  dlr
+ * Remove -j. The site key for e1028/e1029 arrives INLINE and only inline, as
+ * a salt of cardinality one in the record: TYPE record:sitekey:plaintext, which is
+ * what mdxfind emits. -j was a keyfile side channel kept on my own rationale, that
+ * a bare 2-field record list plus a keyfile might be what is in hand. Waffle was
+ * unaware it had been added and it is wrong: it is the rejected pepper shape in a
+ * new place, it contradicts the invariant this file already states about itself at
+ * 7B, that hashpipe has no -j flag and a pepper is embedded in the salt field, and
+ * a key beside the line rather than in it is exactly what cannot survive mdxfind
+ * into hashpipe. Removed the option from getopt and usage, cppenc_load_keys and
+ * the CppKeys/CppKeyLen/CppKeyCnt arrays, the keyfile loop in cppenc_verify_common
+ * so an absent inline key simply records CppWantedKey under -c, and the -j advice
+ * from the end-of-run UNSATISFIABLE hint, which now names only the 3-field form.
+ * 89 lines net. Verified: -j is rejected as an illegal option; self-test 1028
+ * passed 0 failed 2 skipped; both types verify from the inline form under -c; and
+ * mdxfind -M e1028/e1029 -F records -S testsalt.txt piped into hashpipe -c
+ * verifies 11 of 11 for each type.
+ *
  * Revision 1.199  2026/09/19 13:39:17  dlr
  * Add e1028 CRYPTOPPLEGACY and e1029 CRYPTOPPDEFAULT: Crypto++ DataEncryptor
  * stored forms (LegacyEncryptor = DES-EDE2-CBC keyed by SHA-1 mash, DefaultEncryptor
@@ -24661,115 +24679,33 @@ static void cppenc_tohex(const unsigned char *in, int n, char *out)
 }
 /* ========== end Crypto++ DataEncryptor core ========== */
 
-/* -j <keyfile>: a SECONDARY way to supply the site keys for the Crypto++
- * encryptor types (e1028/e1029). It is not the normal one.
- *
- * The normal one is INLINE, because the site key is a salt of cardinality one
- * and belongs in the record like any other salt:
+/* The site key for the Crypto++ encryptor types (e1028/e1029) arrives INLINE,
+ * because it is a salt of cardinality one and belongs in the record like any
+ * other salt:
  *
  *     TYPE <record>:<sitekey>:<plaintext>
  *
- * That is what mdxfind now emits and what the registered self-test vectors
- * use, and it needs no keyfile here at all:
+ * That is what mdxfind emits and what the registered self-test vectors use, so
+ * the pipeline needs no key channel of its own:
  *
  *     mdxfind ... | hashpipe -c
  *
- * These records cannot be verified from `TYPE hash:plain` alone, because
- * verification means DECRYPTING and that needs the key -- which is exactly
- * why the earlier pepper reading of the key broke the pipeline: a pepper is
- * never written into the record, so the line arrived here with nothing to
- * decrypt with.
- *
- * -j is kept for the case where the keyfile is what is in hand and the lines
- * are the bare 2-field form: a hand-written record list, or a founds file
- * from a build that predates the inline form.
- *
- *     hashpipe -c -j keyfile < founds.txt
- *
- * $HEX[] is decoded on load, so a key with unprintable bytes round-trips
- * through a keyfile. An inline key with unprintable bytes round-trips too, by
- * a different route: mdxfind writes it $HEX[]-wrapped in the salt position
- * and hash_verify decodes it before this verifier is reached. */
-static unsigned char **CppKeys   = NULL;
-static int            *CppKeyLen = NULL;
-static int             CppKeyCnt = 0;
+ * There is deliberately no keyfile option here. A record cannot be verified
+ * from `TYPE hash:plain` alone -- verifying means DECRYPTING and that needs
+ * the key -- and a key supplied beside the line rather than in it is precisely
+ * what breaks the pipeline, because nothing downstream can re-derive it. A key
+ * with unprintable bytes round-trips regardless: mdxfind writes it
+ * $HEX[]-wrapped in the salt position and hash_verify decodes it before this
+ * verifier is reached. */
 
 /* Set when a CRYPTOPP line reached the verifier with no key available to try,
  * and when any line carried an inline key. Both are needed to decide, AT THE
- * END OF THE RUN, whether the "supply -j" hint is true: the parse walk offers
+ * END OF THE RUN, whether the hint is true: the parse walk offers
  * one line to the verifier under several splits, so a 3-field inline line is
  * ALSO seen once as a 2-field line with no key, and a hint emitted at that
  * moment would tell an operator who did supply a key that they had not. */
 static volatile int    CppWantedKey  = 0;
 static volatile int    CppInlineSeen = 0;
-
-/* Read the keyfile. One key per line; a $HEX[..] line is decoded, matching
- * mdxfind's pepper loader, so a key with unprintable bytes round-trips
- * through a keyfile. Any failure is FATAL: a keyfile that silently did not
- * load would make every CRYPTOPP line report as unresolved, which reads
- * exactly like a wrong plaintext. */
-static void cppenc_load_keys(const char *fname)
-{
-    FILE *f = fopen(fname, "r");
-    char *buf;
-    int cap = 0;
-
-    if (!f) { perror(fname); fprintf(stderr, "-j: cannot open keyfile %s\n", fname); exit(1); }
-    buf = (char *)malloc(MAXLINE + 16);
-    if (!buf) { perror("malloc -j line"); exit(1); }
-    while (fgets(buf, MAXLINE + 8, f)) {
-        int n = (int)strlen(buf), kl;
-        unsigned char *k;
-        while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
-        if (n == 0) continue;
-        if (CppKeyCnt == cap) {
-            cap = cap ? cap * 2 : 64;
-            CppKeys   = (unsigned char **)realloc(CppKeys, (size_t)cap * sizeof(*CppKeys));
-            CppKeyLen = (int *)realloc(CppKeyLen, (size_t)cap * sizeof(*CppKeyLen));
-            if (!CppKeys || !CppKeyLen) { perror("realloc -j keys"); exit(1); }
-        }
-        if (n > 6 && strncmp(buf, "$HEX[", 5) == 0 && buf[n-1] == ']') {
-            int hl = n - 6;
-            if (hl & 1) {
-                fprintf(stderr, "-j: %s: odd-length $HEX[] key, line %d\n",
-                        fname, CppKeyCnt + 1);
-                exit(1);
-            }
-            kl = hl / 2;
-            k = (unsigned char *)malloc((size_t)kl + 1);
-            if (!k) { perror("malloc -j key"); exit(1); }
-            hex2bin(buf + 5, hl, k);
-        } else {
-            kl = n;
-            k = (unsigned char *)malloc((size_t)kl + 1);
-            if (!k) { perror("malloc -j key"); exit(1); }
-            memcpy(k, buf, (size_t)kl);
-        }
-        k[kl] = 0;
-        /* A key the verifier cannot stage is refused HERE, loudly. The
-         * verifier's own bound (CPPENC_HBLEN(keylen) > WS_GP_SIZE) can only
-         * return 0, which is indistinguishable from a wrong key -- exactly
-         * the silent negative this whole type has to avoid. Unreachable for
-         * any real key: the bound is over 40 KB and mdxfind's pepper channel
-         * caps a key at 127 bytes anyway. */
-        if (CPPENC_HBLEN(kl) > WS_GP_SIZE) {
-            fprintf(stderr, "-j: %s: key on line %d is %d bytes, too long to"
-                    " use (limit %d)\n", fname, CppKeyCnt + 1, kl,
-                    WS_GP_SIZE - (int)CPPENC_HBLEN(0));
-            exit(1);
-        }
-        CppKeys[CppKeyCnt]   = k;
-        CppKeyLen[CppKeyCnt] = kl;
-        CppKeyCnt++;
-    }
-    fclose(f);
-    free(buf);
-    if (CppKeyCnt == 0) {
-        fprintf(stderr, "-j: %s holds no keys\n", fname);
-        exit(1);
-    }
-    fprintf(stderr, "hashpipe: %d site key(s) read from %s\n", CppKeyCnt, fname);
-}
 
 /* CRYPTOPPLEGACY (e1028) / CRYPTOPPDEFAULT (e1029).
  *
@@ -24848,16 +24784,13 @@ static int cppenc_verify_common(const struct cppenc_params *p,
         return cppenc_try_key(p, rec, reclen, inlinekey, inlinekeylen,
                               pass, passlen);
     }
-    if (CppKeyCnt == 0) {
-        /* Only under -c, where the line has explicitly claimed this type. In
-         * auto-detect every hex value reaches this verifier and a note per
-         * line would be noise. RECORDED, NOT PRINTED: see CppWantedKey. */
-        if (CheckLabel) CppWantedKey = 1;
-        return 0;
-    }
-    for (i = 0; i < CppKeyCnt; i++)
-        if (cppenc_try_key(p, rec, reclen, CppKeys[i], CppKeyLen[i],
-                           pass, passlen)) return 1;
+    /* No key, so nothing to decrypt with, and no side channel to fall back
+     * on: the key is a salt and reaches the verifier the way every other salt
+     * does, in the line. Recorded only under -c, where the line has
+     * explicitly claimed this type; in auto-detect every hex value reaches
+     * this verifier and a note per line would be noise. RECORDED, NOT
+     * PRINTED: see CppWantedKey. */
+    if (CheckLabel) CppWantedKey = 1;
     return 0;
 }
 
@@ -28629,7 +28562,7 @@ static void record_unresolved_format(const char *line, int len)
  * keyless 2-field shape, which is why this cannot be decided at the call. */
 static void report_cppenc_key_hint(void)
 {
-    if (!CppWantedKey || CppKeyCnt || CppInlineSeen)
+    if (!CppWantedKey || CppInlineSeen)
         return;
     fprintf(stderr,
       "hashpipe: UNSATISFIABLE, not a wrong password: a CRYPTOPP record is"
@@ -28638,8 +28571,7 @@ static void report_cppenc_key_hint(void)
       " the site key.\n"
       "hashpipe: Write the line in the 3-field form"
       " TYPE record:sitekey:plaintext, which is\n"
-      "hashpipe: what mdxfind emits, or pass the key file with -j"
-      " <keyfile>.\n");
+        "hashpipe: what mdxfind emits.\n");
 }
 
 static void report_unresolved_formats(void)
@@ -32964,7 +32896,7 @@ static void usage(int brief)
 {
     FILE *out = brief ? stderr : stdout;
     fprintf(out,
-        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-j keyfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
+        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
@@ -32984,7 +32916,6 @@ static void usage(int brief)
         "         flags, self-test vector. Intended for generating catalogs.\n"
         "  -G     As -T, but also emit the generated example vectors\n"
         "  -L N   Max estimated seconds for a single verify (default 1000).\n"
-        "  -j F   Site keys for CRYPTOPPLEGACY / CRYPTOPPDEFAULT, one per line.\n"
         "         Only needed for BARE 2-field lines; the normal form carries\n"
         "         the key inline as record:sitekey:plaintext\n"
         "         ($HEX[..] accepted). Those records are ENCRYPTED, not hashed,\n"
@@ -33619,7 +33550,7 @@ int main(int argc, char **argv)
       }
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:j:c")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:c")) != -1) {
         switch (opt) {
         case 'J':
             /*
@@ -33649,13 +33580,6 @@ int main(int argc, char **argv)
             break;
         case 'c':
             CheckLabel = 1;
-            break;
-        case 'j':
-            /* Site keys for the Crypto++ encryptor types, same file mdxfind
-             * takes with -j. Loaded here rather than lazily so that a
-             * mistyped filename is fatal at startup instead of presenting as
-             * "nothing verified". */
-            cppenc_load_keys(optarg);
             break;
         case 'q':
             Iterstep = atoi(optarg);

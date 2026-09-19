@@ -1,6 +1,12 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.11 $
+.\" $Revision: 1.12 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.12  2026/09/19 13:59:03  dlr
+.\" Remove the -j entry added in 1.11; the option is gone from hashpipe.c 1.200.
+.\" The site key reaches the verifier inline, as a salt in the record, and there is
+.\" no keyfile channel to document. Page covers 27 of 27 options. TH bumped to
+.\" 1.200; mandoc -Tlint clean.
+.\"
 .\" Revision 1.11  2026/09/19 13:51:04  dlr
 .\" Document -j, the last undocumented hashpipe option; page now covers 28 of 28.
 .\" It supplies candidate site keys for CRYPTOPPLEGACY and CRYPTOPPDEFAULT, the two
@@ -52,7 +58,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-09-19" "hashpipe 1.199" "Password Recovery"
+.TH HASHPIPE 1 "2026-09-19" "hashpipe 1.200" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -219,43 +225,6 @@ tries only that type, and a label naming a built-in type does not try user
 types at all \(em without which a mislabelled line could still be re-identified
 as something else, which is the one thing this mode exists to prevent.  A user
 label with no user definition loaded is an invalid label and therefore fatal.
-.TP
-.BI \-j " file"
-Candidate site keys for
-.B CRYPTOPPLEGACY
-and
-.BR CRYPTOPPDEFAULT ,
-one per line.  Those two types are key recovery rather than digest comparison:
-the stored record is encrypted, so judging one means decrypting it, and that
-needs the key the site encrypted under.
-.IP
-Usually this option is not wanted.  The key travels in the line \(em
-.BR mdxfind (1)
-carries it as an ordinary salt and emits
-.I "TYPE record:sitekey:plaintext"
-\(em so a pipe or a saved solution file already holds everything the verify
-needs, and where a line does carry a key that key is the only one tried.
-.B \-j
-answers the other case, a line with no key of its own, and is consulted only
-under
-.BR \-c ,
-where the line has claimed the type explicitly.  Each key is then tried in
-turn.
-.IP
-A key may be written
-.BI $HEX[ ... ]
-to carry bytes a plain line cannot, which is also how a key containing a colon
-is given.  The file is read at start-up, and an unopenable name, a file holding
-no keys, an odd-length
-.B $HEX[]
-payload, or a key too long to stage is fatal there \(em each would otherwise
-surface as nothing verified, which for these types is indistinguishable from a
-wrong key.  The number of keys read is reported on standard error.
-.IP
-A record reaching the verifier with no key from either channel is reported once
-as
-.I UNSATISFIABLE
-and named as such, rather than counted as a failed password.
 .TP
 .BI \-i " count"
 Maximum iteration depth for the hard pass.  Default 128.

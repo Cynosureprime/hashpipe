@@ -3,7 +3,7 @@
 Complete list of all hash types supported by hashpipe, with internal type index,
 hash name, hashcat mode mapping, and an example hash:password pair.
 
-**1028 types** as of v1.199.
+**1028 types** as of v1.200.
 
 Each example is the complete self-test vector from `hashpipe -T`, shown as
 `hash[:salt]:password` — the same format hashpipe accepts as input.
