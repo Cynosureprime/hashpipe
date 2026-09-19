@@ -1,6 +1,28 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.8 $
+.\" $Revision: 1.11 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.11  2026/09/19 13:51:04  dlr
+.\" Document -j, the last undocumented hashpipe option; page now covers 28 of 28.
+.\" It supplies candidate site keys for CRYPTOPPLEGACY and CRYPTOPPDEFAULT, the two
+.\" key-recovery types added in hashpipe 1.199. The entry leads with the case that
+.\" does not need it: mdxfind carries the site key as an ordinary salt and emits
+.\" TYPE record:sitekey:plaintext, so a pipe or saved solution file already holds
+.\" the key, and an inline key is the only one tried. -j answers a line with no key
+.\" of its own and is consulted only under -c. Records that the file is read at
+.\" start-up and that an unopenable name, an empty file, an odd-length $HEX[]
+.\" payload or an over-long key is fatal there, because each would otherwise surface
+.\" as nothing verified, which for an encrypted record is indistinguishable from a
+.\" wrong key; and that a record reaching the verifier with no key from either
+.\" channel is named UNSATISFIABLE rather than counted as a failed password. Traced
+.\" from case j at 33653 to cppenc_load_keys and cppenc_verify_common, whose first
+.\" colon splits the inline key. mandoc -Tlint clean; TH bumped to 1.199.
+.\"
+.\" Revision 1.10  2026/09/09 19:10:53  dlr
+.\" Record that -h lists the user-defined types too, not just -N. The 1.195 entry documented -N alone because the code did; -h prints the same 1026-row type table and is the listing most tools actually read, which is what the original report named. Says the section is keyed on the declared id as u<id> and named with the USER_ prefix, exactly as -N lists it, and that it is absent when MDXFIND_CACHE is unset. TH bumped to 1.196. Zero groff warnings.
+.\"
+.\" Revision 1.9  2026/09/09 18:54:04  dlr
+.\" Document the user-defined type listing and the label rule. The -N entry now says the built-in rows are followed by one row per user-defined type loaded from userdef.txt, new in 1.195, keyed on the declared id as u<id> rather than on an internal index that shifts as built-ins are added. Notes that the name column carries the USER_ prefix and the vector column carries the hx expression, there being no self-test vector for a type defined at run time, and states the consequence that matters: a tool building a known-type list from -N now sees the user-defined types, where before 1.195 it could not. That was the reported symptom. The -Y entry gains the label rule, which belongs with the userdef documentation: a user type is always labelled USER_<name>, a stanza headed [BWTDT] emits USER_BWTDT, and because it evaluates its expression once with no iteration ladder there is NO xNN suffix - never USER_BWTDTx01. The entry says this matches mdxfind exactly and explains why that matters: mdsplit files by the emitted label, so before 1.195 the two tools disagreed and the same recovered hash landed in two different ledger files depending on which tool produced the line. Also records that the xNN form is still accepted on input, so files written by an older build still read back. TH date and version bumped to 2026-09-09 and 1.195. Zero groff warnings.
+.\"
 .\" Revision 1.8  2026/09/06 15:00:48  dlr
 .\" Clear the two mandoc warnings. The bare .IP before the INVALID LABEL display was vacuous -- mandoc skipped it and warned, so the blank line separating the prose from the display appeared under groff and not under mandoc. Replaced with .sp, which both renderers honour: groff output is byte-identical to before and mandoc now shows the separation it had been dropping, so the two agree. The .PP immediately after .SS "Why this mode exists" is redundant and reported as "skipping paragraph macro: PP after SS"; removed, with no rendered change in either renderer. Same class as rling.1 rev 1.2. groff -ww and mandoc -T lint are now both clean.
 .\"
@@ -30,7 +52,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-09-04" "hashpipe 1.190" "Password Recovery"
+.TH HASHPIPE 1 "2026-09-19" "hashpipe 1.199" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -198,6 +220,43 @@ types at all \(em without which a mislabelled line could still be re-identified
 as something else, which is the one thing this mode exists to prevent.  A user
 label with no user definition loaded is an invalid label and therefore fatal.
 .TP
+.BI \-j " file"
+Candidate site keys for
+.B CRYPTOPPLEGACY
+and
+.BR CRYPTOPPDEFAULT ,
+one per line.  Those two types are key recovery rather than digest comparison:
+the stored record is encrypted, so judging one means decrypting it, and that
+needs the key the site encrypted under.
+.IP
+Usually this option is not wanted.  The key travels in the line \(em
+.BR mdxfind (1)
+carries it as an ordinary salt and emits
+.I "TYPE record:sitekey:plaintext"
+\(em so a pipe or a saved solution file already holds everything the verify
+needs, and where a line does carry a key that key is the only one tried.
+.B \-j
+answers the other case, a line with no key of its own, and is consulted only
+under
+.BR \-c ,
+where the line has claimed the type explicitly.  Each key is then tried in
+turn.
+.IP
+A key may be written
+.BI $HEX[ ... ]
+to carry bytes a plain line cannot, which is also how a key containing a colon
+is given.  The file is read at start-up, and an unopenable name, a file holding
+no keys, an odd-length
+.B $HEX[]
+payload, or a key too long to stage is fatal there \(em each would otherwise
+surface as nothing verified, which for these types is indistinguishable from a
+wrong key.  The number of keys read is reported on standard error.
+.IP
+A record reaching the verifier with no key from either channel is reported once
+as
+.I UNSATISFIABLE
+and named as such, rather than counted as a failed password.
+.TP
 .BI \-i " count"
 Maximum iteration depth for the hard pass.  Default 128.
 .TP
@@ -336,6 +395,22 @@ read: it is what
 .I gen-hash-types.sh
 turns into
 .IR HASH_TYPES.md .
+Since 1.195 the built-in rows are followed by one row per user-defined type
+loaded from
+.BR userdef.txt .
+Those are keyed on the id the stanza declared, shown as
+.BI u id
+\(em the form
+.B \-m
+accepts \(em never on an internal index, which shifts as built-ins are added
+and is not a stable handle.  Their name column carries the
+.B USER_
+prefix and their vector column carries the
+.BR hx (7)
+expression, there being no self-test vector for a type defined at run time.
+A tool building a list of known types from
+.B \-N
+therefore sees the user-defined ones; before 1.195 it could not.
 The vector is emitted exactly as
 .B \-T
 verifies it, so a passing self-test is proof that every row is correct for the
@@ -437,6 +512,29 @@ If
 is unset, nothing is loaded and
 .B \-Y
 says so.
+.IP
+A user-defined type is always labelled
+.BI USER_ name
+on output: a stanza headed
+.B [BWTDT]
+emits
+.BR USER_BWTDT .
+It evaluates its expression once and has no iteration ladder, so no
+.BI x NN
+suffix is written \(em the label is
+.B USER_BWTDT
+and never
+.BR USER_BWTDTx01 .
+That matches
+.BR mdxfind (1)
+exactly, which matters because
+.BR mdsplit (1)
+files by the emitted label: before 1.195 the two tools disagreed and the same
+recovered hash landed in two different ledger files depending on which tool
+produced the line.  The
+.BI x NN
+form is still accepted on input, so files written by an older build still
+read back.
 .TP
 .B \-h
 Print the usage summary followed by the full type table \(em internal
@@ -478,6 +576,22 @@ and
 .B \-F
 options do not validate at all; they only compute.
 .SH ENVIRONMENT
+.IP
+Since 1.196 the table ends with the user-defined types loaded from
+.BR userdef.txt ,
+listed exactly as
+.B \-N
+lists them: keyed on the declared id as
+.BI u id
+and named with the
+.B USER_
+prefix.  1.195 added them to
+.B \-N
+alone, which was incomplete \(em
+.B \-h
+is the listing most tools read.  The section is absent when
+.B MDXFIND_CACHE
+is unset.
 .TP
 .B HASHPIPE_OUTPUT
 Selects the output format for callers that cannot pass

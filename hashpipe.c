@@ -14,10 +14,32 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.194 2026/09/05 13:39:25 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.199 2026/09/19 13:39:17 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.199  2026/09/19 13:39:17  dlr
+ * Add e1028 CRYPTOPPLEGACY and e1029 CRYPTOPPDEFAULT: Crypto++ DataEncryptor
+ * stored forms (LegacyEncryptor = DES-EDE2-CBC keyed by SHA-1 mash, DefaultEncryptor
+ * = the SHA-256 variant). Both are key-recovery types, not digests: the stored record
+ * is salt . keycheck . ciphertext and the recovered plaintext is the encrypted body.
+ * The site key is carried as an ordinary salt via -s/-S, so a found line is the
+ * self-contained TYPE record:sitekey:plaintext and survives mdxfind into hashpipe.
+ * Loaded structurally through -F. Also adds the bench_rates entries measured natively
+ * on dev1, and regress typemap/typeflags/testhash coverage, 11 vectors per type.
+ *
+ * Revision 1.198  2026/09/18 21:21:44  dlr
+ * Map hashcat 15000 FileZilla Server to e386, matching mdxfind.c which is authoritative for Maphashcat. FileZilla Server 0.9.55 and later is sha512(pass . salt) and e386 SHA512PASSSALT computes it; found by sweeping hashcat own per-module ST_HASH and ST_PASS vectors through hashpipe -m auto against the 70 sentinel-mapped modes.
+ *
+ * Revision 1.197  2026/09/18 21:11:02  dlr
+ * Map hashcat mode 13900 OpenCart to e438 instead of the no-equivalent sentinel, matching mdxfind.c which is authoritative for this table. OpenCart is sha1(salt . sha1(salt . sha1(pass))) and e438 SHA1SALTSHA1SALTSHA1PASS implements it; verified against hashcats published vector 058c1c3773340c8563421e2b17e60eb7c916787e with salt 827500576 and password hashcat, which hashpipe -c now recovers, and hashpipe -N reports 13900 for e438 where it previously reported n/a.
+ *
+ * Revision 1.196  2026/09/09 19:07:41  dlr
+ * List user-defined types in -h as well as -N. 1.195 added them to -N only. That was an incomplete fix and Waffle caught it: -h prints a full 1026-row type table in the same Internal/Flags/Hash name/hashcat columns as mdxfind -h, and it is the listing the original report named. I had read -h as plain usage text because its getopt case only sets show_help, and did not check what usage() actually prints. The listing loop walks Hashtypes[] for i < Numtypes, which cannot reach user types: they are a separate address space held in the userdef registry. Rows are keyed on the declared id as u<idstr>, never the internal op, for the same reason as the -N and mdxfind changes -- the op is derived from the built-in count at start-up and shifts as built-ins are added. The listing goes through a helper, usage_userdef_rows(), forward-declared ahead of usage() and defined after the userdef.h include at 32451. usage() sits at 32282, before that include, so calling userdef_count and userdef_get_by_index directly gave implicit-declaration and incomplete-type errors; a helper was preferable to moving the include, which would have reordered the whole hx integration section for one listing. Verified with MDXFIND_CACHE set: -h and -N each show u47 USER_Cust1 and u4713 USER_BWTDT, -N goes 1028 to 1030 rows. With the variable unset both sections vanish and the built-in counts are unchanged at 1026 and 1028, so nothing moves for a user with no userdef.txt. Gates: self-test 1026 passed 0 failed 2 skipped; userdef round trip PASS; the 1.195 label fix still holds, -c on USER_BWTDT emitting the bare label.
+ *
+ * Revision 1.195  2026/09/09 17:08:41  dlr
+ * Suppress the x01 suffix on user-defined types, and list them in -N. The label fix first, because it split the ledger. The user-defined match path stamped item->match_iter = 1 unconditionally, commented "x01 -- one hx evaluation", so hashpipe emitted USER_BWTDTx01 where mdxfind emits USER_BWTDT. An hx expression is a single evaluation with no iteration ladder, so there is no depth to report: per Waffle 2026-09-09, with no iteration the x01 is suppressed. format_output already prints bare at 0, exactly as mdxfinds emit does at x == 0, so the value is the whole fix. This mattered beyond cosmetics because mdsplit files by the emitted label: the same recovered hash landed in .USER_BWTDT or .USER_BWTDTx01 depending on which tool produced the line, splitting the ledger for precisely the types least likely to be noticed. mdxfind was already correct and is authoritative. Verified: both tools now emit USER_BWTDT abcd1234...:password123 for the same input, and -c still accepts the legacy x01 form and normalises it, so files people already hold keep working. Second, -N now lists user-defined types after the built-ins. They are not in Hashtypes[] at all -- the table loop walks that array while user types live in the userdef registry, reachable through userdef_count and userdef_get_by_index. Rows are keyed on the declared id as u<idstr> and never on the internal op, matching the mdxfind change of the same date and for the same reason: the op is derived from the built-in count at startup, moves when built-ins are added, and is documented as never escaping the process. The name carries the USER_ prefix, which is the required public label. Flag letters are restricted to s for salted: the existing column uses u for HTF_UC, so spending it on username here would collide with a documented letter. The hx expression goes in the vector column, where a built-in carries its self-test vector. Verified: u47 USER_Cust1 and u4713 USER_BWTDT appear, -N goes from 1028 to 1030 rows. Gates: self-test 1026 passed 0 failed 2 skipped, unchanged; tools/userdef_roundtrip_test.sh PASS, both types verifying untagged and re-verifying their own tagged output; built-in labels unchanged, MD5x01 both bare and under -c. NOT addressed here and pre-existing: regress/userdef-test.sh is 5 passed 8 failed. Four failures are one mdxfind defect, that a user type without a form declaration never matches, reported with mdxfind 1.581. The other four are a stale fixture: it asserts salted user types are rejected, and they now load and work.
+ *
  * Revision 1.194  2026/09/05 13:39:25  dlr
  * Fix the emitted iteration depth for types whose base value is not x01. MD5CAP registers base_iter 2 because mdxfind loops x from 2 for it, so its first emitted value IS x02 and MD5CAPx01 cannot exist -- yet the hot-list, ModeList and auto-detect stamps all wrote a flat 1, and the search ladders count rounds from 1, so the whole ladder came out one short. Hand-rolled, md5 of cap0 of hex of the previous value for rosetta gives x02 bd62daf8, x03 5b66e149, x04 09b20846, x05 358b12ea; all four verify under -c as x02 through x05, while auto and -m e353 emitted them as x01 through x04. So the mode documented for feeding mdxfind output straight back in refused hashpipes own output: -c on MD5CAPx01 sends it to -E, correctly, because no such value exists. Two helpers, base_depth and iter_depth, replace the flat stamps at 17 base sites and 7 ladder sites; both are the identity when base_iter is 1 or less, which is every other type in the catalog, so nothing else moves. MD5RAWUC is the only other base_iter 2 registration and is a verify type reporting through verify_iter, confirmed unchanged against its own registered vector. The hinted and -c paths already read base_iter and are untouched. Measured: the 44 MD5CAP lines in testhash.orig, whose labels are mdxfinds own, go from 0 of 44 to 44 of 44 agreeing under -m e353; auto-detect over a 1743 line corpus stays at 1318 with bodies byte-identical, 0 lost, 0 gained, and exactly 4 label corrections; a 7 index -m over the same corpus stays at 112 with 2 corrections; the full 7234771 line corpus under -c resolves 7234771 with 0 unresolved and its output is identical as a set to the pre-change run; self-test 1026 passed 0 failed 2 skipped; testhash.wrongiter rejects 1545 of 1545 and testhash.rightlabel accepts 10 of 10, both unchanged. Not run: the userdef round trip, since MDXFIND_CACHE is unset in this session and hashpipe therefore loaded no user-defined types.
  *
@@ -1570,7 +1592,7 @@ struct MapHashcat {
     {13762, 65535},
     {13763, 65535},
     {13800, 928},  /* 13800 | Windows Phone 8+ PIN/password */
-    {13900, 65535}, /* 13900 | OpenCart */
+    {13900, 438},  /* 13900 | OpenCart -- e438 sha1(salt.sha1(salt.sha1(pass))) */
     {14000, 848},  /* 14000 | DES (PT = $salt, key = $pass) */
     {14100, 849},  /* 14100 | 3DES (PT = $salt, key = $pass) */
     {14200, 929},  /* 14200 | RACF KDFAES */
@@ -1579,7 +1601,7 @@ struct MapHashcat {
     {14700, 65535}, /* 14700 | iTunes backup < 10.0 */
     {14800, 65535}, /* 14800 | iTunes backup >= 10.0 */
     {14900, 65535},
-    {15000, 65535}, /* 15000 | FileZilla Server >= 0.9.55 */
+    {15000, 386}, /* 15000 | FileZilla Server >= 0.9.55 -- e386 sha512(pass.salt) */
     {15100, 999},   /* 15100 | Juniper/NetBSD sha1crypt */
     {15200, 65535}, /* 15200 | Blockchain, My Wallet, V2 */
     {15300, 65535}, /* 15300 | DPAPI masterkey file v1 and v2  */
@@ -2225,6 +2247,8 @@ char *Types[] = {
     "GOST12256CRYPT",
     "GOST94CRYPT",
     "SUNMD5",
+    "CRYPTOPPLEGACY",
+    "CRYPTOPPDEFAULT",
 
 NULL
 
@@ -24248,6 +24272,608 @@ static int verify_dragonfly4_32(const char *hashstr, int hashlen,
 static int verify_dragonfly4_64(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 { return dragonfly_core(hashstr, hashlen, pass, passlen, 1, "$4$\0/etc", 8); }
+/* ============ Crypto++ DataEncryptor core (e1028/e1029) ============
+ * e1028 CRYPTOPPLEGACY  -- 1998-era Crypto++ DefaultEncryptor, which modern
+ *                          Crypto++ calls LegacyEncryptor.  CONFIRMED against
+ *                          real Dynu.dll output.
+ * e1029 CRYPTOPPDEFAULT -- MODERN Crypto++ DefaultEncryptor, a DIFFERENT
+ *                          construction that reuses the same name.  Upstream-
+ *                          verified, but NO FIELD SAMPLE EXISTS.
+ *
+ * PAIRED CODE. The same core lives in hashpipe.c immediately above
+ * cppenc_verify_common(). The two tools MUST agree byte for byte, so any
+ * change here has to be made there in the same session; there is no build
+ * check that catches a divergence, only a missed crack. The ONLY function
+ * that differs between the two copies is cppenc_hash, which names each
+ * tool's own SHA-1 / SHA-256 entry point; everything else is identical text.
+ *
+ * These types are NOT digests. The stored value is a ciphertext:
+ *
+ *     record   = salt(8) || CBC_enc(key,IV, keycheck || plaintext || pkcs7)
+ *     keycheck = H(passphrase || salt)[0 .. BLOCKSIZE-1]   (but see below)
+ *     key||IV  = Mash(passphrase || salt, KEYLENGTH + BLOCKSIZE, ITERATIONS)
+ *
+ * so the secret being searched is a SITE-WIDE KEY rather than a user
+ * password, and one recovered key opens every record encrypted under it.
+ * Three consequences that shape the integration, not just the arithmetic:
+ *
+ *  - THE KEY ARRIVES ON THE SALT CHANNEL. It is a SALT OF CARDINALITY ONE:
+ *    one value covering every record on an installation, typed into a config
+ *    file by whoever installed the component, which is structurally the same
+ *    thing as a salt column holding one distinct value. So it comes inline
+ *    as <record>:<sitekey>, or as candidate keys from mdxfind's -s <file>
+ *    (or -S <file> after -M): one key means "decrypt with a known key", N
+ *    keys means "search N candidates". The password WORDLIST CANNOT AFFECT
+ *    THE RESULT, which is why both types show 's' in the -h Options column
+ *    and the legend there says so in words.
+ *
+ *    This was read as a PEPPER (-j) in an earlier revision. That was WRONG
+ *    and it broke the toolchain: a pepper is by definition never written
+ *    into the output record, so the emitted line carried no key -- and
+ *    verifying one of these records means DECRYPTING it, which needs the
+ *    key. mdxfind | hashpipe verified 0 of 3 lines, all of them to stderr.
+ *    Do not restore that reading.
+ *
+ *  - THE LAST FIELD IS THE DECRYPTED PLAINTEXT, NEVER THE KEY. The emitted
+ *    line is <record>:<sitekey>:<plaintext>, byte for byte the shape every
+ *    salted type already uses, so getpass, mdsplit and this tool's own
+ *    verifier need no special case. At the instant a key validates the
+ *    plaintext is known, so the plaintext is what goes in the LAST field.
+ *    Putting the key there instead would file every record on the site as
+ *    solved under one value that is no user's password. The key ALSO goes to
+ *    stderr, once, as per-site metadata. See the procjob case.
+ *
+ *  - The oracle needs no plaintext: decrypt the FIRST ciphertext block and
+ *    compare it with the keycheck. ONE record therefore settles one
+ *    candidate key, which is why the procjob case anchors on a single record
+ *    instead of looping the whole snapshot per candidate.
+ *
+ * THE KEYCHECK CONTENT IS CONFIRMED, NOT INFERRED. The shipped DLL of the
+ * application that prompted these types was extracted from the vendor's own
+ * installer, registered, and driven with known passphrases; its output is
+ * decrypted correctly by the code below. Over those records:
+ *
+ *     keycheck == H(passphrase || salt)[0 .. BLOCKSIZE-1]   CONFIRMED
+ *     keycheck == salt                                      REFUTED
+ *     keycheck == an undeliverable nonce                    REFUTED
+ *     ITERATIONS == 200                                     UNIQUE -- no other
+ *                                                           value in 1..3000
+ *                                                           decrypts anything
+ *
+ * So there is ONE oracle and cppenc_check implements it. An earlier revision
+ * of this work accepted `keycheck == salt` as a second variant, on the reading
+ * of an intermediate analysis note; that variant is gone. Do not reintroduce
+ * it -- it widens the accept surface for no gain now that the question is
+ * settled by the artifact itself.
+ *
+ * WHAT THAT CONFIRMATION DOES AND DOES NOT COVER. It settles the ALGORITHM:
+ * given a record of this format and its key, this code decrypts it. It says
+ * nothing about whether any particular unidentified hex value in a corpus IS
+ * a record of this format. A key search that finds nothing bounds only the
+ * candidates it tried; it is not evidence either way about a record's format,
+ * and must not be quoted as though it were.
+ *
+ * ============ THE NAMING TRAP -- READ BEFORE RENAMING ANYTHING ============
+ *
+ * The DLL's RTTI strings say DefaultEncryptor, DefaultDecryptor,
+ * DES_EDE_Encryption and SHA, over an embedded build path naming a 1998
+ * VC98 tree. THAT NAMING IS CORRECT FOR ITS ERA and is not a mistake in the
+ * analysis that recovered it. In the Crypto++ of that period:
+ *
+ *     DefaultEncryptor  WAS  DES_EDE + SHA, salt 8, 200 iterations
+ *     DES_EDE           MEANT 2-key triple DES  (later renamed DES_EDE2)
+ *     SHA               MEANT SHA-1             (later renamed SHA1)
+ *
+ * Modern Crypto++ renamed that whole construction to LegacyEncryptor and
+ * reassigned the DefaultEncryptor NAME to a NEW and incompatible type: AES,
+ * SHA-256, 2500 iterations. Two consequences:
+ *
+ *   - mdxfind's type name CRYPTOPPLEGACY is the right name for the DLL's
+ *     construction, even though the DLL says "Default".
+ *   - e1029 CRYPTOPPDEFAULT is the MODERN type. It is verified bidirectionally
+ *     against a locally built upstream libcryptopp.a, but it has NO FIELD
+ *     SAMPLE and IT IS NOT WHAT THAT DLL PRODUCES. Measured, not assumed:
+ *     modern-DefaultEncryptor parameters fail to decrypt every DLL record.
+ *     NEVER read a CRYPTOPPDEFAULT hit as a record from that application.
+ *
+ * Implementing the modern parameters for the 1998 records reproduces nothing,
+ * and the shared name is exactly how someone loses a day to it.
+ * =========================================================================
+ *
+ * Parameters are pinned from upstream Crypto++ default.h:66-67 and default.cpp
+ * (Mash / GenerateKeyIV / FirstPut / CheckKey), and were cross-validated
+ * bidirectionally against a locally built upstream libcryptopp.a -- upstream
+ * decrypts our output and we decrypt upstream's, for both parameter sets:
+ *
+ *   type      BLOCKSIZE KEYLENGTH DIGESTSIZE SALT ITER  cipher        hash
+ *   LEGACY        8        16         20       8    200 DES-EDE2-CBC  SHA-1
+ *   DEFAULT      16        16         32       8   2500 AES-128-CBC   SHA-256
+ *
+ * Two traps worth stating, both of which yield a plausible WRONG oracle that
+ * nothing downstream would catch:
+ *   - keycheck width is BLOCKSIZE, so 16 for DEFAULT and 8 only for LEGACY.
+ *   - record lengths OVERLAP COMPLETELY: Legacy is 8+8k and Default is 8+16m,
+ *     so every Default length is also a Legacy length. Length cannot tell the
+ *     two apart, and an 11-byte plaintext gives 80 hex characters under both.
+ *
+ * Default costs about 7.1x Legacy (2500 SHA-256 over 34 bytes against 400
+ * SHA-1 over 42), which is why the two carry SEPARATE bench_rates.h entries.
+ */
+struct cppenc_params { int blk, keylen, dig, salt, iters; };
+static const struct cppenc_params CPPENC_LEGACY  = {  8, 16, 20, 8,  200 };
+static const struct cppenc_params CPPENC_DEFAULT = { 16, 16, 32, 8, 2500 };
+
+/* Mash working width. The largest bufSize in play is 40 (Legacy: outLen 24
+ * rounded up to a multiple of the 20-byte digest); Default is 32. */
+#define CPPENC_MAXBUF 128
+
+/* Caller-provided FIXED scratch, CPPENC_FIXED bytes. Byte offsets into fx:
+ *
+ *     off  name  size  largest real use
+ *       0  kiv     64  32  (KEYLENGTH 16 + BLOCKSIZE 16)
+ *      64  kc      64  32  (SHA-256 digest)
+ *     128  ob     128  40  (mash bufSize, Legacy)
+ *     256  pt      64  16  (one decrypted block)
+ *     320  iv      32  16  (one cipher block)
+ *     352  sv      32   8  (the record's salt, decoded from hex)
+ *     384  cs     640 256  (cipher state: 2 x DES_key_schedule, or AES_KEY)
+ *
+ * Every field carries at least 2x headroom over its largest real use, and the
+ * cipher-state slot is checked at COMPILE time below rather than trusted.
+ * None of this may live on the stack: in procjob it comes from the per-thread
+ * malloc_lock() buffers, in hashpipe from WS->ctxN. */
+#define CPPENC_FIXED   1024
+#define CPPENC_CS_SIZE 640
+#define CPPENC_KIV(fx) ((unsigned char *)(fx) +   0)
+#define CPPENC_KC(fx)  ((unsigned char *)(fx) +  64)
+#define CPPENC_OB(fx)  ((unsigned char *)(fx) + 128)
+#define CPPENC_PT(fx)  ((unsigned char *)(fx) + 256)
+#define CPPENC_IV(fx)  ((unsigned char *)(fx) + 320)
+#define CPPENC_SV(fx)  ((unsigned char *)(fx) + 352)
+#define CPPENC_CS(fx)  ((void *)((unsigned char *)(fx) + 384))
+
+/* A wrong scratch layout is silent at run time, so make it a build error. */
+typedef char cppenc_cs_fits[(CPPENC_CS_SIZE >= (int)sizeof(AES_KEY) &&
+                             CPPENC_CS_SIZE >= 2 * (int)sizeof(DES_key_schedule) &&
+                             CPPENC_FIXED >= 384 + CPPENC_CS_SIZE) ? 1 : -1];
+
+/* Caller-provided LENGTH-FED staging buffer, CPPENC_HBLEN(passlen) bytes. It
+ * holds the 2-byte Mash counter prefix followed by the hash input, which is
+ * passphrase||salt on the first pass and the Mash feedback buffer after it. */
+#define CPPENC_HBLEN(passlen) (2 + (passlen) + 8 + CPPENC_MAXBUF)
+
+/* Cap for the two paths that BUILD a record rather than testing one: -z
+ * forward generation, whose output has to fit prfound's job->outbuf, and the
+ * -K passphrase. It is NOT a limit on the oracle -- capping that would report
+ * a correct long passphrase as a non-match, which is the silent-negative the
+ * hashpipe stack-buffer sweep was about. The search paths bound themselves
+ * against the buffer they were handed instead. */
+#define CPPENC_MAXPASS 4096
+
+static void cppenc_hash(const struct cppenc_params *p,
+                        unsigned char *in, int len, unsigned char *out)
+{
+  if (p->dig == 20) SHA1(in, len, out);
+  else              SHA256(in, len, out);
+}
+
+/* Mash(), faithful to Crypto++ default.cpp.
+ *
+ * CLOBBERS hb[2 ..]: the feedback buffer Crypto++ calls `buf` is staged there
+ * so the inner hash needs no second copy. Anything else that needs
+ * passphrase||salt -- the keycheck above all -- must be computed BEFORE this
+ * is called.
+ *
+ * The two loops are bounded differently upstream, outLen here and bufSize
+ * below. At both parameter sets they cover the same i, so it is a no-op today;
+ * kept faithful rather than simplified. */
+static void cppenc_mash(const struct cppenc_params *p, unsigned char *hb, int inLen,
+                        unsigned char *out, int outLen, int iterations,
+                        unsigned char *fx)
+{
+  unsigned char *ob = CPPENC_OB(fx);
+  int bufSize = ((outLen + p->dig - 1) / p->dig) * p->dig, i;
+
+  memset(ob, 0, bufSize);
+  for (i = 0; i < outLen; i += p->dig) {
+    hb[0] = (unsigned char)(i >> 8); hb[1] = (unsigned char)i;
+    cppenc_hash(p, hb, 2 + inLen, ob + i);
+  }
+  while (iterations-- > 1) {
+    memcpy(hb + 2, ob, bufSize);        /* the snapshot upstream calls buf */
+    for (i = 0; i < bufSize; i += p->dig) {
+      hb[0] = (unsigned char)(i >> 8); hb[1] = (unsigned char)i;
+      cppenc_hash(p, hb, 2 + bufSize, ob + i);
+    }
+  }
+  memcpy(out, ob, outLen);
+}
+
+/* Hashes per candidate, for honest h/s accounting. One keycheck plus
+ * iterations x (bufSize / DIGESTSIZE): 401 for Legacy, 2501 for Default. This
+ * counts ONE record, because one record settles one candidate. */
+static int cppenc_hashcount(const struct cppenc_params *p)
+{
+  int outLen  = p->keylen + p->blk;
+  int bufSize = ((outLen + p->dig - 1) / p->dig) * p->dig;
+  return 1 + p->iters * (bufSize / p->dig);
+}
+
+/* keycheck into kc, then key||IV into kiv. Order matters: mash clobbers hb. */
+static void cppenc_derive(const struct cppenc_params *p,
+                          const unsigned char *pass, int passlen,
+                          const unsigned char *salt,
+                          unsigned char *hb, unsigned char *fx)
+{
+  memcpy(hb + 2, pass, passlen);
+  memcpy(hb + 2 + passlen, salt, p->salt);
+  cppenc_hash(p, hb + 2, passlen + p->salt, CPPENC_KC(fx));
+  cppenc_mash(p, hb, passlen + p->salt, CPPENC_KIV(fx),
+              p->keylen + p->blk, p->iters, fx);
+}
+
+/* CBC over len bytes. in == out is permitted: both OpenSSL primitives here
+ * stage each block through a temporary. enc != 0 encrypts. */
+static void cppenc_cbc(const struct cppenc_params *p, const unsigned char *kiv,
+                       const unsigned char *in, int len, unsigned char *out,
+                       unsigned char *fx, int enc)
+{
+  unsigned char *iv = CPPENC_IV(fx);
+  memcpy(iv, kiv + p->keylen, p->blk);
+  if (p->blk == 8) {
+    /* DES-EDE2: two 8-byte keys used as K1 K2 K1, which is what Crypto++
+     * DES_EDE2 is. Passing three distinct keys here would be EDE3. */
+    DES_key_schedule *ks = (DES_key_schedule *)CPPENC_CS(fx);
+    DES_set_key_unchecked((DES_cblock *)(void *)kiv,     &ks[0]);
+    DES_set_key_unchecked((DES_cblock *)(void *)(kiv + 8), &ks[1]);
+    DES_ede3_cbc_encrypt(in, out, (long)len, &ks[0], &ks[1], &ks[0],
+                         (DES_cblock *)iv, enc ? DES_ENCRYPT : DES_DECRYPT);
+  } else {
+    AES_KEY *ak = (AES_KEY *)CPPENC_CS(fx);
+    if (enc) {
+      AES_set_encrypt_key(kiv, 128, ak);
+      AES_cbc_encrypt(in, out, (size_t)len, ak, iv, AES_ENCRYPT);
+    } else {
+      AES_set_decrypt_key(kiv, 128, ak);
+      AES_cbc_encrypt(in, out, (size_t)len, ak, iv, AES_DECRYPT);
+    }
+  }
+}
+
+/* Structural test: can a record of reclen bytes be of THIS type at all?
+ * Cheap, and it runs before any hashing. */
+static int cppenc_reclen_ok(const struct cppenc_params *p, int reclen)
+{
+  int ctlen = reclen - p->salt;
+  return ctlen >= 2 * p->blk && (ctlen % p->blk) == 0;
+}
+
+/* THE ORACLE, and it is a COMPLETE one: no plaintext is needed to settle a
+ * candidate key. rec points at the whole record, salt first. Decrypt the
+ * FIRST ciphertext block and compare it with the keycheck:
+ *
+ *     accept iff decrypted[0 .. BLOCKSIZE-1]
+ *                  == H(passphrase || salt)[0 .. BLOCKSIZE-1]
+ *
+ * which is Crypto++ default.cpp, DataEncryptor::FirstPut writing the block and
+ * DataDecryptor::CheckKey testing it, and is CONFIRMED against real DLL output
+ * (see the header). Returns 1 on accept, 0 otherwise. False-positive rate
+ * 2^-64 per try, so one record is enough and a second buys nothing.
+ *
+ * Where a PLAINTEXT is also available, comparing the plaintext is strictly
+ * stronger -- it covers every block rather than the first BLOCKSIZE bytes --
+ * and costs nothing extra once the record is decrypted. cppenc_decrypt reports
+ * the keycheck verdict separately from the plaintext so a caller can use
+ * either or both; hashpipe's verifier has a plaintext and uses it. */
+static int cppenc_check(const struct cppenc_params *p,
+                        const unsigned char *pass, int passlen,
+                        const unsigned char *rec,
+                        unsigned char *hb, unsigned char *fx)
+{
+  cppenc_derive(p, pass, passlen, rec, hb, fx);
+  cppenc_cbc(p, CPPENC_KIV(fx), rec + p->salt, p->blk, CPPENC_PT(fx), fx, 0);
+  return memcmp(CPPENC_PT(fx), CPPENC_KC(fx), p->blk) == 0;
+}
+
+/* Full decrypt. Returns the plaintext length, or -1 when the record cannot be
+ * a record of this type or its PKCS#7 padding does not decrypt to valid
+ * padding -- so a wrong passphrase is overwhelmingly reported as -1 and never
+ * yields garbage that could be mistaken for a password.
+ *
+ * *keyok receives the cppenc_check verdict for the same record: 1 when the
+ * keycheck block matched, 0 when it did not. It is reported SEPARATELY from
+ * the return value on purpose. A caller with NO plaintext must treat
+ * *keyok == 0 as a failure, which is what mdxfind's key search does; a caller
+ * that HAS the plaintext can compare the plaintext instead, which is what
+ * hashpipe's verifier does and which is the stronger of the two tests.
+ *
+ * out needs reclen - salt bytes. */
+static int cppenc_decrypt(const struct cppenc_params *p,
+                          const unsigned char *pass, int passlen,
+                          const unsigned char *rec, int reclen,
+                          unsigned char *out, unsigned char *hb, unsigned char *fx,
+                          int *keyok)
+{
+  int ctlen = reclen - p->salt, n, pad, k;
+  *keyok = 0;
+  if (!cppenc_reclen_ok(p, reclen)) return -1;
+  cppenc_derive(p, pass, passlen, rec, hb, fx);
+  cppenc_cbc(p, CPPENC_KIV(fx), rec + p->salt, ctlen, out, fx, 0);
+  if (memcmp(out, CPPENC_KC(fx), p->blk) == 0) *keyok = 1;
+  n = ctlen - p->blk;
+  memmove(out, out + p->blk, n);
+  /* PKCS#7, strictly. Every record carries 1..BLOCKSIZE pad bytes, so invalid
+   * padding is not a short plaintext -- it is a wrong key, and returning the
+   * undecoded bytes would put ciphertext into the plaintext field. */
+  if (n < 1) return -1;
+  pad = out[n - 1];
+  if (pad < 1 || pad > p->blk || pad > n) return -1;
+  for (k = 0; k < pad; k++) if (out[n - 1 - k] != pad) return -1;
+  return n - pad;
+}
+
+/* Forward generation, for -z / Printall and for hashpipe's own vectors. Builds
+ * a complete record from a passphrase, an 8-byte salt and a plaintext, and
+ * returns its length in bytes. out needs salt + blk + plainlen + blk bytes. */
+static int cppenc_encrypt(const struct cppenc_params *p,
+                          const unsigned char *pass, int passlen,
+                          const unsigned char *salt,
+                          const unsigned char *plain, int plainlen,
+                          unsigned char *out, unsigned char *hb, unsigned char *fx)
+{
+  int body = p->blk + plainlen, pad = p->blk - (body % p->blk), i;
+  cppenc_derive(p, pass, passlen, salt, hb, fx);
+  memcpy(out, salt, p->salt);
+  memcpy(out + p->salt, CPPENC_KC(fx), p->blk);
+  memcpy(out + p->salt + p->blk, plain, plainlen);
+  for (i = 0; i < pad; i++) out[p->salt + body + i] = (unsigned char)pad;
+  cppenc_cbc(p, CPPENC_KIV(fx), out + p->salt, body + pad, out + p->salt, fx, 1);
+  return p->salt + body + pad;
+}
+
+/* Report a recovered site key. It goes to a STREAM, and the only stream it is
+ * ever given is stderr: the key is per-site metadata and must never appear on
+ * stdout, where mdsplit would read it as the plaintext of whatever record it
+ * followed. A key that is not printable ASCII is wrapped the way the rest of
+ * the suite wraps such things, so it can be pasted back into a keyfile. */
+static void cppenc_keyreport(FILE *f, const unsigned char *k, int n)
+{
+  int i, printable = 1;
+  for (i = 0; i < n; i++)
+    if (k[i] < 0x20 || k[i] > 0x7e) { printable = 0; break; }
+  if (printable) { fprintf(f, "\"%.*s\"", n, (const char *)k); return; }
+  fprintf(f, "$HEX[");
+  for (i = 0; i < n; i++) fprintf(f, "%02x", k[i]);
+  fprintf(f, "]");
+}
+
+/* Uppercase hex, the form these records are written in in the wild. Writes
+ * 2*n characters plus a NUL. */
+static void cppenc_tohex(const unsigned char *in, int n, char *out)
+{
+  static const char uc[] = "0123456789ABCDEF";
+  int i;
+  for (i = 0; i < n; i++) {
+    out[i * 2]     = uc[in[i] >> 4];
+    out[i * 2 + 1] = uc[in[i] & 15];
+  }
+  out[n * 2] = 0;
+}
+/* ========== end Crypto++ DataEncryptor core ========== */
+
+/* -j <keyfile>: a SECONDARY way to supply the site keys for the Crypto++
+ * encryptor types (e1028/e1029). It is not the normal one.
+ *
+ * The normal one is INLINE, because the site key is a salt of cardinality one
+ * and belongs in the record like any other salt:
+ *
+ *     TYPE <record>:<sitekey>:<plaintext>
+ *
+ * That is what mdxfind now emits and what the registered self-test vectors
+ * use, and it needs no keyfile here at all:
+ *
+ *     mdxfind ... | hashpipe -c
+ *
+ * These records cannot be verified from `TYPE hash:plain` alone, because
+ * verification means DECRYPTING and that needs the key -- which is exactly
+ * why the earlier pepper reading of the key broke the pipeline: a pepper is
+ * never written into the record, so the line arrived here with nothing to
+ * decrypt with.
+ *
+ * -j is kept for the case where the keyfile is what is in hand and the lines
+ * are the bare 2-field form: a hand-written record list, or a founds file
+ * from a build that predates the inline form.
+ *
+ *     hashpipe -c -j keyfile < founds.txt
+ *
+ * $HEX[] is decoded on load, so a key with unprintable bytes round-trips
+ * through a keyfile. An inline key with unprintable bytes round-trips too, by
+ * a different route: mdxfind writes it $HEX[]-wrapped in the salt position
+ * and hash_verify decodes it before this verifier is reached. */
+static unsigned char **CppKeys   = NULL;
+static int            *CppKeyLen = NULL;
+static int             CppKeyCnt = 0;
+
+/* Set when a CRYPTOPP line reached the verifier with no key available to try,
+ * and when any line carried an inline key. Both are needed to decide, AT THE
+ * END OF THE RUN, whether the "supply -j" hint is true: the parse walk offers
+ * one line to the verifier under several splits, so a 3-field inline line is
+ * ALSO seen once as a 2-field line with no key, and a hint emitted at that
+ * moment would tell an operator who did supply a key that they had not. */
+static volatile int    CppWantedKey  = 0;
+static volatile int    CppInlineSeen = 0;
+
+/* Read the keyfile. One key per line; a $HEX[..] line is decoded, matching
+ * mdxfind's pepper loader, so a key with unprintable bytes round-trips
+ * through a keyfile. Any failure is FATAL: a keyfile that silently did not
+ * load would make every CRYPTOPP line report as unresolved, which reads
+ * exactly like a wrong plaintext. */
+static void cppenc_load_keys(const char *fname)
+{
+    FILE *f = fopen(fname, "r");
+    char *buf;
+    int cap = 0;
+
+    if (!f) { perror(fname); fprintf(stderr, "-j: cannot open keyfile %s\n", fname); exit(1); }
+    buf = (char *)malloc(MAXLINE + 16);
+    if (!buf) { perror("malloc -j line"); exit(1); }
+    while (fgets(buf, MAXLINE + 8, f)) {
+        int n = (int)strlen(buf), kl;
+        unsigned char *k;
+        while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
+        if (n == 0) continue;
+        if (CppKeyCnt == cap) {
+            cap = cap ? cap * 2 : 64;
+            CppKeys   = (unsigned char **)realloc(CppKeys, (size_t)cap * sizeof(*CppKeys));
+            CppKeyLen = (int *)realloc(CppKeyLen, (size_t)cap * sizeof(*CppKeyLen));
+            if (!CppKeys || !CppKeyLen) { perror("realloc -j keys"); exit(1); }
+        }
+        if (n > 6 && strncmp(buf, "$HEX[", 5) == 0 && buf[n-1] == ']') {
+            int hl = n - 6;
+            if (hl & 1) {
+                fprintf(stderr, "-j: %s: odd-length $HEX[] key, line %d\n",
+                        fname, CppKeyCnt + 1);
+                exit(1);
+            }
+            kl = hl / 2;
+            k = (unsigned char *)malloc((size_t)kl + 1);
+            if (!k) { perror("malloc -j key"); exit(1); }
+            hex2bin(buf + 5, hl, k);
+        } else {
+            kl = n;
+            k = (unsigned char *)malloc((size_t)kl + 1);
+            if (!k) { perror("malloc -j key"); exit(1); }
+            memcpy(k, buf, (size_t)kl);
+        }
+        k[kl] = 0;
+        /* A key the verifier cannot stage is refused HERE, loudly. The
+         * verifier's own bound (CPPENC_HBLEN(keylen) > WS_GP_SIZE) can only
+         * return 0, which is indistinguishable from a wrong key -- exactly
+         * the silent negative this whole type has to avoid. Unreachable for
+         * any real key: the bound is over 40 KB and mdxfind's pepper channel
+         * caps a key at 127 bytes anyway. */
+        if (CPPENC_HBLEN(kl) > WS_GP_SIZE) {
+            fprintf(stderr, "-j: %s: key on line %d is %d bytes, too long to"
+                    " use (limit %d)\n", fname, CppKeyCnt + 1, kl,
+                    WS_GP_SIZE - (int)CPPENC_HBLEN(0));
+            exit(1);
+        }
+        CppKeys[CppKeyCnt]   = k;
+        CppKeyLen[CppKeyCnt] = kl;
+        CppKeyCnt++;
+    }
+    fclose(f);
+    free(buf);
+    if (CppKeyCnt == 0) {
+        fprintf(stderr, "-j: %s holds no keys\n", fname);
+        exit(1);
+    }
+    fprintf(stderr, "hashpipe: %d site key(s) read from %s\n", CppKeyCnt, fname);
+}
+
+/* CRYPTOPPLEGACY (e1028) / CRYPTOPPDEFAULT (e1029).
+ *
+ * hashstr is everything before the final colon, so it is either
+ *
+ *     <hexrecord>                  -- key comes from -j
+ *     <hexrecord>:<sitekey>        -- key inline
+ *
+ * and pass/passlen is the claimed PLAINTEXT.
+ *
+ * THE DECIDING TEST HERE IS THE PLAINTEXT, not the key-check block -- not
+ * because the key-check is in doubt (it is confirmed; see cppenc_check) but
+ * because with a plaintext in hand the plaintext is the STRICTLY STRONGER
+ * test: it covers every block of the record instead of the first BLOCKSIZE
+ * bytes. Decrypt, strip the check block and the PKCS#7 padding, and compare
+ * what is left against the plaintext the line claims. A line that satisfies
+ * this satisfies the key-check too, so testing keyok as well would add a
+ * condition that cannot fire on a genuine record and could only ever turn a
+ * correct pair into a false negative.
+ *
+ * A wrong key gives invalid padding with overwhelming probability and so
+ * returns -1 from cppenc_decrypt; a wrong key that happens to pad-validate
+ * still has to produce the exact claimed plaintext. */
+static int cppenc_try_key(const struct cppenc_params *p,
+                          const unsigned char *rec, int reclen,
+                          const unsigned char *key, int keylen,
+                          const unsigned char *pass, int passlen)
+{
+    unsigned char *fx = (unsigned char *)WS->ctx1;   /* CPPENC_FIXED = 1024 */
+    unsigned char *hb = (unsigned char *)WS->gp1;
+    unsigned char *pt = (unsigned char *)WS->gp3;
+    int ptl, keyok;
+
+    if (keylen < 1) return 0;
+    if (CPPENC_HBLEN(keylen) > WS_GP_SIZE) return 0;
+    ptl = cppenc_decrypt(p, key, keylen, rec, reclen, pt, hb, fx, &keyok);
+    if (ptl != passlen) return 0;
+    return memcmp(pt, pass, passlen) == 0;
+}
+
+static int cppenc_verify_common(const struct cppenc_params *p,
+                                const char *hashstr, int hashlen,
+                                const unsigned char *pass, int passlen)
+{
+    unsigned char *rec = (unsigned char *)WS->gp2;
+    const char *colon;
+    const unsigned char *inlinekey = NULL;
+    int inlinekeylen = 0, reclen, i;
+
+    if (hashlen < 2) return 0;
+    /* An inline key, if present, starts at the FIRST colon. The hash field
+     * itself is pure hex and can never contain one, and a plaintext that
+     * contains a colon reaches us $HEX[]-wrapped (prfound wraps exactly that
+     * character), so this split is unambiguous. */
+    colon = (const char *)memchr(hashstr, ':', hashlen);
+    if (colon) {
+        inlinekey    = (const unsigned char *)(colon + 1);
+        inlinekeylen = (int)(hashstr + hashlen - (colon + 1));
+        hashlen      = (int)(colon - hashstr);
+        if (inlinekeylen < 1 || hashlen < 2) return 0;
+    }
+    if (hashlen & 1) return 0;
+    reclen = hashlen / 2;
+    if (!cppenc_reclen_ok(p, reclen)) return 0;
+    if (reclen + 16 > WS_GP_SIZE) return 0;
+    for (i = 0; i < hashlen; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F'))) return 0;
+    }
+    if (passlen > reclen) return 0;             /* cannot fit in the record */
+    hex2bin(hashstr, hashlen, rec);
+
+    if (inlinekey) {
+        CppInlineSeen = 1;
+        return cppenc_try_key(p, rec, reclen, inlinekey, inlinekeylen,
+                              pass, passlen);
+    }
+    if (CppKeyCnt == 0) {
+        /* Only under -c, where the line has explicitly claimed this type. In
+         * auto-detect every hex value reaches this verifier and a note per
+         * line would be noise. RECORDED, NOT PRINTED: see CppWantedKey. */
+        if (CheckLabel) CppWantedKey = 1;
+        return 0;
+    }
+    for (i = 0; i < CppKeyCnt; i++)
+        if (cppenc_try_key(p, rec, reclen, CppKeys[i], CppKeyLen[i],
+                           pass, passlen)) return 1;
+    return 0;
+}
+
+static int verify_cryptopplegacy(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return cppenc_verify_common(&CPPENC_LEGACY, hashstr, hashlen, pass, passlen);
+}
+
+static int verify_cryptoppdefault(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    return cppenc_verify_common(&CPPENC_DEFAULT, hashstr, hashlen, pass, passlen);
+}
+
+
 static int verify_md5salt1salt2(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -26345,6 +26971,38 @@ static void init_hashtypes(void)
     HTV("GOST12256CRYPT",   0, verify_gost12256crypt, "$gost12256hash$password$awrQfwgXMa0BFMCtZu97GJKqeVszI/B2usmTf9cpOa/:magnum");
     HTV("GOST94CRYPT",      0, verify_gost94crypt, "$gost94hash$salt$sG.6rfU0vKHX4eL00bUDqjXxaAcQHqpJQlM3ctfj013:magnum");
     HTV("SUNMD5",           0, verify_sunmd5, "$md5$rounds=904$Vc3VgyFx44iS8.Yu$Scf90iLWN6O6mT9TA06NK/:test");
+    /* CRYPTOPPLEGACY / CRYPTOPPDEFAULT -- Crypto++ DataEncryptor. Both
+     * vectors are the SELF-CONTAINED 3-field form,
+     * record:sitekey:plaintext, which is also the form mdxfind emits and the
+     * form a founds file should be written in, so -T needs no keyfile and
+     * `mdxfind | hashpipe -c` round-trips with no extra argument. HTF_SALTED
+     * is declared because the site key IS a salt -- of cardinality one -- and
+     * with no salt declared these types listed as flags=vV under -N, telling
+     * an operator the opposite of the truth about how to feed them.
+     *
+     * THE KEY AND THE PLAINTEXT ARE DIFFERENT STRINGS ON PURPOSE. A vector
+     * whose key equalled its plaintext would pass just as well if the
+     * verifier compared against the KEY instead of the plaintext, which is
+     * exactly the confusion these types have to be protected from.
+     *
+     * NEITHER VECTOR IS OUR OWN OUTPUT FED BACK TO US, which is the whole
+     * point of registering these two rather than a generated pair:
+     *
+     *   CRYPTOPPLEGACY  -- the record was produced by the REAL vendor DLL,
+     *       driven under wine with a known passphrase. It is field output, not
+     *       a reference implementation's, so this vector tests the code
+     *       against the artifact rather than against its own arithmetic.
+     *   CRYPTOPPDEFAULT -- produced by upstream Crypto++ DefaultEncryptor and
+     *       confirmed by decrypting it with upstream. NO FIELD SAMPLE OF THIS
+     *       TYPE EXISTS; that is the best independence available for it, and
+     *       it is NOT what the vendor DLL produces (see the core header's
+     *       naming-trap comment).
+     *
+     * Both records are 32 and 40 bytes; note that neither length distinguishes
+     * the types, since Legacy is 8+8k and Default 8+16m and every Default
+     * length is also a Legacy length. */
+    HTV("CRYPTOPPLEGACY",   HTF_SALTED, verify_cryptopplegacy,  "3DDC35B38270872954DA6A445397860FA8BBFEC184353FFAAEA87A16D72B68FD:secret:password123");
+    HTV("CRYPTOPPDEFAULT",  HTF_SALTED, verify_cryptoppdefault, "0123456789ABCDEF3EE042F5D20F9FE50E19BB2ECDBC86F6C9E9C06F7788B523CEB2ECD09700248D:secret:password123");
     HTV("SM3CRYPT",         0, verify_sm3crypt, "$sm3$aaaaaaaaaaaaaaaa$9hj3BsTKoxVnrt6XmdzPzkD4Xi1i8VVI6wk6t.RK.w7:password123");
     HTV("AS400SSHA1",       0, verify_as400ssha1, "$as400$ssha1$*QTEST1*228267B3F408E739F5A577554E978DD05536A3ED:password123");
     HTV("ARGON2",           0, verify_argon2, "$argon2id$v=19$m=65536,t=3,p=1$AAAAAAAAAAAAAAAAAAAAAA$g21LGibBQ2iHFjsbopcv8xkV8FNXi1tW6wD6GcyKB7I:password123");
@@ -27963,10 +28621,32 @@ static void record_unresolved_format(const char *line, int len)
     UfmtN++;
 }
 
+/* The Crypto++ encryptor types cannot be verified from `TYPE hash:plain`
+ * alone, because verifying means DECRYPTING and that needs the site key. Said
+ * at the END of the run, once, and only when no key was available anywhere in
+ * it -- an inline `TYPE record:sitekey:plaintext` line counts as a key, and
+ * the parse walk guarantees such a line is ALSO offered to the verifier in its
+ * keyless 2-field shape, which is why this cannot be decided at the call. */
+static void report_cppenc_key_hint(void)
+{
+    if (!CppWantedKey || CppKeyCnt || CppInlineSeen)
+        return;
+    fprintf(stderr,
+      "hashpipe: UNSATISFIABLE, not a wrong password: a CRYPTOPP record is"
+      " ENCRYPTED, not\n"
+      "hashpipe: hashed, so verifying one means DECRYPTING it and that needs"
+      " the site key.\n"
+      "hashpipe: Write the line in the 3-field form"
+      " TYPE record:sitekey:plaintext, which is\n"
+      "hashpipe: what mdxfind emits, or pass the key file with -j"
+      " <keyfile>.\n");
+}
+
 static void report_unresolved_formats(void)
 {
     int i;
 
+    report_cppenc_key_hint();
     if (!UfmtN)
         return;
     fprintf(stderr,
@@ -32276,11 +32956,15 @@ static void run_benchmark(void)
 
 /* ---- Main ---- */
 
+/* Defined after the userdef.h include below; usage() needs it, and moving the
+ * include up would reorder the hx section for one listing. */
+static void usage_userdef_rows(FILE *out, int w1, int w2, int w3);
+
 static void usage(int brief)
 {
     FILE *out = brief ? stderr : stdout;
     fprintf(out,
-        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
+        "Usage: hashpipe [-t N] [-i N] [-q N] [-m S] [-o|-O outfile] [-e|-E errfile] [-s statfile] [-j keyfile] [-b spec] [-B] [-T] [-V] [-h] [file ...]\n"
         "\n"
         "  -t N   Thread count (default: number of CPUs)\n"
         "  -i N   Max iteration count for hard pass (default: 128)\n"
@@ -32300,6 +32984,14 @@ static void usage(int brief)
         "         flags, self-test vector. Intended for generating catalogs.\n"
         "  -G     As -T, but also emit the generated example vectors\n"
         "  -L N   Max estimated seconds for a single verify (default 1000).\n"
+        "  -j F   Site keys for CRYPTOPPLEGACY / CRYPTOPPDEFAULT, one per line.\n"
+        "         Only needed for BARE 2-field lines; the normal form carries\n"
+        "         the key inline as record:sitekey:plaintext\n"
+        "         ($HEX[..] accepted). Those records are ENCRYPTED, not hashed,\n"
+        "         so verifying one means decrypting it and that needs the key.\n"
+        "         Same file mdxfind takes with -j. Without it those lines can\n"
+        "         only ever report unresolved. An inline 3-field form,\n"
+        "         TYPE record:sitekey:plaintext, works for a one-off check.\n"
         "  -c     Verify each line against its own leading TYPE label ONLY.\n"
         "         No detection and no fallback: a pair that does not verify as\n"
         "         its label is written to -E. A label naming an unknown type is\n"
@@ -32389,6 +33081,7 @@ static void usage(int brief)
             fprintf(out, "%-*s%-*s%-*s%s\n", w1, ibuf, w2, flags, w3, ht->name,
                 hci ? hcbuf : "n/a");
         }
+        usage_userdef_rows(out, w1, w2, w3);
         fprintf(out, "\nFlags: s=salted u=UC c=composed n=NTLM v=non-hex V=verify\n");
     }
 }
@@ -32419,6 +33112,33 @@ static const struct { int idx; long long rate; } bench_rates[] = {
  * ================================================================ */
 #include "hx_vm.h"
 #include "userdef.h"
+
+/* User-defined types are a SEPARATE address space and are not in Hashtypes[],
+ * so the -h table loop cannot reach them; -N lists them the same way. Keyed on
+ * the DECLARED id, which is what -m u<id> takes, never on the internal op:
+ * that is derived from the built-in count at start-up and shifts as built-ins
+ * are added. usage() runs after userdef_load(), so they are loaded by now. */
+static void usage_userdef_rows(FILE *out, int w1, int w2, int w3)
+{
+    int un = userdef_count(), ui;
+    if (un <= 0) return;
+    fprintf(out, "\nUser-defined types from $MDXFIND_CACHE/userdef.txt"
+                 " (select with -m u<id>):\n\n");
+    for (ui = 0; ui < un; ui++) {
+        struct userdef_type *ut = userdef_get_by_index(ui);
+        char uf[8], ib[32];
+        int uo = 0;
+        if (!ut) continue;
+        if (ut->slot_mask & USERDEF_SLOT_SALT) uf[uo++] = 's';
+        if (uo == 0) uf[uo++] = '-';
+        uf[uo] = '\0';
+        snprintf(ib, sizeof(ib), "u%s", ut->idstr);
+        fprintf(out, "%-*s%-*s%-*s%s\n", w1, ib, w2, uf, w3, ut->dispname, "n/a");
+    }
+    fprintf(out, "\nA user type is always labelled USER_<name> on output, and carries"
+                 " no xNN\nsuffix because it evaluates once. Its expression is shown"
+                 " by -Y.\n");
+}
 
 /*
  * Milestone 3 (user-defined hash types -- hashpipe parity): per-line matching.
@@ -32638,7 +33358,14 @@ static int emit_user_matches(struct workitem *item, int *outpos)
             memset(&synth, 0, sizeof(synth));
             synth.name  = ut->dispname;     /* "USER_<name>" */
             item->match_type = &synth;
-            item->match_iter = 1;           /* x01 -- one hx evaluation */
+            /* 0, not 1: a user type is ONE hx evaluation with no iteration
+             * ladder, and format_output suppresses the suffix at 0 exactly as
+             * mdxfind's emit does at x == 0. Stamping 1 printed USER_<name>x01
+             * where mdxfind printed USER_<name>, so the same recovered hash
+             * filed into two different mdsplit ledger files depending on which
+             * tool produced the line. Per Waffle 2026-09-09: with no iteration
+             * the x01 is suppressed. */
+            item->match_iter = 0;
             if (fsalt) {
                 /*
                  * A stored form put the salt INSIDE the hash field, which is
@@ -32892,7 +33619,7 @@ int main(int argc, char **argv)
       }
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:c")) != -1) {
+    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:j:c")) != -1) {
         switch (opt) {
         case 'J':
             /*
@@ -32922,6 +33649,13 @@ int main(int argc, char **argv)
             break;
         case 'c':
             CheckLabel = 1;
+            break;
+        case 'j':
+            /* Site keys for the Crypto++ encryptor types, same file mdxfind
+             * takes with -j. Loaded here rather than lazily so that a
+             * mistyped filename is fatal at startup instead of presenting as
+             * "nothing verified". */
+            cppenc_load_keys(optarg);
             break;
         case 'q':
             Iterstep = atoi(optarg);
@@ -33115,6 +33849,25 @@ int main(int argc, char **argv)
             }
             printf("e%d\t%s\t%s\t%s\t%s\n", ti, ht->name,
                 hci ? hcbuf : "n/a", flags, ht->example ? ht->example : "");
+        }
+        /* User-defined types are a SEPARATE address space and are not in
+         * Hashtypes[]; they live in the userdef registry. Keyed on the declared
+         * id, which is what -m u<id> takes, never on the internal op -- the op
+         * is derived from the built-in count at startup and moves as built-ins
+         * are added. Without this a known-type list built from -N could never
+         * contain a USER_ type, though -c USER_<name> verifies them fine. */
+        {
+            int un = userdef_count(), ui;
+            for (ui = 0; ui < un; ui++) {
+                struct userdef_type *ut = userdef_get_by_index(ui);
+                char uf[8]; int uo = 0;
+                if (!ut) continue;
+                if (ut->slot_mask & USERDEF_SLOT_SALT) uf[uo++] = 's';
+                if (uo == 0) uf[uo++] = '-';
+                uf[uo] = '\0';
+                printf("u%s\t%s\tn/a\t%s\t%s\n",
+                       ut->idstr, ut->dispname, uf, ut->hx);
+            }
         }
         exit(0);
     }

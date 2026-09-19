@@ -3,7 +3,7 @@
 Complete list of all hash types supported by hashpipe, with internal type index,
 hash name, hashcat mode mapping, and an example hash:password pair.
 
-**1026 types** as of v1.193.
+**1028 types** as of v1.199.
 
 Each example is the complete self-test vector from `hashpipe -T`, shown as
 `hash[:salt]:password` — the same format hashpipe accepts as input.
@@ -407,7 +407,7 @@ Do not edit it by hand; regenerate it.
 | e383 | MD5RAWUC | n/a | `e8eeb4ffdbe6d08270590c63eaceffc3:password123` |
 | e384 | MD5SHA1UCu32 | n/a | `0f5f14cf8895700edd2eed170d4af5c5:password123` |
 | e385 | SHA1SALTPASS | 120,124 | `dc4615802e2920538ead6d2cfab8a16c15a62fac:administrator:password123` |
-| e386 | SHA512PASSSALT | 1710 | `8c597921f115666f5e2f315effbb8d25bc02644bee236944bf8539a3fda7dfd3704dfcf5dde96d60cce7d415a812ba73c248881042321a1108d78790d7beeb1b:administrator:password123` |
+| e386 | SHA512PASSSALT | 1710,15000 | `8c597921f115666f5e2f315effbb8d25bc02644bee236944bf8539a3fda7dfd3704dfcf5dde96d60cce7d415a812ba73c248881042321a1108d78790d7beeb1b:administrator:password123` |
 | e387 | SHA512SHA512SALT | 32410 | `2676843a84b1344f91452f591e9ce586b4a5d2aaa62845df122d75f65bae7ca453302b450a8fbd9d208e4e6c3a4098f2680ceb3eef9e003d887dee24eef4e431:testsalt:password123` |
 | e388 | SHA512SALTPASS | 1720 | `50b47dc5680fcb783a962c457fffd1c1f474880621357122f7cb56b9e82d099d3f5563ab329e7150637ef188a55bc05d216b8546ccf8ced68de203a2b0a25278:administrator:password123` |
 | e389 | SHA512SALTSHA512 | n/a | `b1b4706604213021f6ec950e6b2fedc9c10ca569094e4a1f686cf396ae48c67993fee570d6c4044aad2aca76514e3768647f90835e351066524bb60753af098e:testsalt:password123` |
@@ -458,7 +458,7 @@ Do not edit it by hand; regenerate it.
 | e435 | MD5SPECAM | n/a | `9018942a51656d6055f0c20024dd4f48:password123` |
 | e436 | SHA1HESK | n/a | `6eae5a30262eba6cad69217528a88c541e22c914:password123` |
 | e437 | MD5HESK | n/a | `b67f1f85e82c7a36fad01f5a632acddd:password123` |
-| e438 | SHA1SALTSHA1SALTSHA1PASS | n/a | `94a34fbac5bcdbea13160afdb735e834a0ad9f40:administrator:password123` |
+| e438 | SHA1SALTSHA1SALTSHA1PASS | 13900 | `94a34fbac5bcdbea13160afdb735e834a0ad9f40:administrator:password123` |
 | e439 | MSCACHE | 1100 | `559a1d5d1337e276b1db7bfab28c9223:Administrator:password123` |
 | e440 | MD5SHA1SALTMD5PASS | 21200 | `243e49e71e9fa71f33a9c1680ebe68cf:KMo),:password123` |
 | e441 | MD5SALTMD5PASS | 3710 | `28901512214aae68d950bcc54c415980:00:password123` |
@@ -1048,3 +1048,5 @@ Do not edit it by hand; regenerate it.
 | e1025 | GOST12256CRYPT | n/a | `$gost12256hash$password$awrQfwgXMa0BFMCtZu97GJKqeVszI/B2usmTf9cpOa/:magnum` |
 | e1026 | GOST94CRYPT | n/a | `$gost94hash$salt$sG.6rfU0vKHX4eL00bUDqjXxaAcQHqpJQlM3ctfj013:magnum` |
 | e1027 | SUNMD5 | n/a | `$md5$rounds=904$Vc3VgyFx44iS8.Yu$Scf90iLWN6O6mT9TA06NK/:test` |
+| e1028 | CRYPTOPPLEGACY | n/a | `3DDC35B38270872954DA6A445397860FA8BBFEC184353FFAAEA87A16D72B68FD:secret:password123` |
+| e1029 | CRYPTOPPDEFAULT | n/a | `0123456789ABCDEF3EE042F5D20F9FE50E19BB2ECDBC86F6C9E9C06F7788B523CEB2ECD09700248D:secret:password123` |
