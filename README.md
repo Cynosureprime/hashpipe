@@ -384,6 +384,33 @@ All hashpipe hash types are automatically available as hx functions (lowercase n
 
 The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all mdxfind types to their hx expressions.
 
+## Identifying a hash: bertillon
+
+`bertillon` is hashpipe reached through a symlink, dispatching on `argv[0]`. Given a hash,
+or a file of them, it reports which registered types could have produced that value,
+grouped into easy/medium/hard tiers by how expensive each is to test. It shares this
+binary's type table and its measured rates, so the types it reasons about are exactly the
+types hashpipe can verify.
+
+    ln -s hashpipe bertillon
+
+    bertillon <hash>            which types could produce this
+    bertillon <file>            the same, for a list
+    bertillon <hash>:<plain>    verify it outright
+    bertillon -f <file>         what forms are in this file
+    bertillon -p <file>         what the list as a whole says
+
+It narrows a candidate set and does not assert an identity. For a bare 32-character hex
+value the honest answer is 189 types, and nothing about the value separates them.
+
+- **[docs/GUIDE-bertillon.md](docs/GUIDE-bertillon.md)** — what it does, what it
+  deliberately will not tell you, and every mode worked through with real output.
+- **[docs/WALKTHROUGH-2011-first-crack.md](docs/WALKTHROUGH-2011-first-crack.md)** — a
+  worked example: 121,614 unlabelled hashes of twenty different types, qualified in under
+  a second, through to a first crack and the pattern it revealed.
+- **[docs/METHOD-bertillon-discovery.md](docs/METHOD-bertillon-discovery.md)** — where it
+  fits when working an unknown list, and the several jobs it does not do.
+
 ## Supported Hash Types
 
 hashpipe supports many hash types.  See [HASH_TYPES.md](HASH_TYPES.md) for the complete list with hashcat mode mappings and example hashes, or run `hashpipe -h` for a quick reference.
