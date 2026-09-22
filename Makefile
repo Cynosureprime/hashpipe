@@ -118,7 +118,7 @@ myprogress.o: myprogress.c
 crypt-des.o: crypt-des.c
 	$(CC) $(CFLAGS) -c crypt-des.c
 
-hashpipe.o: hashpipe.c
+hashpipe.o: hashpipe.c bertillon.h
 	$(CC) $(CFLAGS) -c hashpipe.c
 
 # user-defined hash type loader (hx-based).  Built without

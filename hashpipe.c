@@ -14,10 +14,19 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.200 2026/09/19 13:59:02 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.203 2026/09/21 03:27:19 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.203  2026/09/21 03:27:19  dlr
+ * move the bertillon dispatch after the StatTry/StatSolved/StatHotHit calloc: --reduce now gates via hash_compute, which increments StatTry[], and dispatching before the allocation dereferenced a null counter array on the first verify
+ *
+ * Revision 1.202  2026/09/21 00:07:01  dlr
+ * bertillon gate hand-off: BERT_CONTINUE lets --gate set MaxVerifyLimit and then fall through to hashpipe's normal verification path
+ *
+ * Revision 1.201  2026/09/20 13:56:38  dlr
+ * bertillon Stage 0: include bertillon.h; -N now drives the shared bert_walk_types so --emit-table measures the same rows it prints (output byte-identical, verified); argv[0]/-Z detection before getopt; dispatch after the userdef registry loads. Gates: -N md5 unchanged e0de2ae1d2ef2b7990a7474faac52e02; self-test 1028 passed 0 failed 2 skipped, unchanged; --emit-table reproduces the 1028-row fixture with zero differences.
+ *
  * Revision 1.200  2026/09/19 13:59:02  dlr
  * Remove -j. The site key for e1028/e1029 arrives INLINE and only inline, as
  * a salt of cardinality one in the record: TYPE record:sitekey:plaintext, which is
@@ -33043,6 +33052,7 @@ static const struct { int idx; long long rate; } bench_rates[] = {
  * ================================================================ */
 #include "hx_vm.h"
 #include "userdef.h"
+#include "bertillon.h"
 
 /* User-defined types are a SEPARATE address space and are not in Hashtypes[],
  * so the -h table loop cannot reach them; -N lists them the same way. Keyed on
@@ -33550,7 +33560,14 @@ int main(int argc, char **argv)
       }
     }
 
-    while ((opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:c")) != -1) {
+    /*
+     * bertillon selection, BEFORE getopt: its options are its own and hashpipe's
+     * getopt would reject them. The call itself happens after the type table is
+     * built -- that table is what bertillon measures.
+     */
+    bertillon_detect(argc, argv);
+
+    while (!Bert_mode && (opt = getopt(argc, argv, "t:i:q:o:O:e:E:s:b:m:L:BGNTVhX:F:p:S:P:u:DYJ:c")) != -1) {
         switch (opt) {
         case 'J':
             /*
@@ -33730,6 +33747,7 @@ int main(int argc, char **argv)
      * stdin, so this is a pure "validate userdef.txt" mode. */
     if (show_userdef) exit(0);
 
+
     /*
      * -N: print the type table for downstream consumers, one row per type,
      * tab separated: index, name, hashcat modes (or "n/a"), flag letters,
@@ -33745,54 +33763,11 @@ int main(int argc, char **argv)
      * string the self-test checks, so -T proves every row printed here.
      */
     if (ListTable) {
-        int ti, mv;
         printf("# index\tname\thashcat\tflags\tvector\n");
         printf("# %s\n", Version);
-        for (ti = 0; ti < Numtypes; ti++) {
-            struct hashtype *ht = &Hashtypes[ti];
-            char flags[16], hcbuf[64];
-            int fp = 0, hci = 0;
-
-            if (!ht->name) continue;
-            if (!ht->compute && !ht->verify && ht->nchain == 0) continue;
-
-            if (ht->flags & HTF_SALTED)   flags[fp++] = 's';
-            if (ht->flags & HTF_UC)       flags[fp++] = 'u';
-            if (ht->flags & HTF_NTLM)     flags[fp++] = 'n';
-            if (ht->flags & HTF_COMPOSED) flags[fp++] = 'c';
-            if (ht->flags & HTF_NONHEX)   flags[fp++] = 'v';
-            if (ht->verify)               flags[fp++] = 'V';
-            if (fp == 0) flags[fp++] = '-';
-            flags[fp] = '\0';
-
-            for (mv = 0; Maphashcat[mv].hc != 65535; mv++) {
-                if (Maphashcat[mv].mdx == ti) {
-                    if (hci) hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, ",");
-                    hci += snprintf(hcbuf + hci, sizeof(hcbuf) - hci, "%d", Maphashcat[mv].hc);
-                }
-            }
-            printf("e%d\t%s\t%s\t%s\t%s\n", ti, ht->name,
-                hci ? hcbuf : "n/a", flags, ht->example ? ht->example : "");
-        }
-        /* User-defined types are a SEPARATE address space and are not in
-         * Hashtypes[]; they live in the userdef registry. Keyed on the declared
-         * id, which is what -m u<id> takes, never on the internal op -- the op
-         * is derived from the built-in count at startup and moves as built-ins
-         * are added. Without this a known-type list built from -N could never
-         * contain a USER_ type, though -c USER_<name> verifies them fine. */
-        {
-            int un = userdef_count(), ui;
-            for (ui = 0; ui < un; ui++) {
-                struct userdef_type *ut = userdef_get_by_index(ui);
-                char uf[8]; int uo = 0;
-                if (!ut) continue;
-                if (ut->slot_mask & USERDEF_SLOT_SALT) uf[uo++] = 's';
-                if (uo == 0) uf[uo++] = '-';
-                uf[uo] = '\0';
-                printf("u%s\t%s\tn/a\t%s\t%s\n",
-                       ut->idstr, ut->dispname, uf, ut->hx);
-            }
-        }
+        /* The walk moved to bertillon.h so that --emit-table measures the same
+         * rows this prints. The loop body is unchanged; only its home moved. */
+        bert_walk_types(bert_print_N, NULL);
         exit(0);
     }
 
@@ -33800,6 +33775,26 @@ int main(int argc, char **argv)
     StatTry = calloc(Numtypes, sizeof(_Atomic uint64_t));
     StatSolved = calloc(Numtypes, sizeof(_Atomic uint64_t));
     StatHotHit = calloc(Numtypes, sizeof(_Atomic uint64_t));
+
+    /*
+     * bertillon dispatch. It sits HERE, after the stat counters, and not
+     * earlier: --reduce gates a supplied plaintext by calling hash_compute,
+     * which increments StatTry[]. Dispatching before the calloc dereferenced a
+     * null counter array on the first verify. The type table and the userdef
+     * registry are both live by this point, so what bertillon measures is
+     * exactly what -N prints.
+     */
+    if (Bert_mode) {
+        int brc = bertillon_main(Bert_argc, Bert_argv);
+        if (brc != BERT_CONTINUE) exit(brc);
+        /* Gate mode: MaxVerifyLimit is set from the input's own work factors;
+         * hand the file to hashpipe's normal verification path. A wrapper, not
+         * a reimplementation. */
+        { static char *gargv[2]; static char prog[] = "hashpipe";
+          gargv[0] = prog; gargv[1] = (char *)Bert_gate_file;
+          argv = gargv; argc = 2; optind = 1; }
+        Bert_mode = 0;
+    }
 
     if (show_help && !hx_expr && !hx_file) {
         usage(0);
