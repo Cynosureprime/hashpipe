@@ -419,3 +419,7 @@ It is an **aid to the process of discovery**. Use it to see what your list is
 made of before you commit a machine to it, to separate what is worth trying
 from what cannot work, and to know afterwards what a negative result actually
 covered. The judgement stays yours, but you have *informed* judgement.
+
+It is pronounced as he pronounced it: **Bear-Tea-Yawn**, [bɛʁ.ti.jɔ̃].
+The `ll` is a Y and not an L, and the final n is not sounded -- it nasalises the
+vowel, so stop just before your tongue touches the roof of your mouth.
