@@ -392,7 +392,8 @@ grouped into easy/medium/hard tiers by how expensive each is to test. It shares 
 binary's type table and its measured rates, so the types it reasons about are exactly the
 types hashpipe can verify.
 
-    ln -s hashpipe bertillon
+`make` builds it: the symlink is created beside the binary, so the two can never be
+different builds. `make install-man` installs its manual page alongside hashpipe's.
 
     bertillon <hash>            which types could produce this
     bertillon <file>            the same, for a list

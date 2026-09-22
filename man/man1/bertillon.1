@@ -1,0 +1,816 @@
+.\" bertillon(1) -- man-macro reference page
+.\" $Revision: 1.1 $
+.\" $Log: bertillon.1,v $
+.\" Revision 1.1  2026/09/22 00:04:15  dlr
+.\" initial. Documents all 15 option surfaces, twelve executed output blocks, the stdin/file asymmetry, and the limitations that read as bugs and are not. Clean under groff -man -ww and mandoc -Tlint.
+.\"
+.TH BERTILLON 1 "2026-09-21" "hashpipe 1.203" "Password Recovery"
+.SH NAME
+bertillon \- list the registered hash types that could have produced a value
+.SH SYNOPSIS
+.B bertillon
+.RI [ options "] [" target " ...]"
+.br
+.B bertillon
+.BR \-g | \-\-gate
+.I file
+.br
+.B bertillon
+.BR \-p | \-\-profile
+.I file
+.br
+.B bertillon
+.BR \-f | \-\-form
+.RI [ file ]
+.br
+.B bertillon
+.B \-\-emit\-table
+.RI [ reference.tsv ]
+.br
+.B bertillon
+.B \-h
+.SH DESCRIPTION
+.B bertillon
+is given a hash, or a file of them, and reports
+.I which registered hash types could have produced that value,
+grouped by how expensive each is to test.
+.PP
+.B bertillon
+is
+.BR hashpipe (1)
+under another name: one binary, reached through a symlink and dispatching on
+.BR argv [0].
+The same hash types and the same measured speeds are behind both.
+.BR "hashpipe \-Z" " " .\|.\|.
+is the same entry point for an installation that carries no symlink.
+.PP
+The option letters below are
+.BR bertillon 's
+own and have nothing to do with
+.BR hashpipe 's:
+.B \-t
+is a cost tier, not a thread count, and
+.B \-h
+is help.
+A value may be given in full or by its first letter, because the five emit
+formats and the three tiers each have distinct initials, so
+.PP
+.RS
+.nf
+bertillon \-t e \-e h list.txt
+.fi
+.RE
+.PP
+is the whole of
+.BR "\-\-tier easy \-\-emit hashcat" .
+.SH "WHAT IT DOES NOT DO"
+The refusals are the point of the tool, and each is printed on the run
+rather than left in this page.
+.IP \(bu 3
+.B "It does not identify a hash."
+For a bare 32-character hex value the answer is 189 types, and nothing
+about the value narrows it further.  MD5, MD5(SHA1(pass)) and MD5 iterated
+twice all produce 32 hex characters.  Only computing separates them.
+.IP \(bu 3
+.B "It does not rank by likelihood."
+Types come back cheapest first.  Cost is measured; likelihood is not
+estimated at all.
+.IP \(bu 3
+.B "A tier is a budget, not a verdict."
+Types outside the selected tier are untested, not ruled out, and the count
+not tried is printed on every run.
+.IP \(bu 3
+.B "A verified pair is not a cracked-password record."
+The output of a verification is a type identification.  Found-lines are the
+business of
+.BR hashpipe (1)
+and
+.BR mdxfind (1),
+which own that format.
+.IP \(bu 3
+.B "When several types verify, all of them are genuine."
+Nothing in the value chooses between them.  See
+.BR "SEVERAL TYPES VERIFYING" .
+.SH "READING A TARGET"
+A
+.I target
+is either a
+.I value
+\(em a hash,
+.IR hash : salt ,
+or
+.IR hash : salt : plaintext
+\(em or a
+.I file
+containing such values one per line.
+.PP
+How many colon-separated fields the value has decides how it is read.  Two
+fields could be
+.IR hash : salt
+or
+.IR hash : plaintext
+and nothing in the line says which, so both readings are tried and each is
+labelled in the output.
+.PP
+When a plaintext is present and some registered type reproduces the hash,
+that verification is reported and no candidate set is printed.  Verifying is
+cheaper than reducing and it is a stronger answer.
+.SS "A file target"
+A file is read in full.  Up to 4601 lines are kept as a uniform sample of
+the whole file, taken in one pass, so that a handful of damaged lines among
+millions cannot move the answer.  The sampled lines are grouped, the
+commonest group is the one reduced, and the line count, the sample size and
+the number of distinct groups are printed.  When more than one group is
+present the run says how many are not covered.
+.PP
+Lines are grouped by
+.I field count
+and by the
+.I length of the first field.
+Whether that field is hexadecimal is not part of the grouping.  A file whose
+lines are all 32 characters long, half of them hex and half not, therefore
+reports one group, and which of the two the answer describes follows from
+whichever of them appears first in the sample.  Check with
+.B \-f
+when a list may not be uniform.
+.SS "Standard input"
+With no target,
+.B bertillon
+reads standard input and treats
+.I every line
+as a separate target: no sampling, no commonest-group reduction, and one
+summary and one selection per line.  This is not the same operation as
+naming the file, and on a list of any size it is not the one wanted.
+.SS "A target that is neither"
+A target naming no readable file is treated as a hash value.  If it also
+contains a path separator,
+.B bertillon
+says so and carries on; the exit status is still 0.  That warning is the
+only sign that a mistyped filename has been reduced as though it were a
+hash.
+.SH "COST TIERS"
+Every registered type is placed in one of three tiers \(em
+.BR easy ,
+.B medium
+and
+.B hard
+\(em by how expensive it is to test.  Tiers are cumulative:
+.B \-\-tier hard
+includes easy and medium unless
+.B \-\-only
+is given.
+.PP
+Without
+.BR \-\-table ,
+the costing is approximate, and the run says so: types that combine their
+salt from a pair are costed as though they did not, so an
+.IR n -entry
+salt file costs
+.I n
+squared rather than
+.IR n .
+Supplying the reference table measures them.  On a file of 1000
+.IR hash : salt
+lines the easy tier falls from 66 types to 65 when the table is supplied,
+because e408 MD5DSALT moves out of easy and into hard.  Nothing is lost:
+the type is still reachable, at the tier that reflects what it costs.
+.PP
+The reference path is always explicit.  There is no default location and no
+search path, because a tool that silently reads an unexpected file changes
+behaviour invisibly.
+.SH OPTIONS
+.SS "Selecting and widening"
+.TP
+.BI \-t " tier\fR, " \-\-tier " tier"
+.BR easy ,
+.B medium
+or
+.BR hard ,
+or the first letter of one.  Default
+.BR easy .
+.TP
+.BR \-o ", " \-\-only
+Report that tier alone instead of it and everything cheaper.
+.TP
+.BR \-T ", " \-\-truncation
+Also include types whose digest is
+.I longer
+than the value, which apply if these values have been cut short.  Off by
+default; the count it would add is reported on every run that has one.
+.TP
+.BI \-b " reference.tsv\fR, " \-\-table " reference.tsv"
+Take the measured cost columns from this table rather than assuming.  See
+.BR "COST TIERS" .
+.TP
+.BR \-r ", " \-\-reduce
+Report the candidate set.  This is what runs when no other mode is asked
+for, so it never has to be typed.
+.TP
+.BR \-v ", " \-\-verbose
+Print the breakdown behind the two-line summary: how many types the negative
+result would cover, and how many were not tried for each distinct reason.
+.SS "Choosing what is printed"
+.TP
+.BI \-e " format\fR, " \-\-emit " format"
+What to print, in full or by first letter.
+.RS
+.IP \(bu 3
+.B enum
+\(em type numbers, in the form
+.B "mdxfind \-M"
+takes.  The default.
+.IP \(bu 3
+.B mdx
+\(em a ready
+.B "mdxfind \-h"
+selection argument.
+.IP \(bu 3
+.B hashcat
+\(em
+.B "hashcat \-m"
+modes, one per line, because
+.B \-m
+takes exactly one mode per run where
+.B "mdxfind \-M"
+takes a set.  The same answer is one argument for one tool and a sequence of
+runs for the other.
+.IP \(bu 3
+.B john
+\(em John format names, one per line.  Only portable names are emitted;
+config-defined dynamics are numbered per machine and are not safe to name.
+.IP \(bu 3
+.B cmd
+\(em a runnable
+.B mdxfind
+command line.
+.RE
+.IP
+.BR hashcat (1)
+and John name far fewer constructions than
+.BR mdxfind (1)
+does, so neither format can express every type in a selection.  The count
+each drops is reported.  Covering what is printed does not cover the
+reduction.
+.SS "Other modes"
+.TP
+.BR \-g ", " \-\-gate " " \fIfile\fR
+Verify
+.IR hash : plaintext
+and
+.IR hash : salt : plaintext
+lines against every registered type, naming the types that reproduce the
+hash.  The cost limit
+.RB ( "hashpipe \-L" )
+is computed from each line's own parsed work factor before the run, because
+.B hashpipe
+reports a cost-skipped type and an unhandled format with the same message
+and the two need different next actions.  With the limit raised first, a
+report that nothing handled a format can be believed.
+.TP
+.BR \-p ", " \-\-profile " " \fIfile\fR
+Report what the list says collectively and a single line cannot: damage in
+the file, whether an odd field count is real trouble or just salts that
+contain a colon, whether a salt has been folded into the password field, and
+how far the salts are reused.
+.TP
+.BR \-f ", " \-\-form " [" \fIfile\fR ]
+For each input line, is it a hash at all and does it name its own format.
+Each distinct answer is printed once with its count, commonest first, to
+standard output; the totals go to standard error.  No type lists, no
+verification.  Reads standard input when no file is given.
+.RS
+.TP
+.B \-\-per\-line
+One line of output per line of input, in input order, without counts.
+.TP
+.B \-\-summary
+The totals alone.
+.RE
+.TP
+.BI \-\-emit\-table " \fR[" reference.tsv ]
+Measure every type this binary knows and write the table.  With a
+.IR reference ,
+compare against it and stay silent when nothing moved; without one, write it
+unconditionally.  See
+.BR "EXIT STATUS" .
+.RS
+.PP
+The
+.BR salt_ceiling ,
+.BR salt_rel ,
+.BR field2_is_salt ,
+.B n_acceptors
+and
+.B collides_with
+columns are copied from the reference unchanged; this binary does not
+measure them.
+.B tools/bertillon\-probe
+does, and takes about 35 minutes.
+.PP
+Types loaded from your own
+.B userdef.txt
+are not listed, because they depend on your setup rather than on this build.
+.B \-\-include\-userdef
+adds them with their measured columns left blank, and warns that the result
+is not a table to commit.
+.RE
+.TP
+.BR \-h ", " \-\-help
+Print the usage to standard output and exit 0.
+.B \-h
+is help here, and not the type-selecting regex it is in
+.BR mdxfind (1).
+.SH OUTPUT
+The selection goes to standard output and everything else to standard
+error, so the selection pipes.
+.PP
+With a single target the selection is the bare list.  A two-field value is
+reduced under both readings, and each line of output is then prefixed by its
+reading \(em the label
+.B hash:salt
+and a tab \(em so the two can be told apart downstream.  With more than one
+target each line is prefixed instead by the target it answers, followed by a
+tab.  Both appear in the examples below.
+.PP
+A verification prints one line per type that reproduced the hash:
+.PP
+.RS
+.nf
+VERIFIED	e1	MD5
+.fi
+.RE
+.PP
+That is an identification \(em type number and name \(em and deliberately
+not a found line.
+.PP
+Under
+.B \-\-gate
+a line that verified is printed with the type name in front of it, and a
+line that did not is echoed back on its own.  Three causes produce a bare
+line and the output does not tell them apart: the password is wrong for that
+hash, the fields are in the wrong order, or the construction is not
+registered in this build.  Work through them in that order.  For the last,
+an
+.BR hx (1)
+expression and a
+.B userdef
+entry add the construction; a wider search will not find it.
+.SH "SEVERAL TYPES VERIFYING"
+More than one registered type can reproduce the same hash from the same
+input, and when that happens every one of them is reported.  None is wrong.
+AICH over a single small block
+.I is
+SHA-1, so a 40-character hex value and its plaintext verify as SHA1, AICH
+and SHA1UTF7 together.
+.BR hashpipe (1)
+reports only the first, because a cracker needs one answer;
+.B bertillon
+reports all of them because a reader has to choose.
+.PP
+Choosing is yours, and it is made with knowledge of where the list came
+from, not from the value.  Neither is a verified line proof that the fields
+are the right way round: exchanging the salt and the password in a line that
+verified can verify again, as a different type, and both readings are true
+statements about the bytes.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Normal completion.  This includes a target that named no readable file and
+was read as a hash value instead.
+.TP
+.B 2
+Usage error: an unknown option, an unrecognised
+.B \-t
+or
+.B \-e
+value, more than 256 targets, a
+.BR \-g ,
+.B \-p
+or
+.B \-f
+file that cannot be read, or no target with nothing on standard input, which
+prints the usage.
+.PP
+Under
+.B \-\-emit\-table
+with a reference the status reports the comparison:
+.TP
+.B 0
+compared, identical; the row count goes to standard error.
+.TP
+.B 1
+compared, differs; the new table goes to standard output and the diagnosis
+to standard error.
+.TP
+.B 2
+no comparison was possible \(em the reference is absent, unreadable or
+malformed.  This is never conflated with "nothing moved".
+.SH EXAMPLES
+A list of
+.IR hash : salt
+lines that nothing has solved.  The selection is suppressed here to show the
+summary alone; it is what would have gone down the pipe:
+.PP
+.RS
+.nf
+$ ./bertillon salted.txt 2>&1 >/dev/null
+bertillon: salted.txt \-\- 1000 lines, 1000 sampled, 1 different form
+
+bertillon: 66 types to try (32\-char hex + salt, easy tier).
+           widen: \-\-tier medium +12, \-\-truncation +531.  962 not tried, \-v for why.
+.fi
+.RE
+.PP
+.B "\-\-tier hard"
+is not offered on that ladder because it would add nothing to a value of
+this form; only rungs that actually widen the set are shown.  A list of bare
+values with no salt field reduces differently, and the difference is the
+point \(em supplying a salt
+.I cuts
+the set, because a type that takes no salt cannot consume one:
+.PP
+.RS
+.nf
+$ ./bertillon unsalted.txt 2>&1 >/dev/null
+bertillon: unsalted.txt \-\- 2000 lines, 2000 sampled, 1 different form
+
+bertillon: 189 types to try (32\-char hex, easy tier).
+           widen: \-\-tier medium +61, \-\-tier hard +1, \-\-truncation +531.  839 not tried, \-v for why.
+.fi
+.RE
+.PP
+The one type that the hard tier adds to that list, and nothing else:
+.PP
+.RS
+.nf
+$ ./bertillon \-t hard \-o unsalted.txt
+bertillon: unsalted.txt \-\- 2000 lines, 2000 sampled, 1 different form
+
+bertillon: 1 type to try (32\-char hex, hard tier).
+           widen: \-\-truncation +531.  1027 not tried, \-v for why.
+e899
+.fi
+.RE
+.PP
+Two values on one command line, each answered on its own line and prefixed
+by the target it answers.  The selection here is a ready
+.B "mdxfind \-h"
+argument rather than type numbers:
+.PP
+.RS
+.nf
+$ ./bertillon \-t hard \-o \-e mdx 5f4dcc3b5aa765d61d8327deb882cf99 \\
+      da39a3ee5e6b4b0d3255bfef95601890afd80709 2>/dev/null
+5f4dcc3b5aa765d61d8327deb882cf99	\-h '^(LASTPASS)$'
+da39a3ee5e6b4b0d3255bfef95601890afd80709	\-h '^(SHA1DRU|SAMSUNGSHA1)$'
+.fi
+.RE
+.PP
+.B \-v
+gives the breakdown behind the two-line summary.  The four figures sum to
+the not-tried total and each names a different kind of exclusion, which is
+what makes a negative result mean anything: 66 types failing is evidence,
+and 962 untested types are not.
+.PP
+.RS
+.nf
+$ ./bertillon \-v salted.txt 2>&1 >/dev/null
+bertillon: derived digest lengths (bytes): [8, 16, 20, 24, 28, 32, 40, 48, 64]
+bertillon: 1028 type(s), 22 with an uncertain parse
+bertillon: salted.txt \-\- 1000 lines, 1000 sampled, 1 different form
+
+bertillon: field 2 is not the plaintext \-\- 723 types tried, none matched.
+
+bertillon: 66 types to try (32\-char hex + salt, easy tier).
+           widen: \-\-tier medium +12, \-\-truncation +531.  962 not tried:
+
+  a negative result covers these 66 types and no others.
+
+  not tried:
+      696  cannot produce a 32\-character hex form
+           of those, 531 have a LONGER digest and would apply if these
+           values have been cut short (\-\-truncation)
+      251  take no salt, and one was supplied
+       12  cost more than the easy tier allows
+        3  emit the other letter case
+
+  cost tiers are approximate: without \-\-table, types that
+  combine salts in pairs are costed as if they did not.
+  \-\-table hid\-shape.tsv supplies that.
+.fi
+.RE
+.PP
+"Cannot produce this form" is arithmetic and says nothing about any
+algorithm.  "Take no salt" is about this input, and the same types apply to
+a different one.  "Cost more than the tier allows" is deferred, not decided.
+.PP
+The same run with the measured table.  One type leaves the easy tier, the
+approximation notice is gone, and a
+.B "\-\-tier hard"
+rung appears that was not on the ladder before:
+.PP
+.RS
+.nf
+$ ./bertillon \-b hid\-shape.tsv salted.txt 2>&1 >/dev/null
+bertillon: salted.txt \-\- 1000 lines, 1000 sampled, 1 different form
+
+bertillon: 65 types to try (32\-char hex + salt, easy tier).
+           widen: \-\-tier medium +12, \-\-tier hard +1, \-\-truncation +531.  963 not tried, \-v for why.
+.fi
+.RE
+.PP
+A value carrying its plaintext is answered outright:
+.PP
+.RS
+.nf
+$ ./bertillon < solved.txt
+VERIFIED	e1	MD5
+
+bertillon: SOLVED as hash:plaintext \-\- 1 type(s) verified of 723 tried.
+.fi
+.RE
+.PP
+Three types reproducing one 40-character hex value:
+.PP
+.RS
+.nf
+$ ./bertillon < collision.txt
+VERIFIED	e8	SHA1
+VERIFIED	e21	AICH
+VERIFIED	e732	SHA1UTF7
+
+bertillon: SOLVED as hash:plaintext \-\- 3 type(s) verified of 723 tried.
+  3 types produce identical hash results for this input.
+.fi
+.RE
+.PP
+The same on a three-field record, where the salt is explicit and three
+different constructions still reproduce the hash:
+.PP
+.RS
+.nf
+$ ./bertillon 'df9e335fc1cdd7c5c38824a15b1e0acd:ox5:000015'
+VERIFIED	e31	MD5SALT
+VERIFIED	e286	MD5MD5USER
+VERIFIED	e517	MD5\-MD5PASS\-SALT
+
+bertillon: SOLVED \-\- 3 type(s) verified of 413 tried. No candidate set.
+  3 types produce identical hash results for this record.
+.fi
+.RE
+.PP
+A file of solved pairs.  If even a handful exist this identifies the list
+outright and makes narrowing candidates unnecessary.  The first four lines
+report the cost limit the run computed for itself from the bcrypt line:
+.PP
+.RS
+.nf
+$ ./bertillon \-\-gate gate.txt
+bertillon gate: 5 line(s), 1 carrying a work factor
+bertillon gate: worst is bcrypt cost 12, est 0.17 s \-> \-L 10
+bertillon gate: if hashpipe now reports that no registered type
+bertillon gate: handled a format, the cost limit is not the reason.
+MD5SALT df9e335fc1cdd7c5c38824a15b1e0acd:ox5:000015
+MD5SALT b90b6311b4886c473f2c02d6b924bb08:ytp:00007584
+MD5SALT c72c0bbd2f813eabfc6971693c01fcc9:1d2:)(*&^
+MD5SALT 54a3aab52006ebd823b4917fd25927f9:a27:00001844
+BCRYPT $2a$12$3xrp7EKdP0ggzfNg32UA2.nZjaC84YvQbcNBvT6/lC04oOimp8rSm:!!!!!!!!!
+.fi
+.RE
+.PP
+The first of those lines with the password replaced by a wrong one.  The
+line comes back bare:
+.PP
+.RS
+.nf
+$ ./bertillon \-\-gate g2.txt
+bertillon gate: 1 line(s), 0 carrying a work factor
+bertillon gate: no parsed work factor \-> \-L 10
+bertillon gate: if hashpipe now reports that no registered type
+bertillon gate: handled a format, the cost limit is not the reason.
+df9e335fc1cdd7c5c38824a15b1e0acd:ox5:wrongpassword
+.fi
+.RE
+.PP
+The same line with the salt and the password exchanged.  It verifies again,
+as a different type; the same hash and the same two values support both
+readings, and only knowledge of the system the list came from says which one
+describes it:
+.PP
+.RS
+.nf
+$ ./bertillon \-\-gate g3.txt
+bertillon gate: 1 line(s), 0 carrying a work factor
+bertillon gate: no parsed work factor \-> \-L 10
+bertillon gate: if hashpipe now reports that no registered type
+bertillon gate: handled a format, the cost limit is not the reason.
+MD5\-MD5SALT\-PASSx01 df9e335fc1cdd7c5c38824a15b1e0acd:000015:ox5
+.fi
+.RE
+.PP
+What is in a file, distinct answers only, commonest first.  The rare lines
+are the interesting ones \(em here, five truncated values that would
+otherwise match nothing and look like a wordlist problem.  The totals that
+would normally accompany this are on standard error and are discarded here:
+.PP
+.RS
+.nf
+$ ./bertillon \-f mixed.txt 2>/dev/null
+      220  digest|cipher? 16 bytes: digest length AND 16\-byte block multiple \-\- arithmetic cannot separate them
+      100  digest         20 bytes, a digest length
+       50  delimited      2 field(s), first 32 chars, sep ':'
+        5  not\-hash       odd hex length 31 \-\- truncated or mis\-copied
+.fi
+.RE
+.PP
+.B digest|cipher?
+is not indecision.  16 bytes is a real digest length
+.I and
+a whole number of cipher blocks, and arithmetic cannot choose between them.
+.PP
+Feeding hashcat.  The drop count is the part that matters:
+.PP
+.RS
+.nf
+$ ./bertillon \-t e \-e h salted.txt
+bertillon: salted.txt \-\- 1000 lines, 1000 sampled, 1 different form
+
+bertillon: 66 types to try (32\-char hex + salt, easy tier).
+           OF THOSE, 47 of 66 have no hashcat mode and are NOT in
+           the list above. Covering what was printed does not cover
+           the reduction.
+           widen: \-\-tier medium +12, \-\-truncation +531.  962 not tried, \-v for why.
+hash:salt	2611
+2711
+3610
+2811
+10
+11
+2630
+20
+21
+24
+11000
+3800
+21200
+3710
+3910
+4110
+4010
+21300
+4410
+30
+40
+4430
+33100
+30500
+23
+.fi
+.RE
+.PP
+That is 25 modes from the 19 of 66 types that have one, since a type can map
+to several modes at once.  The count of modes therefore says nothing about
+how much of the reduction is covered: 25 looks like more than 19, and 47
+constructions are still untried.  The only way to try those is a tool that
+can name them.
+.PP
+What the list as a whole says.  One salt on every record is the strongest
+evidence available at scale: a hash taken over one concatenated string does
+not record where the salt ended and the password began, so a single line has
+as many readings as it has character positions and nothing to choose between
+them.  One salt on every record chooses:
+.PP
+.RS
+.nf
+$ ./bertillon \-p sitewide.txt
+sitewide.txt \-\- 100 lines
+
+  INTAKE
+    no line\-ending, padding or escaping damage found
+
+  FIELD COUNT
+    most common     : 2 field(s) in 100 of 100 lines (100.00%)
+    salt width      : 23
+    expected        : 78.40% of lines would have 2 fields if the
+                      salts were random printable text of that length
+    difference      : +21.60 points
+    \-> MORE conforming lines than that would predict, so the salts
+       are not random printable text: a fixed salt, or one drawn
+       from a restricted set such as hex, never contains a colon.
+       The prediction does not apply here; nothing is wrong.
+
+  FIELD BOUNDARY
+    every last field ends or begins with the same 23 bytes:
+      xKq7%$tR_2026_siteWide!
+    \-> That string is on EVERY record, so it is not part of anyone's
+       password: it is a salt that has been folded into the password
+       field. These records are filed under the wrong split. They
+       will still verify, which is why verifying cannot catch it.
+
+  SALT REUSE
+    records         : 100 (those whose salt is the usual 23 bytes)
+    distinct salts  : 1
+    most common     : 100 record(s), 100.0000%
+      xKq7%$tR_2026_siteWide!
+    \-> ONE SALT FOR THE WHOLE SITE. Every record shares it, so the
+       boundary between salt and password is known, and that single
+       fact settles a reading the individual lines cannot. Say that
+       this is what decided it: "it verifies" does not decide
+       anything, because the reading you are replacing verified too.
+.fi
+.RE
+.PP
+The INTAKE block also reports CRLF line endings, padding and escaping
+damage, with the count for each.  A list with CRLF endings read against an
+LF wordlist matches nothing at all, for the whole file, and looks exactly
+like the wrong wordlist.
+.SH LIMITATIONS
+.IP \(bu 3
+A candidate set is not an identification, and no ordering within it carries
+any claim about which type is more likely.  See
+.BR "WHAT IT DOES NOT DO" .
+.IP \(bu 3
+Without
+.BR \-\-table ,
+cost tiers are approximate and every run says so.  Only one expansion class
+has been measured: MD5DSALT composes its salt from a pair, so an
+.IR n -entry
+salt file costs
+.I n
+squared.  Every other type is assumed linear.
+.IP \(bu 3
+Lines in a file are grouped by field count and first-field length only.  A
+list mixing hex and non-hex values of the same length reports one group and
+answers for whichever appears first.  See
+.BR "READING A TARGET" .
+.IP \(bu 3
+Reading from standard input answers every line separately and does not
+reduce the file as a whole.  Name the file as a target to get that.
+.IP \(bu 3
+The candidate set is derived from the form of the value.  A value that names
+its own format, such as a
+.B $2a$
+bcrypt hash, is not matched on its tag in this path: it reduces as a
+60-character non-hex value and BCRYPT appears only at
+.BR "\-\-tier hard" ,
+where it belongs on cost.
+.B \-f
+is what reports the tag, and
+.B \-\-gate
+is what confirms it.
+.IP \(bu 3
+.B \-\-emit\-table
+does not measure the
+.BR salt_ceiling ,
+.BR salt_rel ,
+.BR field2_is_salt ,
+.B n_acceptors
+and
+.B collides_with
+columns; they are copied from the reference.
+.IP \(bu 3
+There is no
+.BR \-V .
+The version is
+.BR "hashpipe \-V" ,
+this page having been written against 1.203.
+.IP \(bu 3
+The
+.B bertillon
+name has to be reachable.  An installed
+.B hashpipe
+older than this work carries neither the symlink nor
+.BR \-Z ,
+and the tool then resolves only from the build tree.
+.SH FILES
+.TP
+.B bertillon
+A symlink to the
+.B hashpipe
+binary.  The tool dispatches on
+.BR argv [0];
+.B "hashpipe \-Z"
+is the same entry point under the original name.
+.TP
+.B hid\-shape.tsv
+The measured reference table, as written by
+.BR \-\-emit\-table .
+There is no default location: the path is given with
+.B \-\-table
+or it is not used.
+.TP
+.B userdef.txt
+User-defined types, read only when
+.B MDXFIND_CACHE
+is set.  These are excluded from
+.B \-\-emit\-table
+unless
+.B \-\-include\-userdef
+is given.
+.SH "SEE ALSO"
+.BR hashpipe (1),
+.BR mdxfind (1),
+.BR mdsplit (1),
+.BR hx (1)
+.SH AUTHOR
+Waffle.

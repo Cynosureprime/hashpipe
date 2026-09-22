@@ -107,7 +107,7 @@ else
   ARGON2_FILL_OBJ = ref.o
 endif
 
-all: hashpipe
+all: hashpipe bertillon
 
 yarn.o: yarn.c yarn.h
 	$(CC) $(CFLAGS) -c yarn.c
@@ -156,8 +156,13 @@ argon2/argon2.a:
 hashpipe: $(OBJS) argon2/argon2.a
 	$(CC) $(LDFLAGS) -o hashpipe $(OBJS) $(YESCRYPT_OBJS) $(LIBS) $(LDEXTRA)
 
+# bertillon is hashpipe under another name: same binary, selected by argv[0].
+# A symlink and not a copy, so the two can never be different builds.
+bertillon: hashpipe
+	ln -sf hashpipe bertillon
+
 clean:
-	rm -f hashpipe $(OBJS) hx_lib.o
+	rm -f hashpipe bertillon $(OBJS) hx_lib.o
 	rm -f argon2/*.o argon2/argon2.a
 
 distclean: clean
