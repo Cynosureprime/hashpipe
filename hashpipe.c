@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.203 2026/09/21 03:27:19 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.204 2026/09/22 00:15:00 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.204  2026/09/22 00:15:00  dlr
+ * document bertillon.h as a build dependency, and record the release it belongs to. bertillon.h reached 1.22 after this file reached 1.203, so the binary a v1.203 tag would ship is not the binary that revision describes; the release script requires a real documented revision here rather than a bypassed check, because -V prints $Header and that is how a binary in the field is traced to its source. The substance: bertillon.h is a source dependency and not an optional extra -- the argv[0] dispatch and the shared type walk -N drives are defined there -- so it must appear in every build manifest, and it carries its own getline for Windows, which has none.
+ *
  * Revision 1.203  2026/09/21 03:27:19  dlr
  * move the bertillon dispatch after the StatTry/StatSolved/StatHotHit calloc: --reduce now gates via hash_compute, which increments StatTry[], and dispatching before the allocation dereferenced a null counter array on the first verify
  *
@@ -33052,6 +33055,17 @@ static const struct { int idx; long long rate; } bench_rates[] = {
  * ================================================================ */
 #include "hx_vm.h"
 #include "userdef.h"
+/*
+ * bertillon.h is a source dependency of this file, not an optional extra: the
+ * argv[0] dispatch in main() and the shared type walk that -N drives are both
+ * defined there. It must be listed alongside hashpipe.c in every build
+ * manifest -- the Makefile dependency, and the release script's SRCFILES, or a
+ * remote build host receives a hashpipe.c it cannot compile.
+ *
+ * It is written to compile where this file does, which is not automatic: it
+ * uses getline(), which POSIX has and the Windows CRT does not, and carries
+ * its own replacement for that platform.
+ */
 #include "bertillon.h"
 
 /* User-defined types are a SEPARATE address space and are not in Hashtypes[],
