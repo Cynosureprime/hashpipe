@@ -2,6 +2,9 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.22  2026/09/22 00:14:11  dlr
+ * a portable getline, because Windows has none. bertillon.h uses getline seven times and the Windows CRT does not provide it at all -- verified against the llvm-mingw cross-compiler this project ships with, which rejects it as undeclared. strtok_r, strdup, access and strcasecmp all compile there unchanged; getline was the only one. The replacement lives in bertillon.h rather than the release script's Windows shim so the published source is portable on its own: somebody cloning the repository and cross-compiling should not need release machinery they cannot see. Terminator kept in the buffer, as POSIX specifies.
+ *
  * Revision 1.21  2026/09/21 21:31:29  dlr
  * the folded-salt test told a correctly laid out list it was damaged. A shared run that IS the whole last field is one value every record holds in its own column -- a site-wide salt, correctly placed -- while a shared run that is a PROPER part of a longer varying field is a salt folded into something else. Both are two-field lines, so field count cannot separate them: gating on it reported a clean hash:salt list as damaged and, once gated out, missed the real folded-salt case, which is also two fields. Now discriminated on whole-field versus proper-affix, verified against both: the synthetic site-wide list reads as correct and list 56's 52 misfiled records still report their 48-byte folded salt. Found by writing the documentation for the feature.
  *
@@ -87,6 +90,48 @@
 #define BERTILLON_H
 
 #include <errno.h>
+
+/*
+ * getline() is POSIX 2008 and is absent from the Windows CRT entirely --
+ * verified against the llvm-mingw cross-compiler this project ships with,
+ * which rejects it as an undeclared function. Every other libc call here
+ * (strtok_r, strdup, access, strcasecmp) compiles there unchanged.
+ *
+ * The replacement lives HERE rather than in the release script's Windows shim
+ * so that the published source is portable on its own: somebody who clones the
+ * repository and cross-compiles gets a working build without reproducing
+ * release machinery they cannot see.
+ */
+#ifdef _WIN32
+#include <sys/types.h>
+static ssize_t bert_getline(char **lineptr, size_t *n, FILE *stream)
+{
+    size_t used = 0;
+    int c;
+    if (!lineptr || !n || !stream) { errno = EINVAL; return -1; }
+    if (!*lineptr || *n == 0) {
+        size_t cap = 128;
+        char *p = (char *)realloc(*lineptr, cap);
+        if (!p) return -1;
+        *lineptr = p; *n = cap;
+    }
+    for (;;) {
+        c = fgetc(stream);
+        if (c == EOF) { if (used == 0) return -1; break; }
+        if (used + 2 > *n) {                 /* room for the byte and the NUL */
+            size_t cap = *n * 2;
+            char *p = (char *)realloc(*lineptr, cap);
+            if (!p) return -1;
+            *lineptr = p; *n = cap;
+        }
+        (*lineptr)[used++] = (char)c;
+        if (c == '\n') break;               /* the terminator is KEPT, as POSIX */
+    }
+    (*lineptr)[used] = '\0';
+    return (ssize_t)used;
+}
+#define getline bert_getline
+#endif
 #include <unistd.h>
 
 /* ------------------------------------------------------------------ rows */
