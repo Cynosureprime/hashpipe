@@ -2,6 +2,12 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.24  2026/09/22 14:44:14  dlr
+ * bertillon -p: stop discarding the measured run, and separate fact from inference in FIELD BOUNDARY. The direction retry was 'if (k < 8) k = <prefix>', which OVERWROTE a valid suffix with a shorter prefix whenever the suffix fell under the threshold: a published found list whose every password ended in the 7-byte site salt dpmusic measured 7, was replaced by 0, and the section reported that no run was shared. It now keeps the longer direction. Separately, 'the run IS the whole field' is arithmetic -- every last field byte-identical -- and needed no threshold; gating it on k>=8 made a correct hash:salt list with a 3-byte site salt report the opposite of what was measured. That branch now fires at any width. Only the folded-salt reading is an inference and keeps its threshold; below it the run is NAMED and left to the operator rather than judged. All four outcomes also now state the blind spot: a salt that VARIES shares no run and is invisible to this test, so a silent result no longer reads as a negative. Self-test 1028 passed 0 failed.
+ *
+ * Revision 1.23  2026/09/22 11:35:58  dlr
+ * bertillon: the tag is a sample, not a specification -- let a verify type decide. A tagged row carried whichever prefix its self-test vector held, so BCRYPTMD5 (vector $2b$) was skipped for every real $2a$ value, and a plain $2y$ bcrypt from PHP password_hash() matched nothing: 'NOTHING to try -- no type can produce this value'. Verify types parse the stored form themselves and reject a foreign one at the parse, so the tag test now applies only to compute types. Self-test 1028 passed 0 failed; bcrypt family 10/10 each to its own type; $2a$/$2b$/$2x$/$2y$ all BCRYPT; 0 false positives on wrong passwords; --emit-table byte-identical; bare-hex cost unchanged, cost-12 bcrypt 0.95s -> 1.29s.
+ *
  * Revision 1.22  2026/09/22 00:14:11  dlr
  * a portable getline, because Windows has none. bertillon.h uses getline seven times and the Windows CRT does not provide it at all -- verified against the llvm-mingw cross-compiler this project ships with, which rejects it as undeclared. strtok_r, strdup, access and strcasecmp all compile there unchanged; getline was the only one. The replacement lives in bertillon.h rather than the release script's Windows shim so the published source is portable on its own: somebody cloning the repository and cross-compiling should not need release machinery they cannot see. Terminator kept in the buffer, as POSIX specifies.
  *
@@ -1524,14 +1530,30 @@ static int bert_gate_reading(const char *whole, const char *stored,
     WS = ws;
     for (i = 0; i < Bert_nrows; i++) {
         struct bert_row *r = &Bert_rows[i];
+        int ti = (r->id[0] == 'e') ? atoi(r->id + 1) : -1;
+        int has_verify = (ti >= 0 && ti < Numtypes && Hashtypes[ti].verify) ? 1 : 0;
         if (r->udef) continue;
-        /* Only the shape-compatible, operand-compatible candidates. */
-        if (r->tag[0] && strncmp(stored, r->tag, strlen(r->tag))) continue;
+        /*
+         * The tag is a SAMPLE, not a specification: it is whatever prefix that
+         * type's own self-test vector happened to carry. bcrypt's $2a$, $2b$,
+         * $2x$ and $2y$ are ALGORITHM REVISIONS, orthogonal to which pre-hash
+         * was applied, so BCRYPTMD5 -- whose vector is $2b$ -- was skipped for
+         * every real $2a$ value, and a plain $2y$ bcrypt from PHP's
+         * password_hash() matched nothing at all. The tool then reported
+         * "NOTHING to try -- no type can produce this value", which is a
+         * confident negative on the most recognisable format in the file.
+         *
+         * A verify type parses the stored form itself and rejects a wrong one
+         * cheaply, so let it decide. The tag stays a sound shape filter for
+         * compute types, where the stored form IS the rendered digest.
+         */
+        if (!has_verify && r->tag[0]
+            && strncmp(stored, r->tag, strlen(r->tag))) continue;
         /* The operand test applies only where the salt is a SEPARATE FIELD. A
          * tagged or verify type carries its salt inside the stored form and
          * takes no salt operand, so testing it against have_salt excluded every
          * one of them. */
-        if (!r->tag[0] && !Hashtypes[atoi(r->id + 1)].verify
+        if (!r->tag[0] && !has_verify
             && !!strchr(r->flags, 's') != !!have_salt) continue;
         tried++;
         if (bert_verify_one(r, stored, sl, digest, pass, passlen, salt, saltlen)) {
@@ -1996,10 +2018,20 @@ static int bert_cmd_profile(const char *path)
         printf("    %d record(s): too few to say. A single line cannot settle where\n", nsamp);
         printf("    the salt ends and the password begins.\n");
     } else {
-        char aff[600];
-        int k = bert_common_affix(samp, nsamp, 1, aff, sizeof(aff));
+        char aff[600], affp[600];
+        int k  = bert_common_affix(samp, nsamp, 1, aff,  sizeof(aff));
+        int kp = bert_common_affix(samp, nsamp, 0, affp, sizeof(affp));
         int shortest = (int)strlen(samp[0]), q;
-        if (k < 8) k = bert_common_affix(samp, nsamp, 0, aff, sizeof(aff));
+        /*
+         * Keep the LONGER of the two directions. This was
+         *     if (k < 8) k = <prefix>;
+         * which OVERWROTE a valid suffix with a shorter prefix whenever the
+         * suffix fell under the threshold. A published found list whose every
+         * password ended in the 7-byte site salt dpmusic measured 7, was
+         * replaced by the prefix result 0, and the section then reported that
+         * no run was shared at all.
+         */
+        if (kp > k) { k = kp; memcpy(aff, affp, strlen(affp) + 1); }
         for (q = 1; q < nsamp; q++)
             if ((int)strlen(samp[q]) < shortest) shortest = (int)strlen(samp[q]);
         /*
@@ -2012,7 +2044,23 @@ static int bert_cmd_profile(const char *path)
          * that was gated out, missed the real folded-salt case, which is also
          * two fields.
          */
-        if (k >= 8 && k >= shortest) {
+        /*
+         * Two different acts, and only one of them needs a threshold.
+         *
+         * "The run IS the whole field" is ARITHMETIC: every last field is
+         * byte-identical, which is a fact at any width. Gating it on k >= 8
+         * made a correct hash:salt list with a 3-byte site salt report "no sign
+         * the boundary is misplaced" -- the opposite of what was measured.
+         *
+         * "The run is a PROPER part of a longer field" is an INFERENCE: the
+         * shared bytes might be a folded salt, or might be how these passwords
+         * happen to end. That one keeps its threshold, and below it the run is
+         * REPORTED rather than judged. A published found list carried a 7-byte
+         * site salt, dpmusic, folded into every password field; k was computed
+         * as 7, discarded, and the section printed a sentence that reads as a
+         * negative result.
+         */
+        if (k > 0 && k >= shortest) {
             printf("    every last field is the same %d bytes:\n", k);
             printf("      %.64s\n", aff);
             printf("    -> One value shared by every record, in a field of its own.\n");
@@ -2025,10 +2073,19 @@ static int bert_cmd_profile(const char *path)
             printf("       password: it is a salt that has been folded into the password\n");
             printf("       field. These records are filed under the wrong split. They\n");
             printf("       will still verify, which is why verifying cannot catch it.\n");
+        } else if (k > 0) {
+            printf("    every last field ends or begins with the same %d bytes:\n", k);
+            printf("      %.64s\n", aff);
+            printf("    -> Too short to call. A folded salt of that width and a run of\n");
+            printf("       passwords that happen to end alike look identical here.\n");
+            printf("       Read it and decide.\n");
         } else {
-            printf("    no common run of 8+ bytes across %d last fields: no sign the\n", nsamp);
-            printf("    boundary is misplaced. That is not proof it is right.\n");
+            printf("    no run is shared by all %d last fields.\n", nsamp);
         }
+        if (k < 8)
+            printf("    This test sees a salt only where EVERY record carries the same\n"
+                   "    one. A salt that VARIES -- two hex characters over 256 values,\n"
+                   "    say -- shares no run and is invisible to it.\n");
     }
 
     printf("\n  SALT REUSE\n");

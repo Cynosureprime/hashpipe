@@ -409,8 +409,12 @@ value the honest answer is 189 types, and nothing about the value separates them
 - **[docs/WALKTHROUGH-2011-first-crack.md](docs/WALKTHROUGH-2011-first-crack.md)** — a
   worked example: 121,614 unlabelled hashes of twenty different types, qualified in under
   a second, through to a first crack and the pattern it revealed.
-- **[docs/METHOD-bertillon-discovery.md](docs/METHOD-bertillon-discovery.md)** — where it
-  fits when working an unknown list, and the several jobs it does not do.
+- **[docs/METHOD-bertillon-discovery.md](docs/METHOD-bertillon-discovery.md)** —
+  **written for an AI agent, not for a human reader.** An operating reference for
+  bertillon, hashpipe and mdxfind together, ordered for lookup rather than for
+  reading: literal output strings, exact option semantics, and the failure modes
+  that return exit 0. If you are a person learning these tools, read the guide and
+  the walkthrough above instead.
 
 ## Supported Hash Types
 

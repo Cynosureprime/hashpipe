@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.204 2026/09/22 00:15:00 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.205 2026/09/22 15:37:59 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.205  2026/09/22 15:37:59  dlr
+ * mint a revision for bertillon.h 1.23 and 1.24; the binary is no longer the one v1.204 ships. Two defects, both in the argv[0] tool. First, bert_gate_reading skipped any row whose recorded tag did not prefix-match the stored form, and that tag is whichever prefix the type's own self-test vector carried: BCRYPTMD5 (vector $2b$) was never offered a real $2a$ value, and since plain BCRYPT's tag is $2a$, a bcrypt written $2b$, $2x$ or $2y$ -- Python's default and PHP password_hash()'s -- matched nothing and reported 'NOTHING to try, no type can produce this value'. A verify type parses the stored form itself, so the tag test now applies only to compute types. Second, in -p FIELD BOUNDARY the direction retry 'if (k < 8) k = <prefix>' overwrote a measured suffix with a shorter prefix, losing a 7-byte site salt entirely; it now keeps the longer direction. The 'run IS the whole field' test is arithmetic and no longer carries a threshold, only the folded-salt inference does, and every outcome states that the test sees a constant salt and is blind to one that varies. Self-test 1028 passed 0 failed.
+ *
  * Revision 1.204  2026/09/22 00:15:00  dlr
  * document bertillon.h as a build dependency, and record the release it belongs to. bertillon.h reached 1.22 after this file reached 1.203, so the binary a v1.203 tag would ship is not the binary that revision describes; the release script requires a real documented revision here rather than a bypassed check, because -V prints $Header and that is how a binary in the field is traced to its source. The substance: bertillon.h is a source dependency and not an optional extra -- the argv[0] dispatch and the shared type walk -N drives are defined there -- so it must appear in every build manifest, and it carries its own getline for Windows, which has none.
  *
@@ -33066,7 +33069,7 @@ static const struct { int idx; long long rate; } bench_rates[] = {
  * uses getline(), which POSIX has and the Windows CRT does not, and carries
  * its own replacement for that platform.
  */
-#include "bertillon.h"
+#include "bertillon.h"   /* Updated bertillon.h on 09/22/2026 */
 
 /* User-defined types are a SEPARATE address space and are not in Hashtypes[],
  * so the -h table loop cannot reach them; -N lists them the same way. Keyed on
