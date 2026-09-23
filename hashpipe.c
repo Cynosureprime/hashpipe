@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.205 2026/09/22 15:37:59 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.206 2026/09/23 18:31:57 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.206  2026/09/23 18:31:57  dlr
+ * TESTVEC: bound the repeat count by value rather than by field width. A seven-character cap rejected the zero-padded counts mdxfind produces, so a candidate mdxfind had just matched could not be verified by hashpipe. Also accept a missing trailing bracket and a non-space separator, matching mdxfind parser, and test the size bound before multiplying to avoid an int overflow.
+ *
  * Revision 1.205  2026/09/22 15:37:59  dlr
  * mint a revision for bertillon.h 1.23 and 1.24; the binary is no longer the one v1.204 ships. Two defects, both in the argv[0] tool. First, bert_gate_reading skipped any row whose recorded tag did not prefix-match the stored form, and that tag is whichever prefix the type's own self-test vector carried: BCRYPTMD5 (vector $2b$) was never offered a real $2a$ value, and since plain BCRYPT's tag is $2a$, a bcrypt written $2b$, $2x$ or $2y$ -- Python's default and PHP password_hash()'s -- matched nothing and reported 'NOTHING to try, no type can produce this value'. A verify type parses the stored form itself, so the tag test now applies only to compute types. Second, in -p FIELD BOUNDARY the direction retry 'if (k < 8) k = <prefix>' overwrote a measured suffix with a shorter prefix, losing a 7-byte site salt entirely; it now keeps the longer direction. The 'run IS the whole field' test is arithmetic and no longer carries a threshold, only the folded-salt inference does, and every outcome states that the test sees a constant salt and is blind to one that varies. Self-test 1028 passed 0 failed.
  *
@@ -28238,47 +28241,61 @@ static int decode_hex_password(const char *pass, int passlen,
 static int decode_testvec_password(const char *pass, int passlen,
     unsigned char *out, int outmax)
 {
-    const char *p, *end, *sep;
+    const char *p, *end;
     unsigned char pat[256];
-    int patbytes, hexlen, count, total, i;
+    int patbytes, hexlen, count, total;
 
     if (passlen < 15) return -1;  /* $TESTVEC[HH x N] minimum */
     if (strncmp(pass, "$TESTVEC[", 9) != 0) return -1;
-    if (pass[passlen - 1] != ']') return -1;
 
     p = pass + 9;
-    end = pass + passlen - 1;  /* points to ']' */
+    /* The trailing ']' is optional.  mdxfind appends one when it is absent,
+     * so a candidate that reached us through mdxfind may arrive without it. */
+    if (pass[passlen - 1] == ']')
+        end = pass + passlen - 1;
+    else
+        end = pass + passlen;
 
-    /* Find " x " separator */
-    sep = NULL;
-    for (i = 0; p + i + 2 < end; i++) {
-        if (p[i] == ' ' && p[i+1] == 'x' && p[i+2] == ' ') {
-            sep = p + i;
+    /* The hex pattern runs up to the first character that is not a hex
+     * digit.  mdxfind sizes the pattern the same way and then skips any
+     * non-digit run before the count, so it accepts separators other than
+     * " x "; sizing it here rather than searching for a literal " x " keeps
+     * the two parsers accepting the same set of strings. */
+    hexlen = 0;
+    while (p + hexlen < end) {
+        char c = p[hexlen];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+              (c >= 'A' && c <= 'F')))
             break;
-        }
+        hexlen++;
     }
-    if (!sep) return -1;
-
-    /* Parse hex pattern before separator */
-    hexlen = (int)(sep - p);
     if (hexlen < 2 || hexlen > (int)sizeof(pat) * 2) return -1;
     patbytes = hex2bin(p, hexlen, pat);
     if (patbytes <= 0) return -1;
 
-    /* Parse decimal repeat count after " x " */
-    p = sep + 3;
+    /* Skip the separator: any run of non-digits between pattern and count. */
+    p += hexlen;
+    while (p < end && (*p < '0' || *p > '9')) p++;
     if (p >= end) return -1;
-    if (end - p > 7) return -1;  /* max 7 digits */
+
+    /* Parse the decimal repeat count.  Bound the VALUE, not the width of the
+     * field: mdxfind runs atoi() over the digit run and imposes no character
+     * limit, so it accepts a zero-padded count.  A 7-character cap here
+     * rejected $TESTVEC[00 x 00051200], a vector mdxfind had just matched. */
     count = 0;
     for (; p < end; p++) {
         if (*p < '0' || *p > '9') return -1;
+        if (count > 99999999) return -1;   /* keeps count*10+9 inside an int */
         count = count * 10 + (*p - '0');
     }
     if (count <= 0) return -1;
 
-    /* Compute total and clamp to outmax */
-    total = patbytes * count;
-    if (total > outmax) total = outmax;
+    /* Compute total and clamp to outmax.  The bound is tested before the
+     * multiply because patbytes * count overflows int for a large count. */
+    if (count > outmax / patbytes)
+        total = outmax;
+    else
+        total = patbytes * count;
 
     /* Fill output buffer with repeated pattern */
     if (patbytes == 1) {
