@@ -2,6 +2,9 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.26  2026/09/25 22:52:25  dlr
+ * Windows portability: guard the sys-wait include and the WIFEXITED decode. mingw has no sys/wait.h, and _pclose returns the exit code itself rather than a wait status, so there is nothing to decode there. No change on POSIX. Unblocks the Windows x86_64 and ARM64 cross-compiles for the v1.209 release.
+ *
  * Revision 1.25  2026/09/22 23:55:52  dlr
  * bertillon: --lookup COMMAND FILE -- ask an external source, then verify what it says. The source is a command named explicitly on the command line and is the only thing this path knows about it: bare hashes in on stdin, hash[:salt]:plain out on stdout. Whatever comes back goes to the gate, so the TYPE IS DERIVED HERE by computation and the source's own type label is never read -- a label from a corpus is a recorded sample and R2 applies to it like any other. The valuable part is the operands: a plaintext, and the salt where the input had none, which turns a bare 32-char value with 189 candidates into a settled pair. Deliberately absent: network code, credentials, any default source; a command that is not named does not run. The non-zero exit is REPORTED but not read as failure, because grep exits 1 when it matches nothing and that is the commonest honest outcome -- a warning that fires on the common case is one the operator learns to skip. Verified against two unrelated backends, a local founds file and the hashmob API, producing identical output. Self-test 1028 passed 0 failed.
  *
@@ -143,7 +146,12 @@ static ssize_t bert_getline(char **lineptr, size_t *n, FILE *stream)
 #endif
 #include <unistd.h>
 #include <fcntl.h>
+#ifndef _WIN32
+/* Only the WIFEXITED/WEXITSTATUS decode below needs this, and mingw has no
+ * sys/wait.h.  The rest of the --lookup path is popen/pclose/open/fopen,
+ * all of which llvm-mingw provides.  */
 #include <sys/wait.h>
+#endif
 
 /* ------------------------------------------------------------------ rows */
 
@@ -1172,7 +1180,13 @@ static int bert_cmd_lookup(const char *cmd, const char *path)
         fprintf(stderr, "bertillon lookup: the command exited %d. Some sources exit "
                         "non-zero when they\nbertillon lookup: match nothing (grep "
                         "does), so this alone does not mean it failed.\n",
+#ifdef _WIN32
+                /* _pclose returns the exit code itself, not a wait status,
+                 * so there is nothing to decode.  */
+                st);
+#else
                 WIFEXITED(st) ? WEXITSTATUS(st) : st);
+#endif
     if (got == 0) {
         fprintf(stderr, "bertillon lookup: nothing to verify. The source knows none "
                         "of these,\nbertillon lookup: or it was not asked what you "
