@@ -2,6 +2,9 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.25  2026/09/22 23:55:52  dlr
+ * bertillon: --lookup COMMAND FILE -- ask an external source, then verify what it says. The source is a command named explicitly on the command line and is the only thing this path knows about it: bare hashes in on stdin, hash[:salt]:plain out on stdout. Whatever comes back goes to the gate, so the TYPE IS DERIVED HERE by computation and the source's own type label is never read -- a label from a corpus is a recorded sample and R2 applies to it like any other. The valuable part is the operands: a plaintext, and the salt where the input had none, which turns a bare 32-char value with 189 candidates into a settled pair. Deliberately absent: network code, credentials, any default source; a command that is not named does not run. The non-zero exit is REPORTED but not read as failure, because grep exits 1 when it matches nothing and that is the commonest honest outcome -- a warning that fires on the common case is one the operator learns to skip. Verified against two unrelated backends, a local founds file and the hashmob API, producing identical output. Self-test 1028 passed 0 failed.
+ *
  * Revision 1.24  2026/09/22 14:44:14  dlr
  * bertillon -p: stop discarding the measured run, and separate fact from inference in FIELD BOUNDARY. The direction retry was 'if (k < 8) k = <prefix>', which OVERWROTE a valid suffix with a shorter prefix whenever the suffix fell under the threshold: a published found list whose every password ended in the 7-byte site salt dpmusic measured 7, was replaced by 0, and the section reported that no run was shared. It now keeps the longer direction. Separately, 'the run IS the whole field' is arithmetic -- every last field byte-identical -- and needed no threshold; gating it on k>=8 made a correct hash:salt list with a 3-byte site salt report the opposite of what was measured. That branch now fires at any width. Only the folded-salt reading is an inference and keeps its threshold; below it the run is NAMED and left to the operator rather than judged. All four outcomes also now state the blind spot: a salt that VARIES shares no run and is invisible to this test, so a silent result no longer reads as a negative. Self-test 1028 passed 0 failed.
  *
@@ -139,6 +142,8 @@ static ssize_t bert_getline(char **lineptr, size_t *n, FILE *stream)
 #define getline bert_getline
 #endif
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 /* ------------------------------------------------------------------ rows */
 
@@ -1060,6 +1065,125 @@ static double bert_workfactor(const char *line, char *why, size_t whysz)
  * The cap is ANNOUNCED: a silently chosen limit that turns out too low is
  * indistinguishable, in the output, from a format nothing handles.
  */
+static int bert_cmd_gate(const char *path);
+
+/*
+ * --lookup: ask an EXTERNAL source whether these hashes are already solved.
+ *
+ * The source is a COMMAND, named explicitly on the command line, and it is the
+ * only thing this tool knows about it. It receives the bare hashes on stdin,
+ * one per line, and returns "hash[:salt]:plain" on stdout. Whatever comes back
+ * is then handed to the gate, which VERIFIES it by computation.
+ *
+ * That division is the point. A lookup service supplies OPERANDS -- a plaintext
+ * and, where the input had none, the salt that was missing -- and it is trusted
+ * for nothing else. Its own idea of the type is not read, because a type label
+ * from a corpus is a recorded sample and R2 applies to it like any other: a
+ * published list has been seen with every record verifying under a claimed mode
+ * while all three modes were one algorithm misfiled. The plaintext either
+ * reproduces the hash here or it does not.
+ *
+ * Deliberately absent: any network code, any credential, any default source. A
+ * command that is not named does not run. Curl, a local founds file, a database
+ * query and a service that does not exist yet are all the same to this path.
+ */
+static char Bert_lookup_tmp[256];
+
+static void bert_lookup_cleanup(void)
+{
+    if (Bert_lookup_tmp[0]) unlink(Bert_lookup_tmp);
+}
+
+static int bert_cmd_lookup(const char *cmd, const char *path)
+{
+    FILE *in, *pipefp, *out;
+    char *line = NULL, cmdline[1024], inpath[256];
+    size_t cap = 0;
+    ssize_t n;
+    long sent = 0, got = 0;
+    int fd, st;
+
+    if (!cmd || !path) {
+        fprintf(stderr, "bertillon: --lookup needs a COMMAND and a FILE:\n"
+                        "  bertillon --lookup 'your-lookup-script' hashes.txt\n"
+                        "The command reads bare hashes on stdin and returns\n"
+                        "hash[:salt]:plain on stdout. Nothing else is assumed.\n");
+        return 2;
+    }
+    if ((in = fopen(path, "r")) == NULL) {
+        fprintf(stderr, "bertillon: %s: %s\n", path, strerror(errno));
+        return 2;
+    }
+
+    snprintf(inpath, sizeof(inpath), "/tmp/bert-lookup-in-%ld", (long)getpid());
+    if ((out = fopen(inpath, "w")) == NULL) {
+        fprintf(stderr, "bertillon: %s: %s\n", inpath, strerror(errno));
+        fclose(in); return 2;
+    }
+    /* Field 0 only. The source is asked about the hash, not about whatever
+     * else the line happens to carry. */
+    while ((n = getline(&line, &cap, in)) > 0) {
+        char *c;
+        bert_repair(line);
+        if (!*line) continue;
+        if ((c = strchr(line, ':')) != NULL) *c = '\0';
+        if (!*line) continue;
+        fprintf(out, "%s\n", line);
+        sent++;
+    }
+    fclose(in); fclose(out);
+
+    snprintf(cmdline, sizeof(cmdline), "%s < %s", cmd, inpath);
+    if ((pipefp = popen(cmdline, "r")) == NULL) {
+        fprintf(stderr, "bertillon: cannot run \"%s\": %s\n", cmd, strerror(errno));
+        unlink(inpath); free(line); return 2;
+    }
+
+    snprintf(Bert_lookup_tmp, sizeof(Bert_lookup_tmp),
+             "/tmp/bert-lookup-out-%ld", (long)getpid());
+    if ((fd = open(Bert_lookup_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600)) < 0
+        || (out = fdopen(fd, "w")) == NULL) {
+        fprintf(stderr, "bertillon: %s: %s\n", Bert_lookup_tmp, strerror(errno));
+        pclose(pipefp); unlink(inpath); free(line); return 2;
+    }
+    while ((n = getline(&line, &cap, pipefp)) > 0) {
+        bert_repair(line);
+        if (!*line) continue;
+        if (!strchr(line, ':')) continue;        /* not a pair; not ours to read */
+        fprintf(out, "%s\n", line);
+        got++;
+    }
+    st = pclose(pipefp);
+    fclose(out);
+    unlink(inpath);
+    free(line);
+    atexit(bert_lookup_cleanup);
+
+    fprintf(stderr, "bertillon lookup: %ld hash(es) asked, %ld pair(s) returned.\n",
+            sent, got);
+    /*
+     * The exit status cannot be read as success or failure here, and saying so
+     * matters more than guessing: grep exits 1 when it matches nothing, which
+     * is the COMMONEST honest outcome of a lookup. A warning that fires on the
+     * common case is one the operator learns to skip past, and this tool exists
+     * to stop exactly that. State the number; let the operator judge it.
+     */
+    if (st != 0)
+        fprintf(stderr, "bertillon lookup: the command exited %d. Some sources exit "
+                        "non-zero when they\nbertillon lookup: match nothing (grep "
+                        "does), so this alone does not mean it failed.\n",
+                WIFEXITED(st) ? WEXITSTATUS(st) : st);
+    if (got == 0) {
+        fprintf(stderr, "bertillon lookup: nothing to verify. The source knows none "
+                        "of these,\nbertillon lookup: or it was not asked what you "
+                        "think it was asked.\n");
+        return 1;
+    }
+    fprintf(stderr, "bertillon lookup: verifying what came back -- the type is "
+                    "derived here,\nbertillon lookup: not taken from the source.\n");
+    return bert_cmd_gate(Bert_lookup_tmp);
+}
+
 static int bert_cmd_gate(const char *path)
 {
     FILE *fp;
@@ -2163,6 +2287,19 @@ static void bert_usage(FILE *fp)
 "        `bertillon -t e -e h list.txt` is the whole of --tier easy\n"
 "        --emit hashcat.\n"
 "\n"
+"  bertillon --lookup COMMAND FILE\n"
+"        Ask an external source whether these hashes are already solved, then\n"
+"        VERIFY what it says. COMMAND receives the bare hashes on stdin, one\n"
+"        per line, and returns hash[:salt]:plain on stdout. Anything that can\n"
+"        be written as a command works: a local founds file, a database query,\n"
+"        a curl to a service. There is no default source and no network code\n"
+"        here; a command that is not named does not run.\n"
+"\n"
+"        The source supplies OPERANDS -- the plaintext, and the salt where the\n"
+"        input had none. Its own idea of the type is not read. The type is\n"
+"        derived here by computation, so the source can be wrong about it and\n"
+"        cost nothing.\n"
+"\n"
 "  bertillon -g, --gate FILE\n"
 "        Verify hash:plaintext pairs against every registered type.\n"
 "        Computes -L from each line's own parsed work factor first, because\n"
@@ -2235,6 +2372,7 @@ static int bertillon_main(int argc, char **argv)
     const char *ref = NULL;
     int i, emit = 0, shape = 0, gate = 0, per_line = 0, summary_only = 0, rc;
     int reduce = 0, profile = 0, ntargets = 0;
+    const char *lookup = NULL;
     char *targets[256];
 
     for (i = 1; i < argc; i++) {
@@ -2242,6 +2380,14 @@ static int bertillon_main(int argc, char **argv)
         else if (bert_opt(argv[i], "-f", "--form")) shape = 1;
         else if (bert_opt(argv[i], "-p", "--profile")) profile = 1;
         else if (bert_opt(argv[i], "-g", "--gate")) gate = 1;
+        else if (!strcmp(argv[i], "--lookup")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "bertillon: --lookup needs a COMMAND:\n"
+                                "  bertillon --lookup 'your-lookup-script' hashes.txt\n");
+                return 2;
+            }
+            lookup = argv[++i];
+        }
         else if (bert_opt(argv[i], "-r", "--reduce")) reduce = 1;
         else if (bert_opt(argv[i], "-o", "--only")) Bert_only = 1;
         else if (bert_opt(argv[i], "-T", "--truncation")) Bert_trunc = 1;
@@ -2278,7 +2424,9 @@ static int bertillon_main(int argc, char **argv)
     }
     /* A lone non-option argument is the reference table for --emit-table, and a
      * target everywhere else. */
-    if ((emit || gate || shape || profile) && !ref && ntargets) { ref = targets[0]; ntargets = 0; }
+    if ((emit || gate || shape || profile || lookup) && !ref && ntargets)
+        { ref = targets[0]; ntargets = 0; }
+    if (lookup) return bert_cmd_lookup(lookup, ref);
     if (!emit && !shape && !gate && !reduce && !profile) reduce = 1;
     if (emit || shape) Bert_verbose = 1;
     if (profile) return bert_cmd_profile(ref);

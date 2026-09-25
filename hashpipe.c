@@ -14,10 +14,19 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.206 2026/09/23 18:31:57 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.209 2026/09/25 16:27:34 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.209  2026/09/25 16:27:34  dlr
+ * Refuse an oversized $TESTVEC[] on -X instead of truncating it. decode_testvec_password clamped silently to the caller buffer, so a vector larger than the limit produced a well-formed digest for a password that was never presented, and the caller could not tell. The same 3,000,000 byte vector gave three answers: hx clamped at 2,097,152, -X at 2,097,185 because its buffer is sized for $HEX[] rather than for a vector, and -c produced nothing at all, while the true digest appeared in none of them. The decoder now reports the untruncated size through a new final argument and -X refuses when it exceeds the bound, naming both sizes. The bound is TESTVECSIZE rather than the size of the decode buffer, which is what removes the 33 byte disagreement with the standalone hx and makes the 2 MB in hx.1 true. The verify path keeps the old behaviour deliberately and passes NULL through a decode_testvec_password_n wrapper: aborting a bulk ledger run on one oversized record is worse than skipping it, so -c still returns 0 and simply does not verify that line. Verified: both tools agree exactly at 2,097,152 and both refuse 2,097,153 with exit 1; ordinary vectors, $HEX[] and literal text are unchanged on both; -c still verifies a 51,200 vector and still exits 0 on an oversized one; self-test 1028 passed 0 failed.
+ *
+ * Revision 1.208  2026/09/25 16:16:02  dlr
+ * Make $HEX[] and $TESTVEC[] native on both -X channels. They are ways to WRITE a password, not decoration on one: $HEX[] is how a password containing a colon, a newline or a non-UTF-8 byte is presented at all, and $TESTVEC[] is the only form in which a multi-megabyte repeated vector fits on a line. The verify path decodes both and the standalone hx command decodes $HEX[], so the channels that did not disagreed with the rest of the program on identical input. -X on stdin treated both as literal text, hashing the twenty-character spelling of a TESTVEC rather than the vector it denotes, and -p decoded $HEX[] but not $TESTVEC[] and could not have held one anyway because its decode buffer was a MAXLINE stack array while a vector expands to TESTVECSIZE. Both branches now call one hx_bind_candidate helper so they cannot drift apart again, and both decode into a heap buffer sized so that any line the reader accepts can also be decoded. Malformed wrappers fall through to literal exactly as before, which is what keeps a password that merely resembles one safe. Verified against truth: $HEX of password gives 5f4dcc3b5aa765d61d8327deb882cf99 on both channels where stdin previously gave b0969f3a0a70159c665af45e9182b4a6; TESTVEC of 10,240 NUL bytes gives 1276481102f218c981e0324180bafd9f where stdin previously gave bb53312ae3e5b4e5b9695d5083a4f8ad; a one-million repeat vector returns 879f4bba57ed37c9ec5e5aedf9864698 which is the true value. Seven malformed or literal forms stay literal. -X and -c now agree on the same string: -X computes a digest for a TESTVEC record and -c verifies that record against it. Self-test 1028 passed 0 failed, and the 1.207 line-cap behaviour is unchanged.
+ *
+ * Revision 1.207  2026/09/25 15:59:28  dlr
+ * The -X stdin reader silently split any candidate over 4094 characters. It used a 4096-byte STACK buffer, so a longer line was cut into ceil(n/4094) pieces and each piece hashed as a whole password: exit 0, stderr empty, and a column of well-formed digests none of which is the answer. A 10,240-NUL password presented through the hex channel, which is the only line-safe way to write one, came back as five copies of md5 of 2047 NULs plus a remainder, and the correct digest appeared nowhere. An operator consulting -X as an oracle would have concluded the record was unrecoverable, which is the question the oracle was asked to settle. Capacity now comes from hashpipe own TESTVECSIZE, doubled for hex plus room for a prefix, so a maximum-size TESTVEC payload written as hex fits and there is no second constant to drift; hx.c sizes its own line buffer by the same reasoning and states it must never be stack-allocated, which is the rule this code broke. An over-long line is now fatal, naming the line number and the limit, rather than split. That is not new policy: -c already refuses one loudly, capping at MAXLINE and exiting 2, so this is the -X reader adopting what its sibling already did. A refusal cannot be mistaken for an answer and a silent split can. Detection distinguishes a filled buffer from a final line lacking a newline by reading the next byte rather than trusting feof, which is not yet set when the buffer filled exactly. Verified: 4095 and 8190 and 50000 character lines each give ONE digest matching Python; the 10,240-NUL hex case now returns 1276481102f218c981e0324180bafd9f which is the true value; a five-million character line exits 1 with no stdout; multi-line input unchanged; self-test 1028 passed 0 failed; -c unchanged at its own 40,958 byte line.
+ *
  * Revision 1.206  2026/09/23 18:31:57  dlr
  * TESTVEC: bound the repeat count by value rather than by field width. A seven-character cap rejected the zero-padded counts mdxfind produces, so a candidate mdxfind had just matched could not be verified by hashpipe. Also accept a missing trailing bracket and a non-space separator, matching mdxfind parser, and test the size bound before multiplying to avoid an int overflow.
  *
@@ -28239,7 +28248,7 @@ static int decode_hex_password(const char *pass, int passlen,
 /* Decode $TESTVEC[HH x NNNNNNN] password into pre-allocated testvec buffer.
  * Returns expanded length, or -1 if not $TESTVEC format. */
 static int decode_testvec_password(const char *pass, int passlen,
-    unsigned char *out, int outmax)
+    unsigned char *out, int outmax, unsigned long long *want)
 {
     const char *p, *end;
     unsigned char pat[256];
@@ -28291,7 +28300,17 @@ static int decode_testvec_password(const char *pass, int passlen,
     if (count <= 0) return -1;
 
     /* Compute total and clamp to outmax.  The bound is tested before the
-     * multiply because patbytes * count overflows int for a large count. */
+     * multiply because patbytes * count overflows int for a large count.
+     *
+     * `want` reports the UNTRUNCATED size to callers that care.  The clamp
+     * is silent, and a caller that cannot see past it hashes a shortened
+     * vector and reports a well-formed digest for a password that was never
+     * presented -- three channels clamped at three different lengths before
+     * this existed.  The verify path passes NULL and keeps the old
+     * behaviour deliberately: aborting a bulk ledger run on one oversized
+     * record is worse than skipping it. */
+    if (want != NULL)
+        *want = (unsigned long long)patbytes * (unsigned long long)count;
     if (count > outmax / patbytes)
         total = outmax;
     else
@@ -28308,6 +28327,63 @@ static int decode_testvec_password(const char *pass, int passlen,
             memcpy(out + pos, pat, total - pos);
     }
     return total;
+}
+
+/* Verify-path spelling: same decode, no interest in the untruncated size. */
+static int decode_testvec_password_n(const char *pass, int passlen,
+    unsigned char *out, int outmax)
+{
+    return decode_testvec_password(pass, passlen, out, outmax, NULL);
+}
+
+/* ---- candidate binding: $HEX[] and $TESTVEC[] are native everywhere ---- */
+
+/* Bind one candidate for the hx engine, decoding a $HEX[...] or $TESTVEC[...]
+ * wrapper when the line carries one.
+ *
+ * Both wrappers are a native way to WRITE a password, not a decoration on it:
+ * $HEX[] is how a password containing a colon, a newline or a non-UTF-8 byte
+ * is presented at all, and $TESTVEC[] is the only form in which a multi-megabyte
+ * repeated vector can be written on one line. The verify path decodes both, and
+ * the standalone hx command decodes $HEX[], so a channel that does not decode
+ * them disagrees with the rest of the program on identical input.
+ *
+ * Returns 1 when a wrapper was decoded (pass_p points into out), 0 when the
+ * line is literal (pass_p points at src). Order matters only in that the two
+ * prefixes are distinct, so a failed match of one cannot consume the other. */
+static int hx_bind_candidate(const char *src, int srclen,
+    unsigned char *out, int outmax,
+    const char **pass_p, int *pass_l)
+{
+    unsigned long long want = 0;
+    /* The vector bound is TESTVECSIZE, not the size of this buffer.  The
+     * buffer is sized for $HEX[], which can fill any line the reader takes;
+     * a vector is bounded by what a decoded vector may be, and that is the
+     * 2 MB the man page states and the standalone hx enforces.  Deriving it
+     * from the buffer instead let -X accept 33 bytes more than hx did. */
+    int tvmax = (int)TESTVECSIZE;
+    if (tvmax > outmax) tvmax = outmax;
+    int n = decode_hex_password(src, srclen, out, outmax);
+    if (n < 0) {
+        n = decode_testvec_password(src, srclen, out, tvmax, &want);
+        if (n >= 0 && want > (unsigned long long)tvmax) {
+            fprintf(stderr,
+                "FATAL %s:%d: $TESTVEC[] expands to %llu bytes, over the %d "
+                "byte limit; refusing to truncate it. A shortened vector "
+                "hashes to a well-formed digest for a password that was "
+                "never presented.\n",
+                __FILE__, __LINE__, want, tvmax);
+            exit(1);
+        }
+    }
+    if (n >= 0) {
+        *pass_p = (const char *)out;
+        *pass_l = n;
+        return 1;
+    }
+    *pass_p = src;
+    *pass_l = srclen;
+    return 0;
 }
 
 /* ---- $HEX[] encode: check if password needs encoding ---- */
@@ -28979,7 +29055,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
         if (vpasslen >= 0) {
             vpass = vpassbuf;
         } else {
-            vpasslen = decode_testvec_password(item->password, item->passlen,
+            vpasslen = decode_testvec_password_n(item->password, item->passlen,
                                                WS->testvec, TESTVECSIZE);
             if (vpasslen >= 0) {
                 vpass = WS->testvec;
@@ -29161,7 +29237,7 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
                                        WS->vpassbuf, MAXLINE);
         if (vpasslen >= 0) { vpass = WS->vpassbuf; }
         else {
-            vpasslen = decode_testvec_password(item->password, item->passlen,
+            vpasslen = decode_testvec_password_n(item->password, item->passlen,
                                                WS->testvec, TESTVECSIZE);
             if (vpasslen >= 0) { vpass = WS->testvec; }
             else { vpass = (const unsigned char *)item->password; vpasslen = item->passlen; }
@@ -29294,7 +29370,7 @@ retry_with_fullpass:
     if (passlen >= 0) {
         pass = passbuf;
     } else {
-        passlen = decode_testvec_password(item->password, item->passlen,
+        passlen = decode_testvec_password_n(item->password, item->passlen,
                                           WS->testvec, TESTVECSIZE);
         if (passlen >= 0) {
             pass = WS->testvec;
@@ -29350,7 +29426,7 @@ retry_with_fullpass:
             altpass = altbuf;
             altpasslen = adec;
         } else {
-            altpasslen = decode_testvec_password(item->alt_password, item->alt_passlen,
+            altpasslen = decode_testvec_password_n(item->alt_password, item->alt_passlen,
                                                  WS->testvec, TESTVECSIZE);
             if (altpasslen >= 0) {
                 altpass = WS->testvec;
@@ -33496,16 +33572,20 @@ static int run_hx_mode(const char *expr, const char *hx_file,
          * most. A password that is genuinely the literal text can still be
          * given by any means that does not spell $HEX[...].
          */
-        unsigned char hexbuf[MAXLINE];
-        int hxlen = decode_hex_password(hx_pass, (int)strlen(hx_pass),
-                                        hexbuf, (int)sizeof hexbuf);
-        const char *pass_p = hx_pass;
-        int pass_l = (int)strlen(hx_pass);
+        size_t decmax = (size_t)TESTVECSIZE + 32u;
+        unsigned char *decbuf = malloc(decmax);
+        const char *pass_p;
+        int pass_l;
 
-        if (hxlen >= 0) {
-            pass_p = (const char *)hexbuf;
-            pass_l = hxlen;
+        if (decbuf == NULL) {
+            fprintf(stderr, "FATAL %s:%d: cannot allocate %zu bytes to decode "
+                            "the -p candidate\n", __FILE__, __LINE__, decmax);
+            exit(1);
         }
+        /* $TESTVEC[] joins $HEX[] here: it expands to as much as TESTVECSIZE,
+         * so the old MAXLINE stack buffer could not have held one. */
+        hx_bind_candidate(hx_pass, (int)strlen(hx_pass),
+                          decbuf, (int)decmax, &pass_p, &pass_l);
 
         hx_val result = hx_vm_run(&vm,
             pass_p, pass_l,
@@ -33518,17 +33598,76 @@ static int run_hx_mode(const char *expr, const char *hx_file,
                 fwrite(result.data, 1, result.len, stdout);
             putchar('\n');
         }
+        free(decbuf);
     } else {
-        /* read passwords from stdin */
-        char line[4096];
-        while (fgets(line, sizeof(line), stdin)) {
+        /* read passwords from stdin.
+         *
+         * This was a 4096-byte STACK buffer, so a candidate longer than 4094
+         * characters was silently CUT into ceil(n/4094) pieces and each piece
+         * hashed as though it were a whole password: exit 0, stderr empty,
+         * output a column of well-formed digests none of which is the answer.
+         * A 10,240-NUL password presented through the hex channel came back as
+         * five copies of md5 of 2047 NULs plus a remainder.
+         *
+         * Two things were wrong and both are fixed here. The capacity is now
+         * what the expression language can actually express -- a maximum-size
+         * TESTVEC payload written as hex, which is what an oracle caller has
+         * to send for a password containing NUL bytes -- taken from hashpipe's
+         * own TESTVEC size so there is no second constant to drift. hx.c sizes
+         * its own line buffer by the same reasoning and notes that it must
+         * NEVER be stack-allocated, which is the rule this code broke.
+         *
+         * And an over-long line is now FATAL rather than split. hashpipe -c
+         * already refuses one loudly -- it caps at MAXLINE and exits 2 with
+         * INVALID LABEL -- so this is the -X reader adopting the behaviour its
+         * sibling already had, not new policy. A refusal cannot be mistaken
+         * for an answer; a silent split can, and was. */
+        size_t linecap = (size_t)TESTVECSIZE * 2u + 64u;
+        size_t decmax  = linecap / 2u + 1u;   /* any line that fits decodes */
+        char *line = malloc(linecap);
+        unsigned char *decbuf = malloc(decmax);
+        const char *cand_p;
+        int cand_l;
+        unsigned long long lineno = 0;
+        if (line == NULL || decbuf == NULL) {
+            fprintf(stderr, "FATAL %s:%d: cannot allocate %zu bytes for the "
+                            "-X stdin line buffer\n", __FILE__, __LINE__, linecap);
+            exit(1);
+        }
+        while (fgets(line, (int)linecap, stdin)) {
             int len = strlen(line);
             hx_val result;
+            lineno++;
+            /* fgets stops on a newline, on EOF, or on filling the buffer. The
+             * third case is the one that used to split: no newline stored and
+             * more input still to come.  Distinguish it from a legitimate
+             * final line that merely lacks a trailing newline by looking at
+             * the next byte rather than trusting feof(), which is not yet set
+             * when the buffer filled exactly. */
+            if (len > 0 && line[len-1] != '\n') {
+                int nc = fgetc(stdin);
+                if (nc != EOF) {
+                    ungetc(nc, stdin);
+                    fprintf(stderr,
+                        "FATAL %s:%d: stdin line %llu exceeds the %zu byte "
+                        "limit; refusing to split it. A split line hashes as "
+                        "several wrong passwords and the run still exits 0.\n",
+                        __FILE__, __LINE__, lineno, linecap - 1u);
+                    exit(1);
+                }
+            }
             while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
                 len--;
             line[len] = '\0';
+            /* $HEX[] and $TESTVEC[] are native on this channel too.  Until now
+             * -X alone treated them as literal text, so the same string gave
+             * one answer here and another through -c: a $TESTVEC[] record
+             * hashed as its own 20-character spelling rather than as the
+             * vector it denotes. */
+            hx_bind_candidate(line, len, decbuf, (int)decmax,
+                              &cand_p, &cand_l);
             result = hx_vm_run(&vm,
-                line, len,
+                cand_p, cand_l,
                 hx_salt, strlen(hx_salt),
                 hx_salt2, strlen(hx_salt2),
                 hx_pepper, strlen(hx_pepper),
@@ -33539,6 +33678,8 @@ static int run_hx_mode(const char *expr, const char *hx_file,
                 putchar('\n');
             }
         }
+        free(line);
+        free(decbuf);
     }
 
     hx_vm_free(&vm);
