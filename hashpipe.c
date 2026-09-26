@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.209 2026/09/25 16:27:34 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.210 2026/09/26 13:30:38 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.210  2026/09/26 13:30:38  dlr
+ * -m now RESTRICTS user-defined types rather than merely ordering them. A spec naming no user type excludes user types entirely, which is what makes -m usable for reading a file that must contain one type only. A spec of u<id> alone no longer falls through to full auto-detection: the strict gate sat inside the ModeCount > 0 block, and a user-only spec leaves ModeCount at 0, so it was skipped. New ModeGiven flag separates "-m was given" from "-m selected no built-in". Bounding the user-type loop also removes the walk over every loaded user type on every line. auto re-admits everything as before, and -c is unchanged. Self-test 1028 passed, 0 failed, 2 skipped; 1028-line built-in vector corpus byte-identical to 1.209 across seven -m specs and under -c.
+ *
  * Revision 1.209  2026/09/25 16:27:34  dlr
  * Refuse an oversized $TESTVEC[] on -X instead of truncating it. decode_testvec_password clamped silently to the caller buffer, so a vector larger than the limit produced a well-formed digest for a password that was never presented, and the caller could not tell. The same 3,000,000 byte vector gave three answers: hx clamped at 2,097,152, -X at 2,097,185 because its buffer is sized for $HEX[] rather than for a vector, and -c produced nothing at all, while the true digest appeared in none of them. The decoder now reports the untruncated size through a new final argument and -X refuses when it exceeds the bound, naming both sizes. The bound is TESTVECSIZE rather than the size of the decode buffer, which is what removes the 33 byte disagreement with the standalone hx and makes the 2 MB in hx.1 true. The verify path keeps the old behaviour deliberately and passes NULL through a decode_testvec_password_n wrapper: aborting a bulk ledger run on one oversized record is worse than skipping it, so -c still returns 0 and simply does not verify that line. Verified: both tools agree exactly at 2,097,152 and both refuse 2,097,153 with exit 1; ordinary vectors, $HEX[] and literal text are unchanged on both; -c still verifies a 51,200 vector and still exits 0 on an oversized one; self-test 1028 passed 0 failed.
  *
@@ -28575,10 +28578,17 @@ static int ModeCount;                   /* entries in ModeList */
  *
  * These cannot join the built-in hot list: hot_entry.type_idx is dereferenced
  * as &Hashtypes[...] (and indexes StatHotHit[]) with no discriminator, while
- * user ops live at JOB_USERDEF_BASE.. deliberately OUTSIDE Hashtypes[]. So a
- * user id here orders emit_user_matches() and nothing else -- it does not
- * select, restrict, or speed anything up, because that loop has no early exit
- * and tries every loaded type behind a one-compare hashlen filter.
+ * user ops live at JOB_USERDEF_BASE.. deliberately OUTSIDE Hashtypes[], so a
+ * user id cannot be carried in that structure.  That is a constraint on the
+ * hot list only; it does not stop -m from SELECTING user types, which
+ * emit_user_matches() enforces directly against its own index space.
+ *
+ * -m was a HINT in early hashpipe -- "solve everything, and use -m to suggest
+ * where to look first" -- and a user id here did nothing but reorder that
+ * loop.  The contract is now RESTRICTION: -m names the only types that may be
+ * tried, with "auto" as the one token that re-admits the rest.  A spec that
+ * names no user type therefore excludes user types entirely, which is what
+ * makes -m usable for parsing an input file that must contain one type only.
  *
  * The ids are captured as STRINGS here and resolved in main(): parse_mode_spec
  * is compiled above the userdef.h include, so struct userdef_type is still
@@ -28590,6 +28600,7 @@ static int  UserPrefIdCount = 0;
 static int  UserPref[USERPREF_MAX];          /* resolved user-type indices   */
 static int  UserPrefCount = 0;
 static int ModeAuto;                    /* -m includes "auto": fallback to auto-detect */
+static int ModeGiven;                   /* -m was supplied at all (see -m semantics below) */
 static const char *ModeDefaultSalt;     /* default salt for hashcat mode (e.g. "00" for mode 24) */
 static int ModeDefaultSaltLen;
 static int GlobalHotType = -1;
@@ -30178,6 +30189,14 @@ retry_with_fullpass:
         if (!ModeAuto) return;  /* strict: no fallback to auto-detect */
     }
 
+    /*
+     * Same strictness when -m selected NO built-in -- a spec of u<id> alone
+     * leaves ModeCount at 0, so the gate above is inside a block that never
+     * runs and the line fell through to full auto-detection.  "-m u91" then
+     * meant "try everything", the exact opposite of what it asked for.
+     */
+    if (ModeGiven && !ModeAuto) return;
+
     /* --- Easy pass: try all salted candidates --- */
     /* A present but EMPTY salt field still selects the salted types: the
      * HMAC KPASS family has an empty default salt on purpose and hmac over
@@ -30767,8 +30786,9 @@ static int emit_user_matches(struct workitem *item, int *outpos);
  * user-defined result in a harvest.
  *
  * This only reports whether the tag names something loaded; it does not set a
- * hint. emit_user_matches() already tries every loaded user type, so the tag
- * needs stripping, not steering.
+ * hint. emit_user_matches() decides for itself which user types may run --
+ * every loaded one, or just those -m named -- so the tag needs stripping, not
+ * steering.
  *
  * When nothing is loaded -- no userdef.txt, or MDXFIND_CACHE unset -- this
  * returns 0, the tag stays unrecognised and the line lands in unresolved. That
@@ -32697,7 +32717,7 @@ static int parse_mode_spec(const char *spec)
             continue;
         }
 
-        /* u<id> = user-defined type (ordering hint; see UserPrefIds above) */
+        /* u<id> = user-defined type selector (see UserPrefIds above) */
         if ((*p == 'u' || *p == 'U') &&
             strncasecmp(p, "USER_", 5) != 0) {
             const char *idstart;
@@ -33260,6 +33280,7 @@ static int emit_user_matches(struct workitem *item, int *outpos)
     int matched = 0;
     int u;
     int uu;
+    int ulimit;
     const unsigned char *cand;
     int candlen;
     const char *rest_p = NULL;      /* raw tail, retained for the salt split */
@@ -33320,9 +33341,17 @@ static int emit_user_matches(struct workitem *item, int *outpos)
       else          { cand = (const unsigned char *)rp; candlen = rlen; }
     }
 
-    /* -m u<id> types first, then everything else exactly once. Ordering
-     * only: every type is still tried, and every match still emitted. */
-    for (uu = 0; uu < UserPrefCount + nuser; uu++) {
+    /*
+     * -m u<id> types first, then everything else exactly once.
+     *
+     * RESTRICTION, not ordering: with -m given and no "auto", only the user
+     * types -m named may run, so a spec of built-ins alone (or of nothing but
+     * "auto"-less built-ins) tries no user type at all.  Without -m, or with
+     * "auto" in the spec, every loaded type is tried as before.  Bounding the
+     * loop is also what removes the full walk this used to do on every line.
+     */
+    ulimit = (ModeGiven && !ModeAuto) ? UserPrefCount : UserPrefCount + nuser;
+    for (uu = 0; uu < ulimit; uu++) {
         if (uu < UserPrefCount) {
             u = UserPref[uu];
         } else {
@@ -33990,6 +34019,7 @@ int main(int argc, char **argv)
     if (modespec) {
         int mc = parse_mode_spec(modespec);
         if (mc < 0) exit(1);
+        ModeGiven = 1;
         if (mc == 0 && !ModeAuto && UserPrefIdCount == 0) {
             fprintf(stderr, "hashpipe: -m: no types selected\n");
             exit(1);

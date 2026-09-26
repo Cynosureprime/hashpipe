@@ -1,6 +1,9 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.12 $
+.\" $Revision: 1.13 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.13  2026/09/26 13:30:54  dlr
+.\" Document -m as a restriction for user-defined types. Adds u<id> to the -m grammar as a selector naming a user type by the id its userdef.txt stanza declares, and states the rule: a spec naming no user type excludes user types entirely, a spec naming only user types excludes the built-ins, and auto re-admits the rest. Covers hashpipe.c 1.210. TH to 1.210.
+.\"
 .\" Revision 1.12  2026/09/19 13:59:03  dlr
 .\" Remove the -j entry added in 1.11; the option is gone from hashpipe.c 1.200.
 .\" The site key reaches the verifier inline, as a salt in the record, and there is
@@ -58,7 +61,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-09-19" "hashpipe 1.200" "Password Recovery"
+.TH HASHPIPE 1 "2026-09-26" "hashpipe 1.210" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -140,9 +143,13 @@ a comma-separated list of bare
 .BR hashcat (1)
 mode numbers,
 .BI e N
-internal indices, and
+internal indices,
 .BI e N \- e M
-ranges.  The token
+ranges, and
+.BI u id
+selectors naming a user-defined type by the id its
+.I userdef.txt
+stanza declared.  The token
 .B auto
 anywhere in the list re-enables full auto-detection as a fallback after the
 listed types fail.  Restricting the type set is the single most effective
@@ -157,6 +164,22 @@ no fallback to auto-detection unless
 .B auto
 appears in
 .IR spec .
+.IP
+User-defined types obey the same rule, and are selected with
+.BI u id
+\(em
+.B \-m
+.B u47
+tries that type and nothing else.  A
+.I spec
+naming no user type excludes user types entirely, which is what makes
+.B \-m
+usable for reading a file that must contain one type only; a
+.I spec
+naming only user types excludes the built-ins in the same way.  As everywhere
+else,
+.B auto
+re-admits the rest.
 .IP
 The failure mode follows from that.  If the correct type is not in the list, the
 line goes to standard error as unresolved \(em reported exactly like a failed

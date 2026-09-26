@@ -1,50 +1,41 @@
-# hashpipe v1.209: $HEX[] and $TESTVEC[] work the same way everywhere
+# hashpipe v1.210: `-m` restricts user-defined types
 
-Source: hashpipe.c 1.206 -> 1.209, hx.c 1.4 -> 1.6, bertillon.h 1.24 -> 1.25.
+Source: hashpipe.c 1.209 -> 1.210, hashpipe.1 1.12 -> 1.13.
 
-**`-X` silently split a candidate longer than 4,094 characters.** The stdin
-reader used a 4,096-byte stack buffer, so a longer line was cut into
-`ceil(n/4094)` pieces and each piece hashed as a whole password — exit 0,
-stderr empty, and a column of well-formed digests none of which is the answer.
-A 10,240-byte NUL password presented through the hex channel, the only
-line-safe way to write one, came back as five copies of `md5` of 2,047 NULs
-plus a remainder; the correct digest appeared nowhere. Capacity now comes from
-hashpipe's own TESTVEC size, doubled for hex plus a prefix, and an over-long
-line is fatal rather than split. That is not new policy — `-c` already refuses
-one loudly at MAXLINE — so this is the `-X` reader adopting what its sibling
-already did.
+**`-m` did not restrict user-defined types.** `-m` is a filter: a type that is
+not listed is never tried. That held for built-in types and not for
+user-defined ones, which were tried on every line whatever `-m` said. A run
+restricted to `-m e1` could therefore report a line as a user-defined type, and
+because a user-type match suppresses the unresolved pass-through, the operator
+saw a confident answer for a type they had excluded rather than the silent
+negative `-m` promises. The cost was the other half: the loop walked every
+loaded user type per line, so the speedup `-m` exists to deliver was never
+available on that side.
 
-**`$HEX[]` and `$TESTVEC[]` are now native on every channel.** They are ways to
-write a password, not decoration on one: `$HEX[]` is how a password holding a
-colon, a newline or a non-UTF-8 byte is presented at all, and `$TESTVEC[]` is
-the only form in which a multi-megabyte repeated vector fits on a line. The
-verify path decoded both already; `-X` treated both as literal text, hashing
-the twenty-character spelling of a vector rather than the vector, and `-p`
-decoded `$HEX[]` but not `$TESTVEC[]`. Both branches now share one binding
-helper. A string that does not parse as either form is still taken literally,
-which is what keeps a password that merely resembles a wrapper safe.
+`-m u`*id* exists and selects a user-defined type by the id its `userdef.txt`
+stanza declares. It now restricts like everything else: `-m u47` tries that
+type and nothing else. A spec naming no user type excludes user types
+entirely, which is what makes `-m` usable for reading a file that must contain
+one type only. A spec naming only user types excludes the built-ins the same
+way. `auto` anywhere in the spec re-admits everything, unchanged.
 
-**The standalone `hx` never supported `$TESTVEC[]` at all.** It treated the
-form as a hex container and decoded until the first non-hex character, so
-`$TESTVEC[00 x 10240]` read `00`, stopped at the space, and hashed one NUL
-byte. `$TESTVEC[HH x N]` is a repeat count. Both of its decode paths carried
-their own copy of that loop and now share one expander.
+**`-m u`*id* alone silently became full auto-detection.** The strict
+"no fallback unless `auto`" gate sat inside the block that runs only when `-m`
+selected at least one *built-in* type. A spec of `u47` leaves that count at
+zero, so the gate was skipped and the line fell through to the full
+auto-detect sweep over every built-in type as well as every user type --
+exactly the opposite of what the spec asked for, and slower than issuing no
+`-m` at all would have suggested.
 
-**An oversized vector is refused rather than shortened.** A decoded vector is
-bounded at 2 MB, and exceeding it used to clamp silently — the same
-3,000,000-byte vector gave one answer from `hx`, a different one from
-`hashpipe -X`, and no verify at all from `hashpipe -c`, with the true digest in
-none of them. `hx` and `-X` now name the requested size and the limit and exit
-non-zero. The verify path still clamps deliberately: aborting a bulk ledger run
-on one oversized record is worse than skipping it.
+Both follow from `-m` having begun life as a hint, where a user id only
+reordered which user types were tried first. Selection is the contract now,
+for built-in and user-defined types alike.
 
-**bertillon gains `--lookup COMMAND FILE`** — ask an external source, then
-verify what it says. The source is named explicitly on the command line and is
-the only thing that path knows about it: bare hashes in on stdin,
-`hash[:salt]:plain` out on stdout. Whatever comes back goes to the gate, so the
-type is derived here by computation and the source's own label is never read.
-There is no network code, no credentials and no default source; a command that
-is not named does not run.
+`-c` is unaffected: it takes the type from each line's label and already
+restricted user types correctly. The built-in `-m` path is unchanged --
+verified against the previous build over a corpus of all 1028 built-in test
+vectors across seven different `-m` specs and under `-c`, byte-identical in
+every case, with the self-test at 1028 passed, 0 failed, 2 skipped.
 
-`hx.1` now documents how a candidate is presented — both wrappers, the vector
-grammar, the 2 MB bound, and that an unparseable form is taken literally.
+`hashpipe(1)` now documents `u`*id* in the `-m` grammar and states the
+restriction rule for user-defined types.
