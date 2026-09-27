@@ -1,41 +1,43 @@
-# hashpipe v1.210: `-m` restricts user-defined types
+# hashpipe v1.213: seventeen new hash types
 
-Source: hashpipe.c 1.209 -> 1.210, hashpipe.1 1.12 -> 1.13.
+Source: hashpipe.c 1.210 -> 1.213.
 
-**`-m` did not restrict user-defined types.** `-m` is a filter: a type that is
-not listed is never tried. That held for built-in types and not for
-user-defined ones, which were tried on every line whatever `-m` said. A run
-restricted to `-m e1` could therefore report a line as a user-defined type, and
-because a user-type match suppresses the unresolved pass-through, the operator
-saw a confident answer for a type they had excluded rather than the silent
-negative `-m` promises. The cost was the other half: the loop walked every
-loaded user type per line, so the speedup `-m` exists to deliver was never
-available on that side.
+## New hash types (e1030 - e1046)
 
-`-m u`*id* exists and selects a user-defined type by the id its `userdef.txt`
-stanza declares. It now restricts like everything else: `-m u47` tries that
-type and nothing else. A spec naming no user type excludes user types
-entirely, which is what makes `-m` usable for reading a file that must contain
-one type only. A spec naming only user types excludes the built-ins the same
-way. `auto` anywhere in the spec re-admits everything, unchanged.
+| index | name | construction |
+|---|---|---|
+| e1030 | `MD5BASE64MD5SHA1` | `md5(base64(md5(sha1(pass))))` |
+| e1031 | `WRLSHA1` | `wrl(sha1(pass))` |
+| e1032 | `MD5sub8-24MD5sub8-24MD5MD5MD5` | `md5(cut(md5(cut(md5(md5(md5(pass))), 8, 16)), 8, 16))` |
+| e1033 | `MD5SHA1SHA1MD5SHA1MD5` | `md5(sha1(sha1(md5(sha1(md5(pass))))))` |
+| e1034 | `MD5SHA1SHA1SHA1` | `md5(sha1(sha1(sha1(pass))))` |
+| e1035 | `MD5SHA1MD5SHA1MD5SHA1` | `md5(sha1(md5(sha1(md5(sha1(pass))))))` |
+| e1036 | `MD5SHA512MD5` | `md5(sha512(md5(pass)))` |
+| e1037 | `MD5sub1-16MD5` | `md5(cut(md5(pass), 0, 16))` |
+| e1038 | `MD5sub1-28MD5` | `md5(cut(md5(pass), 0, 28))` |
+| e1039 | `MD5MD5sub1-30MD5` | `md5(md5(cut(md5(pass), 0, 30)))` |
+| e1040 | `APACHE-SHA-TRUNC16` | `"{SHA}" . base64(trunc(sha1_bin(pass), 16))` |
+| e1041 | `MD5SALTLAST16` | `cut(md5(md5(pass) . salt), -16)` |
+| e1042 | `MD5SALTMD5PASS-PASS` | `md5(salt . md5(pass) . ":" . pass)` |
+| e1043 | `MD5-1xMD5SHA1pSHA1p` | `md5(md5(sha1(pass)) . sha1(pass))` |
+| e1044 | `MD5-1xMD5SHA256pSHA256p` | `md5(md5(sha256(pass)) . sha256(pass))` |
+| e1045 | `MD5-1xMD5SHA512pSHA512p` | `md5(md5(sha512(pass)) . sha512(pass))` |
+| e1046 | `MD5-1xMD5MD5pMD5p` | `md5(md5(md5(pass)) . md5(pass))` |
 
-**`-m u`*id* alone silently became full auto-detection.** The strict
-"no fallback unless `auto`" gate sat inside the block that runs only when `-m`
-selected at least one *built-in* type. A spec of `u47` leaves that count at
-zero, so the gate was skipped and the line fell through to the full
-auto-detect sweep over every built-in type as well as every user type --
-exactly the opposite of what the spec asked for, and slower than issuing no
-`-m` at all would have suggested.
+Self-test rises from 1028 to 1045 passed, 0 failed, 2 skipped. Each type was
+verified against an independently supplied hash, and mdxfind's own compute was
+checked against the `hx` expression evaluator rather than against itself.
 
-Both follow from `-m` having begun life as a hint, where a user id only
-reordered which user types were tried first. Selection is the contract now,
-for built-in and user-defined types alike.
+`bench_rates.h` carries a measured rate for every one of the seventeen, so none
+of them has a dead `-L` cost guard.
 
-`-c` is unaffected: it takes the type from each line's label and already
-restricted user types correctly. The built-in `-m` path is unchanged --
-verified against the previous build over a corpus of all 1028 built-in test
-vectors across seven different `-m` specs and under `-c`, byte-identical in
-every case, with the self-test at 1028 passed, 0 failed, 2 skipped.
+Three have a stored form. `APACHE-SHA-TRUNC16` is the RFC 2307 `{SHA}` scheme of
+e457 with a 16-byte payload rather than 20, told apart from it by decoded
+payload length. `MD5SALTLAST16` stores only the last 16 hex characters of its
+digest, so it verifies at a single depth. `MD5SALTMD5PASS-PASS` carries its site
+prefix as the salt rather than a hardcoded literal.
 
-`hashpipe(1)` now documents `u`*id* in the `-m` grammar and states the
-restriction rule for user-defined types.
+Four of the seventeen use the existing `-1x` naming convention, which marks the
+outer hash as being over a concatenation rather than a chain; without it a name
+such as `MD5MD5SHA1SHA1` would read as a four-deep chain, which is a different
+digest.

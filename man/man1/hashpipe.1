@@ -1,6 +1,9 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.13 $
+.\" $Revision: 1.14 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.14  2026/09/27 15:36:20  dlr
+.\" TH to the current build: covers the seventeen hash types e1030 to e1046 added in mdxfind.c 1.604 to 1.606 and hashpipe.c 1.211 to 1.213. The type table itself lives in hx.8, which carries all seventeen; these pages are unchanged apart from the version line.
+.\"
 .\" Revision 1.13  2026/09/26 13:30:54  dlr
 .\" Document -m as a restriction for user-defined types. Adds u<id> to the -m grammar as a selector naming a user type by the id its userdef.txt stanza declares, and states the rule: a spec naming no user type excludes user types entirely, a spec naming only user types excludes the built-ins, and auto re-admits the rest. Covers hashpipe.c 1.210. TH to 1.210.
 .\"
@@ -61,7 +64,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-09-26" "hashpipe 1.210" "Password Recovery"
+.TH HASHPIPE 1 "2026-09-27" "hashpipe 1.213" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
