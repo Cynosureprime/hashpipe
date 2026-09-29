@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.215 2026/09/29 13:09:36 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.216 2026/09/29 15:53:00 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.216  2026/09/29 15:53:00  dlr
+ * Settle the benchmark debt the 1.214 entry recorded, and document what the cost guard actually gates. bench_rates.h 1.13 adds measured rates for e1047 through e1053, so the table now covers every registered type that can be benchmarked, 1052 entries for e1 through e1053; the two absent indices are e0 none and e426 PARALLEL, exactly the two the self-test skips for having no test vector. Correcting the reasoning recorded in 1.214 while paying the debt: a missing rate does NOT make -L unable to decline these seven. verify_cost_exceeds needs both a rate and a bench_cost and returns no data if either is absent, and it is called only from verify functions of types that parse an iteration count from the hash, the bcrypt, SAP and PBKDF2 families. A plain unsalted type never reaches it at all, so -L neither declines nor could decline e1047 through e1053 whatever the table says. Confirmed by measurement: e1053 verifies identically at -L 1000000 and at -L 0.0000001. What a missing rate really costs is narrower and worse, so it is now written down at init_rates: it silently disables the cost guard of any type that DOES parse a cost, letting an expensive hash verify at any -L, and nothing reports the gap. That is why the table is kept complete rather than filled in when a guard is added. No functional change in this revision; the annotation and the rate table are the content.
+ *
  * Revision 1.215  2026/09/29 13:09:36  dlr
  * Three new hash types and a correctness fix to the HUM separator parse. e1051 MD5MD5RAWMD5PASS is md5(md5_bin(md5(pass) . pass)) and e1052 MD5MD5RAWMD5 is md5(md5_bin(md5(pass))); both consume the inner digest as HEX and feed the outer md5 the RAW sixteen bytes, which is what distinguishes them from the hex-chained forms already present. e1053 MD5SHA1SHA1MD5MD5 is md5(sha1(sha1(md5(md5(pass))))), registered as a chain one step longer than MD5SHA1SHA1MD5, so it reuses the existing chain machinery rather than adding a fourth copy of the same composition. All three passed the catalog dedup gate before a number was assigned, and each vector was reproduced independently rather than by the code under test. The HUM fix is the substantive change. hum_decode_salt accepted any hex-looking field: it fell back to treating the whole field as hex when the mandatory marker was absent, it broke out of the decode on a bad nibble and returned the prefix decoded so far, and it never checked the result against the separator alphabet. The seven HUM types are UNSALTED. mdxfind never takes the separator from input; it sweeps a fixed eight-entry table and writes the hex of whichever entry hit into the output line as a label. Carrying that label in the salt slot is transport, not a salt, and the old parse turned MD5MD5HUM into md5(md5(pass) . arbitrary bytes), which is a strict superset of e31 MD5SALT. A genuine MD5SALT hash whose salt was spelled as bare hex was therefore attributed to MD5MD5HUM, a type that could never have produced it. Reported by Waffle with a121575ff6a484326e64ac534e384a00 and salt 210d30. The marker is now mandatory, hex is strict, and the decoded separator must be one of the eight values. Callers decline on the new negative return, and the decode is hoisted above the iteration loop so a non-HUM line costs nothing. Measured: all 5405 real HUM lines in the corpus verify byte-identically before and after, per type; 200 of 200 synthetic MD5SALT hashes with hex-spelled salts stop being mis-attributed; one genuine corpus line is corrected from an impossible SHA1SHA1HUM to a SHA1 iteration confirmed by independent computation; corpus-wide, 1228884 lines that the old parse fed to the HUM computes are now declined at parse time and 5405 still accepted. Self-test 1052 passed, 0 failed, 2 skipped.
  *
@@ -33715,6 +33718,27 @@ static void usage(int brief)
     }
 }
 
+/*
+ * Every registered type needs an entry here, and the reason is narrower than it
+ * looks. verify_cost_exceeds needs BOTH a rate and a bench_cost, and returns 0
+ * for no data if either is missing. It is called only from the verify functions
+ * of types that carry an iteration count in the hash -- bcrypt 2^NN, the SAP
+ * and PBKDF2 families -- so for a plain unsalted type it never runs at all and
+ * -L neither declines nor could decline it, rate or no rate.
+ *
+ * What a missing rate actually costs is therefore specific: it silently
+ * disables the cost guard of any type that DOES parse a cost, so an expensive
+ * hash verifies at any -L. That failure is invisible, which is why the table is
+ * kept complete rather than filled in when a guard is added.
+ *
+ * Measured on dev1, the canonical host named in the bench_rates.h header;
+ * numbers from another machine are not substitutable. The incremental path is
+ * documented at the top of bench_rates.h. As of 1.216 the table covers every
+ * registered type that can be measured: 1052 entries for e1 through e1053. The
+ * two absent indices are exactly the two the self-test skips, e0 none and e426
+ * PARALLEL, neither of which has a test vector to benchmark against. A gap
+ * anywhere else means a type was added without measuring it.
+ */
 static void init_rates(void)
 {
 static const struct { int idx; long long rate; } bench_rates[] = {
