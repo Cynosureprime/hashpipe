@@ -1,43 +1,47 @@
-# hashpipe v1.213: seventeen new hash types
+# hashpipe v1.215: seven new hash types, and a HUM separator false-positive fix
 
-Source: hashpipe.c 1.210 -> 1.213.
+Source: hashpipe.c 1.213 -> 1.215.
 
-## New hash types (e1030 - e1046)
+## New hash types (e1047 - e1053)
 
 | index | name | construction |
 |---|---|---|
-| e1030 | `MD5BASE64MD5SHA1` | `md5(base64(md5(sha1(pass))))` |
-| e1031 | `WRLSHA1` | `wrl(sha1(pass))` |
-| e1032 | `MD5sub8-24MD5sub8-24MD5MD5MD5` | `md5(cut(md5(cut(md5(md5(md5(pass))), 8, 16)), 8, 16))` |
-| e1033 | `MD5SHA1SHA1MD5SHA1MD5` | `md5(sha1(sha1(md5(sha1(md5(pass))))))` |
-| e1034 | `MD5SHA1SHA1SHA1` | `md5(sha1(sha1(sha1(pass))))` |
-| e1035 | `MD5SHA1MD5SHA1MD5SHA1` | `md5(sha1(md5(sha1(md5(sha1(pass))))))` |
-| e1036 | `MD5SHA512MD5` | `md5(sha512(md5(pass)))` |
-| e1037 | `MD5sub1-16MD5` | `md5(cut(md5(pass), 0, 16))` |
-| e1038 | `MD5sub1-28MD5` | `md5(cut(md5(pass), 0, 28))` |
-| e1039 | `MD5MD5sub1-30MD5` | `md5(md5(cut(md5(pass), 0, 30)))` |
-| e1040 | `APACHE-SHA-TRUNC16` | `"{SHA}" . base64(trunc(sha1_bin(pass), 16))` |
-| e1041 | `MD5SALTLAST16` | `cut(md5(md5(pass) . salt), -16)` |
-| e1042 | `MD5SALTMD5PASS-PASS` | `md5(salt . md5(pass) . ":" . pass)` |
-| e1043 | `MD5-1xMD5SHA1pSHA1p` | `md5(md5(sha1(pass)) . sha1(pass))` |
-| e1044 | `MD5-1xMD5SHA256pSHA256p` | `md5(md5(sha256(pass)) . sha256(pass))` |
-| e1045 | `MD5-1xMD5SHA512pSHA512p` | `md5(md5(sha512(pass)) . sha512(pass))` |
-| e1046 | `MD5-1xMD5MD5pMD5p` | `md5(md5(md5(pass)) . md5(pass))` |
+| e1047 | `MD5-1xMD5pMD5SHA1p` | `md5(md5(pass) . md5(sha1(pass)))` |
+| e1048 | `MD5-1xMD5pMD5SHA256p` | `md5(md5(pass) . md5(sha256(pass)))` |
+| e1049 | `MD5-1xMD5pMD5SHA512p` | `md5(md5(pass) . md5(sha512(pass)))` |
+| e1050 | `MD5SHA1revMD5` | `md5(sha1(rev(md5(pass))))` |
+| e1051 | `MD5MD5RAWMD5PASS` | `md5(md5_bin(md5(pass) . pass))` |
+| e1052 | `MD5MD5RAWMD5` | `md5(md5_bin(md5(pass)))` |
+| e1053 | `MD5SHA1SHA1MD5MD5` | `md5(sha1(sha1(md5(md5(pass)))))` |
 
-Self-test rises from 1028 to 1045 passed, 0 failed, 2 skipped. Each type was
-verified against an independently supplied hash, and mdxfind's own compute was
-checked against the `hx` expression evaluator rather than against itself.
+All seven are unsalted, catalogued in `hx.8`, and cleared the `hx_dedup_check`
+gate before a number was assigned. Each vector was reproduced independently
+rather than by the code under test. `e1051` and `e1052` consume the inner digest
+as hex and feed the outer `md5` the raw sixteen bytes, which is what separates
+them from the hex-chained forms already present.
 
-`bench_rates.h` carries a measured rate for every one of the seventeen, so none
-of them has a dead `-L` cost guard.
+Self-test rises to 1052 passed, 0 failed, 2 skipped.
 
-Three have a stored form. `APACHE-SHA-TRUNC16` is the RFC 2307 `{SHA}` scheme of
-e457 with a 16-byte payload rather than 20, told apart from it by decoded
-payload length. `MD5SALTLAST16` stores only the last 16 hex characters of its
-digest, so it verifies at a single depth. `MD5SALTMD5PASS-PASS` carries its site
-prefix as the salt rather than a hardcoded literal.
+## HUM types no longer claim hashes they cannot produce
 
-Four of the seventeen use the existing `-1x` naming convention, which marks the
-outer hash as being over a concatenation rather than a chain; without it a name
-such as `MD5MD5SHA1SHA1` would read as a four-deep chain, which is a different
-digest.
+The seven `HUM` types are unsalted. mdxfind does not take their separator from
+the input: it sweeps a fixed eight-entry table and writes the hex of whichever
+entry matched into the output line as a label, `<sephex>- x N`. hashpipe carries
+that label in the salt slot as transport.
+
+`hum_decode_salt` accepted any hex-looking field. It treated the whole field as
+hex when the label marker was absent, returned a partial decode on a bad nibble,
+and never checked the result against the separator alphabet. `MD5MD5HUM` was
+therefore computing `md5(md5(pass) . <any bytes>)`, a strict superset of e31
+`MD5SALT` -- so a genuine `MD5SALT` hash whose salt was written as bare hex was
+attributed to `MD5MD5HUM`, a type that could never have produced it.
+
+The marker is now required, hex parsing is strict, and the decoded separator must
+be one of the eight values mdxfind can emit.
+
+All 5405 real HUM lines in the regression corpus verify byte-identically before
+and after, per type. 200 of 200 synthetic `MD5SALT` hashes with hex-spelled salts
+stop being mis-attributed, and one genuine corpus line is corrected from an
+impossible `SHA1SHA1HUM` to an iteration count confirmed by independent
+computation. Corpus-wide, 1,228,884 lines that the old parse fed to the HUM
+computes are now declined during parsing.

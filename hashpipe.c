@@ -14,10 +14,16 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.213 2026/09/27 06:16:50 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.215 2026/09/29 13:09:36 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.215  2026/09/29 13:09:36  dlr
+ * Three new hash types and a correctness fix to the HUM separator parse. e1051 MD5MD5RAWMD5PASS is md5(md5_bin(md5(pass) . pass)) and e1052 MD5MD5RAWMD5 is md5(md5_bin(md5(pass))); both consume the inner digest as HEX and feed the outer md5 the RAW sixteen bytes, which is what distinguishes them from the hex-chained forms already present. e1053 MD5SHA1SHA1MD5MD5 is md5(sha1(sha1(md5(md5(pass))))), registered as a chain one step longer than MD5SHA1SHA1MD5, so it reuses the existing chain machinery rather than adding a fourth copy of the same composition. All three passed the catalog dedup gate before a number was assigned, and each vector was reproduced independently rather than by the code under test. The HUM fix is the substantive change. hum_decode_salt accepted any hex-looking field: it fell back to treating the whole field as hex when the mandatory marker was absent, it broke out of the decode on a bad nibble and returned the prefix decoded so far, and it never checked the result against the separator alphabet. The seven HUM types are UNSALTED. mdxfind never takes the separator from input; it sweeps a fixed eight-entry table and writes the hex of whichever entry hit into the output line as a label. Carrying that label in the salt slot is transport, not a salt, and the old parse turned MD5MD5HUM into md5(md5(pass) . arbitrary bytes), which is a strict superset of e31 MD5SALT. A genuine MD5SALT hash whose salt was spelled as bare hex was therefore attributed to MD5MD5HUM, a type that could never have produced it. Reported by Waffle with a121575ff6a484326e64ac534e384a00 and salt 210d30. The marker is now mandatory, hex is strict, and the decoded separator must be one of the eight values. Callers decline on the new negative return, and the decode is hoisted above the iteration loop so a non-HUM line costs nothing. Measured: all 5405 real HUM lines in the corpus verify byte-identically before and after, per type; 200 of 200 synthetic MD5SALT hashes with hex-spelled salts stop being mis-attributed; one genuine corpus line is corrected from an impossible SHA1SHA1HUM to a SHA1 iteration confirmed by independent computation; corpus-wide, 1228884 lines that the old parse fed to the HUM computes are now declined at parse time and 5405 still accepted. Self-test 1052 passed, 0 failed, 2 skipped.
+ *
+ * Revision 1.214  2026/09/28 11:37:42  dlr
+ * Add e1047 through e1050 in parity with mdxfind.c. Types[] appended in the same order so the positional indices match exactly, verified at 1050 against mdxfind. e1047 through e1049 are md5 of md5 of pass concatenated with md5 of H of pass for H in sha1, sha256 and sha512. e1050 MD5SHA1revMD5 is md5 of sha1 of the reversed 32 hex characters of md5 of pass, implemented as compute_sha1revmd5 with one more md5 outside, reusing reverse_str; registered with HTF_COMPOSED and an outer_tab entry of compute_md5 so iteration past x01 applies the outermost hash rather than repeating the whole construction. Self-test 1049 passed, 0 failed, 2 skipped. Every supplied vector cracks in mdxfind and verifies here, and mdxfind output round-trips at x01 through x03. bench_rates.h carries no entry for any of the four, so verify_cost_exceeds sees no data and -L cannot decline them, which is the permissive direction rather than a silent decline; a dev1 measurement is still owed before release.
+ *
  * Revision 1.213  2026/09/27 06:16:50  dlr
  * Add e1043 to e1046, mirroring mdxfind.c 1.606. Four compute functions for md5(md5(H(pass)) . H(pass)), H in sha1, sha256, sha512, md5, each hashing H(pass) once and reusing its hex for both terms. Types[] appended in the same order so indices match, verified for all four. outer_tab entries added so iteration past x01 uses md5 as the outermost hash rather than guessing from digest width. bench_rates.h carries all four, measured on dev1, so none has a dead -L cost guard. Self-test 1045 passed, 0 failed, 2 skipped, up from 1041; the four supplied vectors verify through -c and the mdxfind -z output round-trips.
  *
@@ -2323,6 +2329,13 @@ char *Types[] = {
     "MD5-1xMD5SHA256pSHA256p",
     "MD5-1xMD5SHA512pSHA512p",
     "MD5-1xMD5MD5pMD5p",
+    "MD5-1xMD5pMD5SHA1p",
+    "MD5-1xMD5pMD5SHA256p",
+    "MD5-1xMD5pMD5SHA512p",
+    "MD5SHA1revMD5",
+    "MD5MD5RAWMD5PASS",
+    "MD5MD5RAWMD5",
+    "MD5SHA1SHA1MD5MD5",
 
 NULL
 
@@ -6576,18 +6589,48 @@ static void compute_sha1passhexsalt(const unsigned char *pass, int passlen, cons
    Salt format from mdxfind: "HH[HH...]- x N" where HH is hex-encoded control bytes.
    The compute function does the APPEND variant; prepend is handled by retry logic. */
 
+/* mdxfind never takes the HUM separator from the input.  It sweeps a fixed
+ * eight-entry table -- mdxfind.c, csalt = "\0 \0\r\0\r\n\0\n\0\r\r\0\n\n\0\n\r\0\0\0"
+ * -- and writes the hex of whichever entry hit into the output line as
+ * "<sephex>- x N".  That field is therefore a LABEL recording the hit, not a
+ * caller-supplied salt, and the only legal separators are those eight.
+ *
+ * Accepting anything else made MD5MD5HUM compute md5(md5(pass) . <any bytes>),
+ * which is a strict superset of e31 MD5SALT md5(md5(pass) . salt) -- so a
+ * genuine MD5SALT hash whose salt was spelled as bare hex was attributed to
+ * MD5MD5HUM, a type mdxfind could never have produced it from.  Reported by
+ * Waffle 2026-09-28: a121575ff6a484326e64ac534e384a00:210d30:sava.
+ *
+ * Returns the decoded separator length, or -1 when the field is not a HUM
+ * label, in which case the caller must decline rather than guess. */
+static const unsigned char Hum_seps[8][2] = {
+    { 0x00, 0x00 }, { 0x20, 0x00 }, { 0x0d, 0x00 }, { 0x0a, 0x00 },
+    { 0x0d, 0x0a }, { 0x0a, 0x0d }, { 0x0d, 0x0d }, { 0x0a, 0x0a }
+};
+static const int Hum_seplen[8] = { 1, 1, 1, 1, 2, 2, 2, 2 };
+
 static int hum_decode_salt(const unsigned char *salt, int saltlen,
     unsigned char *decoded, int maxdec)
 {
-    int i, n = 0;
-    /* Find end of hex prefix (before "- x") */
-    int hexend = 0;
-    for (i = 0; i < saltlen; i++) {
+    int i, n = 0, hexend = -1;
+
+    if (salt == NULL || saltlen <= 0)
+        return -1;
+
+    /* The "- x N" marker is mandatory.  Its absence means the field is not a
+     * HUM label at all; the old code fell back to "try the whole field as
+     * hex", which is exactly what let a bare MD5SALT salt through. */
+    for (i = 0; i < saltlen; i++)
         if (salt[i] == '-') { hexend = i; break; }
-    }
-    if (hexend == 0) hexend = saltlen; /* no dash found, try all as hex */
-    /* Decode hex pairs */
-    for (i = 0; i + 1 < hexend && n < maxdec; i += 2) {
+    if (hexend <= 0 || (hexend & 1))
+        return -1;                       /* no marker, or odd nibble count */
+    if (hexend / 2 > maxdec)
+        return -1;
+
+    /* Strict hex: a bad nibble rejects the field.  The old loop broke out and
+     * returned the prefix decoded so far, silently accepting "abcXYZ" as the
+     * single byte 0xab. */
+    for (i = 0; i < hexend; i += 2) {
         int hi = salt[i], lo = salt[i + 1];
         hi = (hi >= '0' && hi <= '9') ? hi - '0' :
              (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10 :
@@ -6595,10 +6638,27 @@ static int hum_decode_salt(const unsigned char *salt, int saltlen,
         lo = (lo >= '0' && lo <= '9') ? lo - '0' :
              (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10 :
              (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : -1;
-        if (hi < 0 || lo < 0) break;
-        decoded[n++] = (hi << 4) | lo;
+        if (hi < 0 || lo < 0)
+            return -1;
+        decoded[n++] = (unsigned char)((hi << 4) | lo);
     }
-    return n;
+
+    /* Require the rest to read "- x <digits>", as mdxfind's sprintf writes it.
+     * Interior spacing is tolerated; structure is not. */
+    i = hexend + 1;
+    while (i < saltlen && salt[i] == ' ') i++;
+    if (i >= saltlen || salt[i] != 'x') return -1;
+    i++;
+    while (i < saltlen && salt[i] == ' ') i++;
+    if (i >= saltlen || salt[i] < '0' || salt[i] > '9') return -1;
+    for (; i < saltlen; i++)
+        if (salt[i] < '0' || salt[i] > '9') return -1;
+
+    /* Finally, constrain to mdxfind's separator alphabet. */
+    for (i = 0; i < 8; i++)
+        if (Hum_seplen[i] == n && memcmp(decoded, Hum_seps[i], (size_t)n) == 0)
+            return n;
+    return -1;
 }
 
 /* The salt also records an inner-iteration index as "- x N". mdxfind computes
@@ -6628,6 +6688,8 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     char _hx[MAX_HASH_BYTES * 2 + 1]; \
     int _sn; \
     rhash _ctx; \
+    _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
+    if (_sn < 0) { memset(dest, 0, (outer_hash_id) == RHASH_SHA1 ? 20 : 16); return; } \
     inner_fn(pass, passlen, NULL, 0, _ib); \
     prmd5(_ib, _hx, (inner_bytes) * 2); \
     { int _k, _ni = hum_iter_count(salt, saltlen); \
@@ -6635,7 +6697,6 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
           inner_fn((const unsigned char *)_hx, (inner_bytes) * 2, NULL, 0, _ib); \
           prmd5(_ib, _hx, (inner_bytes) * 2); \
       } } \
-    _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
     _ctx = rhash_init(outer_hash_id); \
     rhash_update(_ctx, _hx, (inner_bytes) * 2); \
     rhash_update(_ctx, _sb, _sn); \
@@ -6651,6 +6712,8 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     char _hx[MAX_HASH_BYTES * 2 + 1]; \
     int _sn; \
     rhash _ctx; \
+    _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
+    if (_sn < 0) { memset(dest, 0, (outer_hash_id) == RHASH_SHA1 ? 20 : 16); return; } \
     inner_fn(pass, passlen, NULL, 0, _ib); \
     prmd5(_ib, _hx, (inner_bytes) * 2); \
     { int _k, _ni = hum_iter_count(salt, saltlen); \
@@ -6658,7 +6721,6 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
           inner_fn((const unsigned char *)_hx, (inner_bytes) * 2, NULL, 0, _ib); \
           prmd5(_ib, _hx, (inner_bytes) * 2); \
       } } \
-    _sn = hum_decode_salt(salt, saltlen, _sb, (int)sizeof(_sb)); \
     _ctx = rhash_init(outer_hash_id); \
     rhash_update(_ctx, _sb, _sn); \
     rhash_update(_ctx, _hx, (inner_bytes) * 2); \
@@ -6694,6 +6756,8 @@ static void compute_md5sha1md5hum(const unsigned char *pass, int passlen,
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hx, 32);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6702,7 +6766,6 @@ static void compute_md5sha1md5hum(const unsigned char *pass, int passlen,
           rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
           prmd5(md5bin, hx, 32);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ctx = rhash_init(RHASH_SHA1);
     rhash_update(ctx, hx, 32);
     rhash_update(ctx, sb, sn);
@@ -6721,6 +6784,8 @@ static void compute_md5sha1md5hum_pre(const unsigned char *pass, int passlen,
     rhash ctx;
     rhash_msg(RHASH_MD5, pass, passlen, md5bin);
     prmd5(md5bin, hx, 32);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6729,7 +6794,6 @@ static void compute_md5sha1md5hum_pre(const unsigned char *pass, int passlen,
           rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
           prmd5(md5bin, hx, 32);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ctx = rhash_init(RHASH_SHA1);
     rhash_update(ctx, sb, sn);
     rhash_update(ctx, hx, 32);
@@ -6749,6 +6813,8 @@ static void compute_md4utf16md5hum(const unsigned char *pass, int passlen, const
     int sn, i, ulen;
     compute_md5(pass, passlen, NULL, 0, md5bin);
     prmd5(md5bin, hx, 32);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6757,7 +6823,6 @@ static void compute_md4utf16md5hum(const unsigned char *pass, int passlen, const
           rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
           prmd5(md5bin, hx, 32);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     /* Build UTF16LE of hex + salt_bytes */
     ulen = 0;
     for (i = 0; i < 32 && ulen + 1 < (int)WS_U16_SIZE; i++) {
@@ -6780,6 +6845,8 @@ static void compute_md4utf16md5hum_pre(const unsigned char *pass, int passlen,
     int sn, i, ulen;
     compute_md5(pass, passlen, NULL, 0, md5bin);
     prmd5(md5bin, hx, 32);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6788,7 +6855,6 @@ static void compute_md4utf16md5hum_pre(const unsigned char *pass, int passlen,
           rhash_msg(RHASH_MD5, (const unsigned char *)hx, 32, md5bin);
           prmd5(md5bin, hx, 32);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < sn && ulen + 1 < (int)WS_U16_SIZE; i++) {
         utf16buf[ulen++] = sb[i];
@@ -6811,6 +6877,8 @@ static void compute_md4utf16sha1hum(const unsigned char *pass, int passlen, cons
     int sn, i, ulen;
     compute_sha1(pass, passlen, NULL, 0, sha1bin);
     prmd5(sha1bin, hx, 40);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6819,7 +6887,6 @@ static void compute_md4utf16sha1hum(const unsigned char *pass, int passlen, cons
           rhash_msg(RHASH_SHA1, (const unsigned char *)hx, 40, sha1bin);
           prmd5(sha1bin, hx, 40);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < 40 && ulen + 1 < (int)WS_U16_SIZE; i++) {
         utf16buf[ulen++] = hx[i];
@@ -6841,6 +6908,8 @@ static void compute_md4utf16sha1hum_pre(const unsigned char *pass, int passlen,
     int sn, i, ulen;
     compute_sha1(pass, passlen, NULL, 0, sha1bin);
     prmd5(sha1bin, hx, 40);
+    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
+    if (sn < 0) { memset(dest, 0, 16); return; }
     /* "- x N" in the salt is an inner-iteration index: mdxfind
      * re-hashes the HEX of the digest N-1 further times before
      * applying the separator. Without this only "x 1" matched. */
@@ -6849,7 +6918,6 @@ static void compute_md4utf16sha1hum_pre(const unsigned char *pass, int passlen,
           rhash_msg(RHASH_SHA1, (const unsigned char *)hx, 40, sha1bin);
           prmd5(sha1bin, hx, 40);
       } }
-    sn = hum_decode_salt(salt, saltlen, sb, (int)WS_CTX_SIZE);
     ulen = 0;
     for (i = 0; i < sn && ulen + 1 < (int)WS_U16_SIZE; i++) {
         utf16buf[ulen++] = sb[i];
@@ -8561,6 +8629,57 @@ static void compute_sha1revmd5(const unsigned char *pass, int passlen, const uns
     prmd5(md5, hx, 32);
     reverse_str(hx, 32);
     SHA1((unsigned char *)hx, 32, dest);
+}
+
+/* MD5MD5RAWMD5PASS — md5(md5_bin(hex(md5(pass)) . pass)).
+ * The inner md5 is consumed as its 32 HEX characters; the middle md5 output is
+ * taken RAW (16 bytes) by the outer md5. Feeding the inner digest raw instead
+ * of hex yields a different answer — the same hex-vs-raw distinction that once
+ * swapped e572 and e241 — so both readings were computed and compared against
+ * the supplied vector before choosing this one. */
+static void compute_md5md5rawmd5pass(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b   = (unsigned char *)WS->ctx1;
+    unsigned char *raw = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, buf, 32);
+    memcpy(buf + 32, pass, (size_t)passlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32 + passlen, raw);
+    rhash_msg(RHASH_MD5, raw, 16, dest);
+}
+
+/* MD5MD5RAWMD5 — md5(md5_bin(hex(md5(pass)))). e243 MD5BASE64MD5RAWMD5
+ * without the base64 step. */
+static void compute_md5md5rawmd5(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b   = (unsigned char *)WS->ctx1;
+    unsigned char *raw = (unsigned char *)WS->ctx2;
+    char *buf = (char *)WS->gp1;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, buf, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 32, raw);
+    rhash_msg(RHASH_MD5, raw, 16, dest);
+}
+
+/* MD5SHA1revMD5 — rhash_msg(RHASH_MD5, hex(SHA1(reverse(hex(md5(pass)))))).
+ * This is compute_sha1revmd5 with one more md5 on the outside; the rev acts on
+ * the 32 hex CHARACTERS of the inner md5, not on the 16 raw bytes. */
+static void compute_md5sha1revmd5(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b = (unsigned char *)WS->ctx1;
+    char *hx = (char *)WS->gp1;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, hx, 32);
+    reverse_str(hx, 32);
+    SHA1((unsigned char *)hx, 32, b);
+    prmd5(b, hx, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)hx, 40, dest);
 }
 
 /* MD5revSHA1 — rhash_msg(RHASH_MD5, reverse(hex(SHA1(pass)))) */
@@ -10309,6 +10428,7 @@ static struct chain_step chain_md5sha1md5[]        = { S_MD5, S_SHA1, S_MD5 };
 static struct chain_step chain_md5sha1md5md5[]    = { S_MD5, S_MD5, S_SHA1, S_MD5 };
 static struct chain_step chain_md5sha1sha1[]      = { S_SHA1, S_SHA1, S_MD5 };
 static struct chain_step chain_md5sha1sha1md5[]   = { S_MD5, S_SHA1, S_SHA1, S_MD5 };
+static struct chain_step chain_md5sha1sha1md5md5[]= { S_MD5, S_MD5, S_SHA1, S_SHA1, S_MD5 };
 static struct chain_step chain_md5sha256md5[]     = { S_MD5, S_SHA256, S_MD5 };
 static struct chain_step chain_md5sha256sha256[]  = { S_SHA256, S_SHA256, S_MD5 };
 static struct chain_step chain_md5gostmd5[]       = { S_MD5, S_GOST, S_MD5 };
@@ -11866,6 +11986,70 @@ static void compute_md5_1xmd5md5pmd5p(const unsigned char *pass, int passlen,
     rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, b);
     prmd5(b, cat, 32);
     memcpy(cat + 32, hx, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)cat, 64, dest);
+}
+
+
+/* MD5-1xMD5pMD5SHA1p: md5(md5(pass) . md5(sha1(pass))).  Same -1x family as e1043..e1046:
+ * the outer md5 is over a CONCATENATION, and each term carries a trailing p
+ * because it ends in (pass).  Term 1 needs that p as much as term 2 -- without
+ * it the name would read as MD5MD5 plus SHA1p, a different construction.
+ * Both terms are 32 hex wide whatever the inner primitive is, being md5. */
+static void compute_md5_1xmd5pmd5sha1p(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *cat = (char *)WS->gp2;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, cat, 32);
+    rhash_msg(RHASH_SHA1, pass, passlen, b);
+    prmd5(b, hx, 40);
+    rhash_msg(RHASH_MD5, (unsigned char *)hx, 40, b);
+    prmd5(b, cat + 32, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)cat, 64, dest);
+}
+
+/* MD5-1xMD5pMD5SHA256p: md5(md5(pass) . md5(sha256(pass))).  Same -1x family as e1043..e1046:
+ * the outer md5 is over a CONCATENATION, and each term carries a trailing p
+ * because it ends in (pass).  Term 1 needs that p as much as term 2 -- without
+ * it the name would read as MD5MD5 plus SHA256p, a different construction.
+ * Both terms are 32 hex wide whatever the inner primitive is, being md5. */
+static void compute_md5_1xmd5pmd5sha256p(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *cat = (char *)WS->gp2;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, cat, 32);
+    rhash_msg(RHASH_SHA256, pass, passlen, b);
+    prmd5(b, hx, 64);
+    rhash_msg(RHASH_MD5, (unsigned char *)hx, 64, b);
+    prmd5(b, cat + 32, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)cat, 64, dest);
+}
+
+/* MD5-1xMD5pMD5SHA512p: md5(md5(pass) . md5(sha512(pass))).  Same -1x family as e1043..e1046:
+ * the outer md5 is over a CONCATENATION, and each term carries a trailing p
+ * because it ends in (pass).  Term 1 needs that p as much as term 2 -- without
+ * it the name would read as MD5MD5 plus SHA512p, a different construction.
+ * Both terms are 32 hex wide whatever the inner primitive is, being md5. */
+static void compute_md5_1xmd5pmd5sha512p(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *b = (unsigned char *)WS->ctx1;
+    char *hx  = (char *)WS->gp1;
+    char *cat = (char *)WS->gp2;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, b);
+    prmd5(b, cat, 32);
+    rhash_msg(RHASH_SHA512, pass, passlen, b);
+    prmd5(b, hx, 128);
+    rhash_msg(RHASH_MD5, (unsigned char *)hx, 128, b);
+    prmd5(b, cat + 32, 32);
     rhash_msg(RHASH_MD5, (unsigned char *)cat, 64, dest);
 }
 
@@ -26362,6 +26546,7 @@ static void init_hashtypes(void)
     HTC("MD5SHA1MD5MD5", 16, HTF_COMPOSED, chain_md5sha1md5md5, "edf0460584d8d492c762bd8d7c42a087:password123");
     HTC("SHA1MD5MD5MD5", 20, HTF_COMPOSED, chain_sha1md5md5md5, "0d3ee472e2f623ab9fda6aa1afc39c329987a7a5:password123");
     HTC("MD5SHA1SHA1MD5",16, HTF_COMPOSED, chain_md5sha1sha1md5, "7bf1a907a318181a1fb95ed0ed0a923c:password123");
+    HTC("MD5SHA1SHA1MD5MD5",16, HTF_COMPOSED, chain_md5sha1sha1md5md5, "731f038aae276bb8e297b052eb5f4bca:password123");
     HTC("RADMIN2MD5MD5MD5",16,HTF_COMPOSED,chain_radmin2md5md5md5, "b0659b4c94877a50792b46ee8bddebe9:password123");
     HTC("SHA1MD5MD5SHA1",20, HTF_COMPOSED, chain_sha1md5md5sha1, "66bcd9ea60b85eeae89af0009cc855893fb931f1:password123");
     HTC("MD5SHA1MD5MD5SHA1",16,HTF_COMPOSED,chain_md5sha1md5md5sha1, "99a6cc386824d69d0fe34b514c268b3a:password123");
@@ -26715,6 +26900,12 @@ static void init_hashtypes(void)
     HT("MD5-1xMD5SHA256pSHA256p", 16, 0, compute_md5_1xmd5sha256psha256p, "80aeb8f2c48380fbf0d27234453b4578:password123");
     HT("MD5-1xMD5SHA512pSHA512p", 16, 0, compute_md5_1xmd5sha512psha512p, "40dfb682616897da9acda2b60c8dfcb7:password123");
     HT("MD5-1xMD5MD5pMD5p", 16, 0, compute_md5_1xmd5md5pmd5p, "181c983656ea1394d8adf3d1c72ef889:password123");
+    HT("MD5-1xMD5pMD5SHA1p", 16, 0, compute_md5_1xmd5pmd5sha1p, "e0f5a3938ee80020ca8a20fd87b204af:password123");
+    HT("MD5-1xMD5pMD5SHA256p", 16, 0, compute_md5_1xmd5pmd5sha256p, "62aca5e8bf55d85a7542e2ce174f461e:password123");
+    HT("MD5-1xMD5pMD5SHA512p", 16, 0, compute_md5_1xmd5pmd5sha512p, "8c4f08f23189df2f4d2553a2aea4e8d0:password123");
+    HT("MD5SHA1revMD5", 16, HTF_COMPOSED, compute_md5sha1revmd5, "c9145f83de797884fa2368cb562cce39:password123");
+    HT("MD5MD5RAWMD5PASS", 16, HTF_COMPOSED, compute_md5md5rawmd5pass, "72bd48b634991dba4e2c5255db5717e9:password123");
+    HT("MD5MD5RAWMD5", 16, HTF_COMPOSED, compute_md5md5rawmd5, "d084f38c3826827dded1eb270a7877c6:password123");
     HT_ALT("MD5BASE64MD5RAW",        16, 0, compute_md5base64md5raw, compute_md5base64md5raw_strip, "ccc24639342a9838f92a9e54a350c3e7:password123");
     HT("MD5BASE64ROT13",         16, 0, compute_md5base64rot13, "e1f3134140c094abd2d2de53a5f7cc4f:password123");
     HT("MD5BASE64revMD5",        16, 0, compute_md5base64revmd5, "77bf1347fc6f3b17cc0bb40b96a11744:password123");
@@ -27687,6 +27878,7 @@ static void init_hashtypes(void)
         { "SHA1SHA1RAWMD5MD5MD5", (hashfn_t)compute_sha1 },
         { "SHA1MD5x", (hashfn_t)compute_sha1 },
         { "MD5SHA1SHA1MD5", (hashfn_t)compute_md5 },
+        { "MD5SHA1SHA1MD5MD5", (hashfn_t)compute_md5 },
         { "MD5SHA1SHA1", (hashfn_t)compute_md5 },
         { "SHA1MD5USER", (hashfn_t)compute_sha1 },
         { "SHA1MD5RADMIN2", (hashfn_t)compute_sha1 },
@@ -27768,6 +27960,12 @@ static void init_hashtypes(void)
         { "MD5-1xMD5SHA256pSHA256p", (hashfn_t)compute_md5 },
         { "MD5-1xMD5SHA512pSHA512p", (hashfn_t)compute_md5 },
         { "MD5-1xMD5MD5pMD5p", (hashfn_t)compute_md5 },
+        { "MD5-1xMD5pMD5SHA1p", (hashfn_t)compute_md5 },
+        { "MD5-1xMD5pMD5SHA256p", (hashfn_t)compute_md5 },
+        { "MD5-1xMD5pMD5SHA512p", (hashfn_t)compute_md5 },
+        { "MD5SHA1revMD5", (hashfn_t)compute_md5 },
+        { "MD5MD5RAWMD5PASS", (hashfn_t)compute_md5 },
+        { "MD5MD5RAWMD5", (hashfn_t)compute_md5 },
         { "MD5SHA1PASSMD5PASSSHA1PASS", (hashfn_t)compute_md5 },
         { "MD5SHA1PASSSALT", (hashfn_t)compute_md5 },
         { "SHA256RAWSALTPASS", (hashfn_t)compute_sha256 },
