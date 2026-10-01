@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.216 2026/09/29 15:53:00 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.217 2026/10/01 10:19:00 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.217  2026/10/01 10:19:00  dlr
+ * Add e1054, e1055 and e1056 in parity with mdxfind.c 1.612. Types[] appended in the same order so the positional indices match exactly. compute_sha256md5passsalt takes the inner md5 as hex and feeds the outer sha256 32 characters. compute_wattpad hardcodes the published Wattpad key as hex TEXT and builds sha1(salt) as 40 hex characters before the password, which are the two readings the vendor documentation leaves unstated and which 15 real records settle. verify_hmac_sha256_sha1saltpass parses the four-field record hash:salt:key:pass for the general form, so a varying key needs no out-of-band file. All three build their working data in WS slots rather than on the stack. Self-test 1055 passed, 0 failed, 2 skipped, up from 1052, and mdxfind output round-trips through -c for all three.
+ *
  * Revision 1.216  2026/09/29 15:53:00  dlr
  * Settle the benchmark debt the 1.214 entry recorded, and document what the cost guard actually gates. bench_rates.h 1.13 adds measured rates for e1047 through e1053, so the table now covers every registered type that can be benchmarked, 1052 entries for e1 through e1053; the two absent indices are e0 none and e426 PARALLEL, exactly the two the self-test skips for having no test vector. Correcting the reasoning recorded in 1.214 while paying the debt: a missing rate does NOT make -L unable to decline these seven. verify_cost_exceeds needs both a rate and a bench_cost and returns no data if either is absent, and it is called only from verify functions of types that parse an iteration count from the hash, the bcrypt, SAP and PBKDF2 families. A plain unsalted type never reaches it at all, so -L neither declines nor could decline e1047 through e1053 whatever the table says. Confirmed by measurement: e1053 verifies identically at -L 1000000 and at -L 0.0000001. What a missing rate really costs is narrower and worse, so it is now written down at init_rates: it silently disables the cost guard of any type that DOES parse a cost, letting an expensive hash verify at any -L, and nothing reports the gap. That is why the table is kept complete rather than filled in when a guard is added. No functional change in this revision; the annotation and the rate table are the content.
  *
@@ -2339,6 +2342,9 @@ char *Types[] = {
     "MD5MD5RAWMD5PASS",
     "MD5MD5RAWMD5",
     "MD5SHA1SHA1MD5MD5",
+    "SHA256MD5PASSSALT",
+    "WATTPAD",
+    "HMAC-SHA256-SHA1SALTPASS",
 
 NULL
 
@@ -3518,6 +3524,80 @@ static void compute_sha256saltpass(const unsigned char *pass, int passlen,
     rhash_update(ctx, salt, saltlen);
     rhash_update(ctx, pass, passlen);
     rhash_final(ctx, dest); rhash_free(ctx);
+}
+
+/* SHA256MD5PASSSALT (e1054, Enzoic 18): sha256(md5(pass . salt)).  The inner
+ * md5 is consumed as 32 HEX characters, not the 16 raw bytes it spells; the
+ * raw-inner reading gives a different digest and would be a separate type. */
+static void compute_sha256md5passsalt(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *buf   = (unsigned char *)WS->gp1;
+    unsigned char *inner = (unsigned char *)WS->ctx1;
+    char          *hex   = (char *)WS->ctx2;
+    if (passlen + saltlen > 4000) { memset(dest, 0, 32); return; }
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, salt, saltlen);
+    rhash_msg(RHASH_MD5, buf, passlen + saltlen, inner);
+    bin2hex(inner, 16, hex);
+    rhash_msg(RHASH_SHA256, (const unsigned char *)hex, 32, dest);
+}
+
+/* WATTPAD (e1055, Enzoic 36): hmac_sha256(KEY, sha1(salt) . pass).  Two
+ * encodings the vendor docs omit, both measured against 15 real records: the
+ * KEY is the 64-char hex TEXT (not the 32 bytes it spells) and sha1(salt)
+ * enters the message as 40-char hex TEXT (not 20 raw bytes). */
+static const char wattpad_key[] =
+    "d2e1a4c569e7018cc142e9cce755a964bd9b193d2d31f02d80bb589c959afd7e";
+static void compute_wattpad(const unsigned char *pass, int passlen,
+    const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *sh  = (unsigned char *)WS->ctx1;
+    char          *msg = (char *)WS->gp1;
+    unsigned int len = 32;
+    if (passlen + 40 > 4000) { memset(dest, 0, 32); return; }
+    rhash_msg(RHASH_SHA1, salt, saltlen, sh);
+    bin2hex(sh, 20, msg);
+    memcpy(msg + 40, pass, passlen);
+    HMAC(EVP_sha256(), wattpad_key, (int)(sizeof(wattpad_key) - 1),
+         (const unsigned char *)msg, 40 + passlen, dest, &len);
+}
+
+/* HMAC-SHA256-SHA1SALTPASS (e1056): the general form of e1055 with the key
+ * supplied instead of hardcoded.  Record is <64hex>:<salt>:<key>:<pass>, so
+ * the line carries everything needed to verify it. */
+static int verify_hmac_sha256_sha1saltpass(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *computed = (unsigned char *)WS->ctx2;
+    unsigned char *sh       = (unsigned char *)WS->ctx3;
+    char          *msg      = (char *)WS->gp1;
+    unsigned int len = 32;
+    const char *salt, *colon2, *key;
+    int sl, kl, i;
+    if (hashlen < 68) return 0;          /* 64hex + : + salt + : + key */
+    if (hashstr[64] != ':') return 0;
+    for (i = 0; i < 64; i++) {
+        char c = hashstr[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return 0;
+    }
+    hex2bin(hashstr, 64, expected);
+    salt = hashstr + 65;
+    colon2 = strchr(salt, ':');
+    if (!colon2 || colon2 == salt) return 0;
+    sl = colon2 - salt;
+    key = colon2 + 1;
+    kl = hashlen - (int)(key - hashstr);
+    if (kl < 1) return 0;
+    if (passlen + 40 > 4000) return 0;
+    rhash_msg(RHASH_SHA1, (const unsigned char *)salt, sl, sh);
+    bin2hex(sh, 20, msg);
+    memcpy(msg + 40, pass, passlen);
+    HMAC(EVP_sha256(), key, kl, (const unsigned char *)msg, 40 + passlen,
+         computed, &len);
+    return memcmp(computed, expected, 32) == 0;
 }
 
 static void compute_sha256passsalt(const unsigned char *pass, int passlen,
@@ -26550,6 +26630,9 @@ static void init_hashtypes(void)
     HTC("SHA1MD5MD5MD5", 20, HTF_COMPOSED, chain_sha1md5md5md5, "0d3ee472e2f623ab9fda6aa1afc39c329987a7a5:password123");
     HTC("MD5SHA1SHA1MD5",16, HTF_COMPOSED, chain_md5sha1sha1md5, "7bf1a907a318181a1fb95ed0ed0a923c:password123");
     HTC("MD5SHA1SHA1MD5MD5",16, HTF_COMPOSED, chain_md5sha1sha1md5md5, "731f038aae276bb8e297b052eb5f4bca:password123");
+    HT("SHA256MD5PASSSALT", 32, HTF_SALTED, compute_sha256md5passsalt, "54718a4d83de69c23798369d92adbab963a1ec60c1df5d36cdf02f843b155a72:testsalt:password123");
+    HT("WATTPAD", 32, HTF_SALTED, compute_wattpad, "f560c61888c23e7a0c93ea7c51070b1c20cc6eb211233adca5e4671de443fa15:testsalt:password123");
+    HTV("HMAC-SHA256-SHA1SALTPASS", 0, verify_hmac_sha256_sha1saltpass, "f560c61888c23e7a0c93ea7c51070b1c20cc6eb211233adca5e4671de443fa15:testsalt:d2e1a4c569e7018cc142e9cce755a964bd9b193d2d31f02d80bb589c959afd7e:password123");
     HTC("RADMIN2MD5MD5MD5",16,HTF_COMPOSED,chain_radmin2md5md5md5, "b0659b4c94877a50792b46ee8bddebe9:password123");
     HTC("SHA1MD5MD5SHA1",20, HTF_COMPOSED, chain_sha1md5md5sha1, "66bcd9ea60b85eeae89af0009cc855893fb931f1:password123");
     HTC("MD5SHA1MD5MD5SHA1",16,HTF_COMPOSED,chain_md5sha1md5md5sha1, "99a6cc386824d69d0fe34b514c268b3a:password123");
