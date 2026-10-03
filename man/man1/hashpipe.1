@@ -1,6 +1,11 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.14 $
+.\" $Revision: 1.15 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.15  2026/10/03 15:12:48  dlr
+.\" Document the salt-field rule, and bump TH to 1.219.
+.\"
+.\" The output paragraph said only that verified lines are written in the same shape with the type and depth filled in, which was true of the old behaviour and is no longer the whole story. As of hashpipe.c 1.219 the salt field reports what the identified type consumed rather than what the input carried: a type with no salt slot emits no salt field even when the input supplied one, and a salted type emits its salt field even when that field is empty. The sentence added states both halves and the consequence, that the emitted line carries exactly the fields the reported construction was computed over. No other section changes; the page renders with no groff warnings.
+.\"
 .\" Revision 1.14  2026/09/27 15:36:20  dlr
 .\" TH to the current build: covers the seventeen hash types e1030 to e1046 added in mdxfind.c 1.604 to 1.606 and hashpipe.c 1.211 to 1.213. The type table itself lives in hx.8, which carries all seventeen; these pages are unchanged apart from the version line.
 .\"
@@ -64,7 +69,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-09-27" "hashpipe 1.213" "Password Recovery"
+.TH HASHPIPE 1 "2026-10-03" "hashpipe 1.219" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -111,9 +116,14 @@ digest length matches, then \(em on the
 limit.
 .PP
 Verified lines are written to standard output in the same shape, with the
-type and iteration depth filled in.  Lines that could not be resolved are
-written unchanged to standard error.  The two streams are the result: a
-clean split of solved from unsolved.
+type and iteration depth filled in.  The salt field reports what the
+identified type consumed rather than what the input carried: a type with no
+salt slot emits no salt field, even when the input supplied one, and a salted
+type emits its salt field even when that field is empty.  So the emitted line
+always carries exactly the fields the reported construction was computed
+over.  Lines that could not be resolved are written unchanged to standard
+error.  The two streams are the result: a clean split of solved from
+unsolved.
 .PP
 The password is everything after the field that precedes it, so a password
 may itself contain a colon and still parse.  On output such a password is

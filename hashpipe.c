@@ -14,10 +14,21 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.218 2026/10/02 20:06:19 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.219 2026/10/03 15:12:30 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.219  2026/10/03 15:12:30  dlr
+ * Make the emitted salt field report what the matched type consumed, and let MD5CAP decline a no-op cap.
+ *
+ * format_output chose the salt field from the INPUT line, not from the answer: the predicate was item->salt with saltlen > 0, which is a property of the record as written. It failed in both directions. An unsalted type reprinted a field it never read, so any middle field at all survived into its output: MD5x01 hash:junk:pass, and under -J 2 the worse $dynamic_0$hash$junk, a salt on John unsalted MD5. And a salted type DROPPED the field it did read when that field was zero-length, giving MD5USERPASSx01 hash:pass -- a label asserting a salted construction while carrying no salt, so a consumer splitting on the documented hash-salt-password shape reads the password as the salt. The field is now emitted when and only when the type consumed one, keyed on HTF_SALTED, which is the same predicate all three dispatch sites already use to decide whether a type is handed the salt: the two gates reading HTF_SALTED with salt_present, the composed scan, and the Salted and Unsalted candidate caches. A verify type is deliberately left on the old predicate, since HTF_SALTED is meaningless for one -- only 4 of 273 set it -- because the verify function parses its own hashstr, and the hash-salt and hash-alt_salt reconstructions put the consumed field in item->salt without touching the flag. That carve-out is load-bearing: without it NETNTLMV1, NETNTLMV2 and the whole MD51SALT family lose their structured fields. A zero-length salt is emitted only in mdxfind format, because under -J the separator is a dollar sign and a trailing one reads back as nothing.
+ *
+ * Measured on regress/testhash.orig under -c, all 7,234,793 lines: 0 lost, 0 gained, and 143 lines changed shape -- every one a correction TOWARD mdxfind. They are the 13 HMAC empty-default-salt types at 11 vectors each, for which mdxfind itself emits hash-colon-colon-password; 143 of 143 of the new lines match mdxfind own emitted line exactly and 0 of 143 of the old ones did, so hashpipe was mangling mdxfind shape on every one. Note for the record that mdxfind DOES emit an empty salt field, for exactly the types whose salt is empty by design. On a 203,237-line auto-detect sample resolved and unresolved counts are identical and 3 lines change, all of them an unsalted type dropping the round indicator mdxfind carries in the salt field; a further 9 label differences in that comparison are NOT from this change, as running the same binary twice reproduces all 9 with the same type breakdown -- they come from duplicate registrations resolved by search order.
+ *
+ * Second, MD5CAP becomes a verify. Its cap applies only when the first character of the intermediate hex is a through f; for a digit it is a no-op and the value is bit-identical to plain iterated MD5, so e353 was claiming digests that MD5xNN already answers -- 6,276 of 10,000 generated MD5x02 pairs came back labelled MD5CAPx02. A compute function cannot decline, since it must write a digest and whatever it writes is compared, so compute_md5cap and iter_md5cap are superseded by one verify_md5cap carrying the same arithmetic, shaped after MD5RAWUC, the catalog other base_iter 2 verify. The capped flag is sticky. Now 10,000 of 10,000 genuine MD5x02 label as MD5x02 and 200 of 200 genuine MD5CAPx02 still auto-detect correctly. This mirrors the matching change in mdxfind.c 1.615, which is the authoritative source for it.
+ *
+ * Gates: self-test 1057 passed, 0 failed, 2 skipped; userdef round trip identical to the previous build; -J 0, 1 and 2 correct; the 15 affected types each resolve on the right password and decline the wrong one. Not regenerated here: bench_rates.h, whose e353 entry was measured while MD5CAP was a compute; the arithmetic is unchanged so the rate is still representative, and the type verifies at the default -L.
+ *
  * Revision 1.218  2026/10/02 20:06:19  dlr
  * Add e1057 and e1058 in parity with mdxfind.c 1.614. Types[] appended in the same order so the positional indices match exactly. Two monolithic compute functions rather than chain_step entries, which is the substantive decision: the generic chain machinery has S_SQL5 as a bare SHA1(SHA1(x)) with uc_hex 0, carrying neither the star nor the uppercasing, so a chain of S_MD5 S_MD5 S_SQL5 S_MD5 silently computes a DIFFERENT construction and the self-test caught it, got 56516010c17d7e36ee7163c3691113cf against the expected f0a69a566cc9e96a6eedbf732064d193. The existing e301 is registered twice, once as a chain and once with compute_md5sql5md5, and it is the compute form that serves it; modelling on that form is what makes the result right. Worth recording because e301 chain is S_MD5 S_SQL5 S_MD5, which is SYMMETRIC and therefore proves nothing about the array direction, so reading it as a model gives no warning. Each inner md5 consumes the previous digest as 32 lowercase hex and all working data is in WS slots, never on the stack. Self-test 1057 passed, 0 failed, 2 skipped, up from 1055; mdxfind output round-trips through -c for both.
  *
@@ -8884,37 +8895,46 @@ static void compute_sha1hesk(const unsigned char *pass, int passlen,
  * value at x02 is right. Only position 0 is considered, and only when it is
  * a lowercase hex letter; otherwise the cap is a no-op and the round is
  * indistinguishable from plain iterated MD5. */
-static void iter_md5cap(const unsigned char *hexin, int len,
-    const unsigned char *salt, int saltlen, unsigned char *dest)
-{
-    char *b = (char *)WS->gp5;
-    (void)salt; (void)saltlen;
-    if (len > (int)WS_GP_SIZE - 1) len = (int)WS_GP_SIZE - 1;
-    memcpy(b, hexin, len);
-    if (b[0] >= 'a' && b[0] <= 'f') b[0] = (char)(b[0] - 32);
-    rhash_msg(RHASH_MD5, (const unsigned char *)b, len, dest);
-}
+/* MD5CAP (e353) mirrors mdxfind's JOB_MD5CAP: v = md5(pass), then each round
+   upper-cases the FIRST character of hex(v) and md5s those 32 hex bytes, the
+   first reportable value being depth 2.
 
-static void compute_md5cap(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+   hex[0] is a hex nibble, so the cap is a no-op whenever it is a digit -- and
+   then the round's value is bit-identical to plain iterated MD5, which is
+   10 cases in 16.  Emitting it anyway gave a second label to a digest MD5xNN
+   already answers: of nine MD5x02 solutions, mdxfind emitted six ALSO as
+   MD5CAPx02, exactly the six whose md5(pass) began with a digit, and mdsplit
+   then files those under the wrong type.  Measured over 10,000 genuine MD5x02
+   pairs, 6,276 came back labelled MD5CAPx02.
+
+   So a depth is reported only once some round has actually capitalized; the
+   flag is sticky, because once a round has capped, every deeper value really
+   does diverge from plain MD5.  Until then MD5CAP gives way to MD5.
+
+   This is a verify rather than a compute because a compute function has no way
+   to decline a match -- it must write a digest, and any digest it writes would
+   be compared.  The shape follows MD5RAWUC, the catalog's other base_iter 2
+   verify.  It supersedes the former compute_md5cap/iter_md5cap pair, whose
+   arithmetic is reproduced here unchanged. */
+static int verify_md5cap(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
 {
-    unsigned char *cappass = WS->gp1;
-    (void)salt; (void)saltlen;
-    if (passlen > MAXLINE) passlen = MAXLINE;
-    /* MD5CAP is not md5(cap(pass)). Per mdxfind's JOB_MD5CAP it is iterated:
-       md5(pass), then each round upper-cases the FIRST CHARACTER of the
-       intermediate hex and md5s it again, with the first checked value at
-       iteration 2 -- so the value here is md5(cap0(md5hex(pass))). This
-       capitalized the password instead. hx.8 e353 is wrong on the same point.
-       The example password is chosen so md5(pass) begins with a lowercase hex
-       letter; otherwise the cap is a no-op and the value is indistinguishable
-       from plain iterated MD5. */
-    unsigned char h[16];
-    char hx[33];
-    (void)cappass;
-    rhash_msg(RHASH_MD5, pass, passlen, h);
-    prmd5(h, hx, 32);
-    if (hx[0] >= 'a' && hx[0] <= 'f') hx[0] -= 32;
-    rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, dest);
+    unsigned char *v = (unsigned char *)WS->ctx1;
+    char *hx = (char *)WS->gp1;
+    int x, capped = 0;
+
+    if (hashlen != 32) return 0;
+    rhash_msg(RHASH_MD5, pass, passlen, v);
+    for (x = 2; x <= Maxiter; x++) {
+        prmd5(v, hx, 32);
+        if (hx[0] >= 'a' && hx[0] <= 'f') { hx[0] = (char)(hx[0] - 32); capped = 1; }
+        rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, v);
+        if (capped) {
+            prmd5(v, hx, 32);
+            if (strncasecmp(hx, hashstr, 32) == 0) { WS->verify_iter = x; return 1; }
+        }
+    }
+    return 0;
 }
 
 /* PASSMD5 types: rhash_msg(RHASH_MD5, pass + hex(MD5(pass))) */
@@ -26807,7 +26827,7 @@ static void init_hashtypes(void)
     HT("MD5revMD5SHA1SHA1",16,HTF_COMPOSED,compute_md5revmd5sha1sha1, "74888ad2e39761a9d2a37cdf1ffa6764:password123");
 
     /* --- CAP types --- */
-    HT("MD5CAP",       16, 0, compute_md5cap, "961edca42a4df06255aa5fb4aeec889b:password1234");
+    HTV("MD5CAP", 0, verify_md5cap, "961edca42a4df06255aa5fb4aeec889b:password1234");
     HT("MD5CAPSHA1",   16, HTF_COMPOSED, compute_md5capsha1, "0d5e1292d06bf6860d98acb8fb6ce324:password123");
 
     /* MD5AM, MD5AM2: unsupported (vendor-specific) */
@@ -26848,9 +26868,10 @@ static void init_hashtypes(void)
     HTV("MD5RAWUC", 0, verify_md5rawuc, "e8eeb4ffdbe6d08270590c63eaceffc3:password123");
     Hashtypes[find_type_index("MD5RAWUC")].base_iter = 2;
     /* MD5CAP first emits at x02: mdxfind loops "for (x = 2; x <= Maxiter)".
-     * Its rounds re-cap, so it also needs its own iteration primitive. */
+     * It is a verify (see verify_md5cap) because it must be able to DECLINE a
+     * depth whose cap was a no-op, so it owns its own ladder and needs no
+     * outer_fn; base_iter is kept for parity with MD5RAWUC. */
     Hashtypes[find_type_index("MD5CAP")].base_iter = 2;
-    Hashtypes[find_type_index("MD5CAP")].outer_fn  = (hashfn_t)iter_md5cap;
     Hashtypes[find_type_index("MD5RAWUC")].iter_fn = (hashfn_t)compute_md5;
     HT("MD5RAWMD5RAW",    16, HTF_COMPOSED, compute_md5rawmd5raw, "0dafdf1f6f811c846a5a22590792418c:password123");
     HT("MD5MD2RAW",       16, HTF_COMPOSED, compute_md5md2raw, "eb4b511ae4f2d3a1c95033768b02162d:password123");
@@ -31686,9 +31707,53 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
     memcpy(outbuf + pos, item->hashstr, item->hashlen);
     pos += item->hashlen;
 
-    /* Salt if present (explicit or mode default).  John's canonical form
-     * separates the salt with '$'; mdxfind format uses ':'. */
-    if (item->salt && item->saltlen > 0) {
+    /* Salt field, emitted when and only when the MATCHED TYPE consumed one.
+     * The old predicate was "item->salt && item->saltlen > 0", a property of
+     * the INPUT line rather than of the answer, so the emitted field bore no
+     * relation to what was hashed.  It failed in both directions:
+     *
+     *   MD5x01 hash:junk:pass        -- an unsalted type reprinting a field it
+     *                                   never read; any middle field at all
+     *                                   survived into the output of a type
+     *                                   with no salt slot.
+     *   MD5USERPASSx01 hash:pass     -- a salted type DROPPING the field it did
+     *                                   read, because that field was
+     *                                   zero-length.  The label then asserts a
+     *                                   salted construction while carrying no
+     *                                   salt, so a consumer splitting on the
+     *                                   documented hash[:salt]:password shape
+     *                                   reads the password as the salt.
+     *
+     * HTF_SALTED is the right predicate because it is the same one all three
+     * dispatch sites use to decide whether to hand a type the salt at all
+     * (the two "(ht->flags & HTF_SALTED) && salt_present" gates, the composed
+     * scan's "(ccands[c]->flags & HTF_SALTED)", and the Salted/Unsalted
+     * candidate caches).  Keying the output off it makes the line report the
+     * computation that actually matched.
+     *
+     * A verify type is deliberately left on the old predicate: HTF_SALTED is
+     * meaningless for one (only 4 of 273 set it) because the verify function
+     * parses its own hashstr, and the hash:salt and hash:alt_salt
+     * reconstructions above put the consumed field in item->salt without
+     * touching the flag.  Gating those on HTF_SALTED would silently drop the
+     * salt from every structured type.
+     *
+     * A zero-length salt is emitted only in mdxfind format.  Under -J the
+     * separator is '$' and a trailing '$' with nothing after it is not a shape
+     * John reads back, so John output keeps requiring a non-empty field.
+     *
+     * John's canonical form separates the salt with '$'; mdxfind uses ':'. */
+    {
+    int salt_consumed;
+    if (item->match_type && item->match_type->verify)
+        salt_consumed = (item->salt != NULL && item->saltlen > 0);
+    else
+        salt_consumed = (item->match_type != NULL &&
+                         (item->match_type->flags & HTF_SALTED) != 0 &&
+                         item->salt != NULL &&
+                         (item->saltlen > 0 || !johnfmt));
+
+    if (salt_consumed) {
         outbuf[pos++] = johnfmt ? '$' : ':';
         memcpy(outbuf + pos, item->salt, item->saltlen);
         pos += item->saltlen;
@@ -31697,6 +31762,7 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
         outbuf[pos++] = johnfmt ? '$' : ':';
         memcpy(outbuf + pos, ModeDefaultSalt, ModeDefaultSaltLen);
         pos += ModeDefaultSaltLen;
+    }
     }
 }
 
