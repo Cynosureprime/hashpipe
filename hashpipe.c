@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.217 2026/10/01 10:19:00 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.218 2026/10/02 20:06:19 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.218  2026/10/02 20:06:19  dlr
+ * Add e1057 and e1058 in parity with mdxfind.c 1.614. Types[] appended in the same order so the positional indices match exactly. Two monolithic compute functions rather than chain_step entries, which is the substantive decision: the generic chain machinery has S_SQL5 as a bare SHA1(SHA1(x)) with uc_hex 0, carrying neither the star nor the uppercasing, so a chain of S_MD5 S_MD5 S_SQL5 S_MD5 silently computes a DIFFERENT construction and the self-test caught it, got 56516010c17d7e36ee7163c3691113cf against the expected f0a69a566cc9e96a6eedbf732064d193. The existing e301 is registered twice, once as a chain and once with compute_md5sql5md5, and it is the compute form that serves it; modelling on that form is what makes the result right. Worth recording because e301 chain is S_MD5 S_SQL5 S_MD5, which is SYMMETRIC and therefore proves nothing about the array direction, so reading it as a model gives no warning. Each inner md5 consumes the previous digest as 32 lowercase hex and all working data is in WS slots, never on the stack. Self-test 1057 passed, 0 failed, 2 skipped, up from 1055; mdxfind output round-trips through -c for both.
+ *
  * Revision 1.217  2026/10/01 10:19:00  dlr
  * Add e1054, e1055 and e1056 in parity with mdxfind.c 1.612. Types[] appended in the same order so the positional indices match exactly. compute_sha256md5passsalt takes the inner md5 as hex and feeds the outer sha256 32 characters. compute_wattpad hardcodes the published Wattpad key as hex TEXT and builds sha1(salt) as 40 hex characters before the password, which are the two readings the vendor documentation leaves unstated and which 15 real records settle. verify_hmac_sha256_sha1saltpass parses the four-field record hash:salt:key:pass for the general form, so a varying key needs no out-of-band file. All three build their working data in WS slots rather than on the stack. Self-test 1055 passed, 0 failed, 2 skipped, up from 1052, and mdxfind output round-trips through -c for all three.
  *
@@ -2345,6 +2348,8 @@ char *Types[] = {
     "SHA256MD5PASSSALT",
     "WATTPAD",
     "HMAC-SHA256-SHA1SALTPASS",
+    "MD5SQL5MD5MD5",
+    "MD5SQL5MD5MD5MD5",
 
 NULL
 
@@ -11368,6 +11373,53 @@ static void compute_md5sql5md5(const unsigned char *pass, int passlen, const uns
     char *buf = (char *)WS->gp2;
     (void)salt; (void)saltlen;
     rhash_msg(RHASH_MD5, pass, passlen, h1);
+    bin2hex(h1, 16, hex);
+    SHA1((unsigned char *)hex, 32, h2);
+    SHA1(h2, 20, h3);
+    buf[0] = '*';
+    bin2hexUC(h3, 20, buf + 1);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 41, dest);
+}
+
+/* MD5SQL5MD5MD5 (e1057) and MD5SQL5MD5MD5MD5 (e1058): one and two further
+ * md5 rounds inside MD5SQL5MD5. Each inner md5 consumes the previous digest as
+ * 32 lowercase HEX characters; SQL5 itself is "*" followed by the UPPERCASE hex
+ * of sha1(sha1_bin(.)), 41 bytes, which is why these cannot use the generic
+ * chain machinery -- S_SQL5 there is bare SHA1(SHA1(x)) with neither the star
+ * nor the uppercasing, so a chain silently computes a different construction.
+ * All working data in WS slots, never on the stack. */
+static void compute_md5sql5md5md5(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *h1 = (unsigned char *)WS->ctx1;
+    unsigned char *h2 = (unsigned char *)WS->ctx2;
+    unsigned char *h3 = (unsigned char *)WS->ctx3;
+    char *hex = (char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, h1);
+    bin2hex(h1, 16, hex);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h1);
+    bin2hex(h1, 16, hex);
+    SHA1((unsigned char *)hex, 32, h2);
+    SHA1(h2, 20, h3);
+    buf[0] = '*';
+    bin2hexUC(h3, 20, buf + 1);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 41, dest);
+}
+
+static void compute_md5sql5md5md5md5(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *h1 = (unsigned char *)WS->ctx1;
+    unsigned char *h2 = (unsigned char *)WS->ctx2;
+    unsigned char *h3 = (unsigned char *)WS->ctx3;
+    char *hex = (char *)WS->gp1;
+    char *buf = (char *)WS->gp2;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, h1);
+    bin2hex(h1, 16, hex);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h1);
+    bin2hex(h1, 16, hex);
+    rhash_msg(RHASH_MD5, (unsigned char *)hex, 32, h1);
     bin2hex(h1, 16, hex);
     SHA1((unsigned char *)hex, 32, h2);
     SHA1(h2, 20, h3);
@@ -27038,6 +27090,8 @@ static void init_hashtypes(void)
     HT("MD5SQL5-chop40",         16, 0, compute_md5sql5_chop40, "53fa3e6d96e5e9745de59b8f5408272c:password123");
     HT("MD5MD5UCSQL3p",          16, 0, compute_md5md5ucsql3p, "4a724dc633deaa4a1dbf1b432e7c8512:password123");
     HT("MD5SQL5MD5",             16, 0, compute_md5sql5md5, "a91331088a9614fc49802194391e2b63:password123");
+    HT("MD5SQL5MD5MD5",          16, 0, compute_md5sql5md5md5, "f0a69a566cc9e96a6eedbf732064d193:password123");
+    HT("MD5SQL5MD5MD5MD5",       16, 0, compute_md5sql5md5md5md5, "2a29278666f9e44b424c6ade970cc820:password123");
     HT("MD4SQL3",                16, 0, compute_md4sql3, "ed754028b02d092558f52eedfb70e14a:password123");
     HT("RADMIN2SQL3",            16, 0, compute_radmin2sql3, "ac7aab560e2d8829918c3bac0a7be8d4:password123");
     HT("RADMIN2SQL5-40",         16, 0, compute_radmin2sql5_40, "a343cb736471ca2f6b2e033908993a55:password123");
