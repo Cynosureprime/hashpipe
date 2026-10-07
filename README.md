@@ -606,15 +606,27 @@ NTLM hashing requires converting the password to UTF-16LE before computing MD4. 
 
 NTLMH (e786) accepts both interpretations:
 
-1. **Proper UTF-8 → UTF-16LE** (via iconv with `//IGNORE`): invalid UTF-8 sequences are silently discarded, and only valid characters are converted.
+1. **Proper UTF-8 → UTF-16LE**: the input is decoded as UTF-8 and re-encoded as UTF-16LE.  Ill-formed input is **refused**, not repaired — see the note below.
 2. **Blind zero-extension** (hashcat-compatible): every input byte is widened to 16 bits regardless of UTF-8 validity.
 
-NTLM (e369) uses only the proper iconv path, since mdxfind always emits valid UTF-8 in its output for e369.
+NTLM (e369) does the conversion properly, and additionally reads the input through the **CP1251 and CP1252** tables.  Windows mapped the user's code page into UTF-16LE through its own tables; it did not zero-extend, and the two agree only where the code points happen to equal the byte values.
 
-Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8) produces two NTLMH hashes:
+Example: the password `$HEX[c0ffeebabe]` (5 raw bytes, not valid UTF-8).  Under e786 it produces one hash:
 
-- `b3f4b4d05705228f87ed95e91e25bc70` — iconv discards `c0` and `ff`, converts remaining `ee ba be`
 - `4b44f50004711067b1eab173dbef5ef8` — all 5 bytes blindly zero-extended (hashcat mode, not a valid NTLM hash)
+
+The UTF-8 reading yields nothing, because the byte sequence is not UTF-8 and is declined.  Under e369 the same bytes are read through the code pages instead, giving a hash for each: `c0 ff ee ba be` is `А я о є ѕ` in CP1251 and `À ÿ î º ¾` in CP1252.
+
+> **This behaviour changed.**  Earlier versions converted through iconv opened with
+> `//IGNORE`, which silently **discarded** the bytes it could not convert — `c0` and
+> `ff` here — and hashed the shortened remainder, yielding
+> `b3f4b4d05705228f87ed95e91e25bc70`.  That digest is no longer produced and no
+> longer verifiable.  It was an artifact of the conversion rather than a hash any
+> Windows machine would compute: a Windows box encoding a password that is not
+> UTF-8 uses the user's code page, which e369 now covers directly through the
+> CP1251/CP1252 tables.  Shortening a candidate and hashing it is also not a
+> result a caller can act on, so ill-formed input is now reported rather than
+> quietly altered.
 
 ### Additional algorithm families
 
@@ -724,7 +736,7 @@ and these three from the system, which `make deps` does not build:
 
 The Makefile detects the build platform automatically.  Tested on:
 
-- macOS x86\_64 and arm64 (requires libiconv from MacPorts)
+- macOS x86\_64 and arm64
 - Linux x86\_64 (Ubuntu 18.04, 22.04)
 - Linux i386 (32-bit)
 - Linux ppc64le (PowerPC 8)

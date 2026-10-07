@@ -14,10 +14,28 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.219 2026/10/03 15:12:30 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.221 2026/10/06 22:31:43 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.221  2026/10/06 22:31:43  dlr
+ * Let a stored form carry literal colons, so a user type declared as digest(32) . ":" . salt verifies and round-trips. parse_line cuts the hash field at the FIRST colon because that is the hash/candidate separator for every other type, so such a form arrived truncated to just the digest, userdef_form_split could never match it, and the type silently verified nothing. The same type declared with KoreLogic colon-free salt(8) . digest(32) worked, which is what made this present as a salted-user-type failure rather than a separator one: Waffle reported mdxfind emitting USER_BWTDT e50e34c4838378bee4f9a883ec95f3bb:Sync:password and hashpipe echoing it back unresolved. Per Waffle 2026-10-06, a form must load in the shape it declares, with the split following the normal extended-seek colon discipline. A form carrying L literal colons now owns the first L colons after the one parse_line used, and the candidate is everything after that -- the man page rule that the password is everything after the field that precedes it, applied one field further along, so a password containing a colon still parses exactly as it does for a built-in salted type. The re-cut is confined to the user-defined verify path: item->hashstr and item->hashlen are untouched, so every built-in and every colon-free form sees what it saw before. The OUTPUT needed the same treatment and not only the parse. Once verification succeeded the emitted line still printed the digest alone and dumped the form own salt into the plaintext as $HEX[Sync:password], because the fsalt branch prints the hash field in full on the assumption the salt sits inside it, which is true for salt(8).digest(32) and false for a re-cut field. The re-cut field and its raw tail now reach format_output, which is what makes the line round-trip rather than merely verify. A colon inside a VARIABLE-width trailing field stays ambiguous and takes the shortest reading, the same bargain the password side makes, with $HEX[] as the unambiguous form. Verified: mdxfind and hashpipe now emit byte-identical lines for the reported case; a password containing a colon comes back $HEX-wrapped; a wrong password and a wrong salt both stay unresolved; u47 unsalted, e1, e1 with a colon password, e7 and e31 are unchanged. Recorded because it cost a self-inflicted regression during the work: ufield and ufieldlen were initially set only inside the colon branch while being used unconditionally in the split call, so every colon-free form passed uninitialised values and verified nothing -- a failure indistinguishable from the bug being fixed.
+ *
+ * Revision 1.220  2026/10/05 03:46:57  dlr
+ * Drop iconv, matching mdxfind.c 1.616.
+ *
+ * The two UTF-16 helpers keep their signatures, so every caller is untouched, but the contract is now strict: utf8_to_utf16le and utf8_to_utf16be return 0 for ill-formed input rather than silently converting around the bytes they could not read. That matters here because hashpipe exists to agree with mdxfind, and mdxfind now refuses such a candidate; //IGNORE made the two disagree, and disagreed between glibc and macOS libiconv as well -- for the bytes 61 81 62 glibc returns -1 with EILSEQ and macOS a non-negative count, both reporting the input fully consumed after deleting a byte.
+ *
+ * The per-workspace UTF-7 handle is gone with its open and close. compute_sha1utf7 loses the prepended X, which existed only to make iconv flush its shift state; utf8_to_utf7 flushes because it is told to.
+ *
+ * New workspace slot u32a, (MAXLINE+16) uint32_t, for the UTF-32 the ruleproc32 conversions decode through. It is a workspace buffer and not a local because the rule in this file is that no compute or verify function may use a stack buffer, and this is called per candidate.
+ *
+ * With this, nothing in either binary references an iconv symbol and libiconv.a leaves both link lines, which retires the static-link hazard for these tools rather than reducing it: glibc iconv dlopens gconv modules and segfaults on a host with a different glibc while passing every test on the build host. The binary drops from 6,786,024 to 5,756,208 bytes.
+ *
+ * Recorded, and deliberately NOT changed: mdxfind skips a candidate whose UTF-7 form is itself, so it never emits SHA1UTF7 for a pure-ASCII password, while this will still verify such a line. That divergence predates this change.
+ *
+ * Self-test 1057 passed, 0 failed, 2 skipped. SHA1UTF7 verifies its own registered vector, and so does every type in the UTF-16 family.
+ *
  * Revision 1.219  2026/10/03 15:12:30  dlr
  * Make the emitted salt field report what the matched type consumed, and let MD5CAP decline a no-op cap.
  *
@@ -814,7 +832,7 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.219 20
 #include <fcntl.h>
 #endif
 #include <sys/time.h>
-#include <iconv.h>
+#include "ruleproc32.h"
 #include <openssl/sha.h>
 #include "yarn.h"
 
@@ -1190,11 +1208,15 @@ static inline int verify_cost_exceeds(long long bench_rate, double bench_cost,
  * ctx1-ctx6: malloc'd 4096-byte buffers for binary hash intermediates, keys, etc.
  * gp1-gp8: malloc'd (MAXLINE+16)-byte buffers for salt, concat, hex, base64, etc.
  * u16a-u16b: malloc'd (MAXLINE*2+16)-byte buffers for UTF-16 conversions.
+ * u32a: malloc'd (MAXLINE+16)*4 scratch for the ruleproc32 conversions, which
+ *   decode to UTF-32 on the way; a stack array here would violate the rule above.
  * All buffers are thread-local via __thread WS pointer. */
 
 #define WS_CTX_SIZE 4096
 #define WS_GP_SIZE  (MAXLINE + 16)
 #define WS_U16_SIZE (MAXLINE * 2 + 16)
+#define WS_U32_COUNT (MAXLINE + 16)
+#define WS_U32_SIZE (WS_U32_COUNT * (int)sizeof(uint32_t))
 
 struct workspace {
     /* Context buffers — binary hash intermediates, DES keys, small fixed data */
@@ -1203,6 +1225,7 @@ struct workspace {
     void *gp1, *gp2, *gp3, *gp4, *gp5, *gp6, *gp7, *gp8;
     /* UTF-16 conversion buffers */
     void *u16a, *u16b;
+    uint32_t *u32a;   /* UTF-32 scratch for ruleproc32 conversions */
     /* Worker I/O buffers */
     void *outbuf, *errbuf, *fmtbuf;
     /* Verify/format buffers */
@@ -1220,8 +1243,6 @@ struct workspace {
     int expect_iter;
     /* Benchmark rate for current type (set before calling verify) */
     long long cur_rate;
-    /* iconv handle for UTF-7 conversion */
-    iconv_t cd_utf7;
     /* Pre-allocated rhash contexts (avoid malloc/free per hash) */
     rhash rctx_md5;
     rhash rctx_sha1;
@@ -1248,6 +1269,7 @@ static void ws_init_rhash(struct workspace *ws)
     ws->gp5 = malloc(WS_GP_SIZE); ws->gp6 = malloc(WS_GP_SIZE);
     ws->gp7 = malloc(WS_GP_SIZE); ws->gp8 = malloc(WS_GP_SIZE);
     ws->u16a = malloc(WS_U16_SIZE); ws->u16b = malloc(WS_U16_SIZE);
+    ws->u32a = malloc(WS_U32_SIZE);
     ws->outbuf = malloc(MAXLINE * 2); ws->errbuf = malloc(MAXLINE * 2);
     ws->fmtbuf = malloc(MAXLINE * 2);
     ws->passbuf = malloc(WS_GP_SIZE); ws->vpassbuf = malloc(WS_GP_SIZE);
@@ -1270,7 +1292,6 @@ static void ws_init_rhash(struct workspace *ws)
     ws->rctx_sha224 = rhash_init(RHASH_SHA224);
     ws->rctx_sha384 = rhash_init(RHASH_SHA384);
     ws->rctx_whirlpool = rhash_init(RHASH_WHIRLPOOL);
-    ws->cd_utf7 = iconv_open("UTF-7//IGNORE", "UTF-8");
 }
 
 static void ws_free_rhash(struct workspace *ws)
@@ -1280,7 +1301,7 @@ static void ws_free_rhash(struct workspace *ws)
     free(ws->ctx7); free(ws->ctx8); free(ws->ctx9); free(ws->ctx10);
     free(ws->gp1); free(ws->gp2); free(ws->gp3); free(ws->gp4);
     free(ws->gp5); free(ws->gp6); free(ws->gp7); free(ws->gp8);
-    free(ws->u16a); free(ws->u16b);
+    free(ws->u16a); free(ws->u16b); free(ws->u32a);
     free(ws->outbuf); free(ws->errbuf); free(ws->fmtbuf);
     free(ws->passbuf); free(ws->vpassbuf); free(ws->vpassbuf2); free(ws->decoded);
     free(ws->hexsalt);
@@ -1295,7 +1316,6 @@ static void ws_free_rhash(struct workspace *ws)
     if (ws->rctx_sha224) rhash_free(ws->rctx_sha224);
     if (ws->rctx_sha384) rhash_free(ws->rctx_sha384);
     if (ws->rctx_whirlpool) rhash_free(ws->rctx_whirlpool);
-    if (ws->cd_utf7 != (iconv_t)-1) iconv_close(ws->cd_utf7);
 }
 
 /* Map rhash hash_id to pre-allocated WS context.  Returns NULL if no
@@ -3097,60 +3117,28 @@ static void compute_md4(const unsigned char *pass, int passlen,
     rhash_msg(RHASH_MD4, pass, passlen, dest);
 }
 
-/* Thread-local iconv handles for UTF-16LE/BE conversion */
-static __thread iconv_t iconv_utf16le = (iconv_t)-1;
-static __thread iconv_t iconv_utf16be = (iconv_t)-1;
-
-/* iconv-based UTF-8 → UTF-16LE conversion. Returns byte count of UTF-16LE output.
- * Uses //IGNORE to silently discard invalid UTF-8 sequences. */
+/* UTF-8 -> UTF-16, via the conversions in ruleproc32.c -- the same ones
+ * mdxfind.c uses, built on the utf8_to_utf32 that defines well-formed UTF-8 for
+ * the -8 rule engine.  These keep their old signatures, so every caller is
+ * unchanged, but the CONTRACT is now strict: ill-formed input returns 0 rather
+ * than being silently shortened and converted around it.  That matters here
+ * because hashpipe exists to agree with mdxfind, and mdxfind now refuses such a
+ * candidate; //IGNORE made the two disagree, and disagreed between glibc and
+ * macOS libiconv as well. */
 static int utf8_to_utf16le(const unsigned char *src, int srclen,
     unsigned char *dst, int dstmax)
 {
-    char *inbuf, *outbuf;
-    size_t inleft, outleft;
-
-    if (iconv_utf16le == (iconv_t)-1) {
-        iconv_utf16le = iconv_open("UTF-16LE//IGNORE", "UTF-8");
-        if (iconv_utf16le == (iconv_t)-1) return 0;
-    }
-
-    inbuf = (char *)src;
-    inleft = srclen;
-    outbuf = (char *)dst;
-    outleft = dstmax;
-
-    iconv(iconv_utf16le, &inbuf, &inleft, &outbuf, &outleft);
-    iconv(iconv_utf16le, NULL, NULL, NULL, NULL);
-    return dstmax - (int)outleft;
+    int n = utf8_to_utf16(src, srclen, dst, dstmax,
+                          WS->u32a, WS_U32_COUNT, UTF16_LE);
+    return n < 0 ? 0 : n;
 }
 
-/* iconv-based UTF-8 → UTF-16BE conversion. Returns byte count of UTF-16BE output. */
 static int utf8_to_utf16be(const unsigned char *src, int srclen,
     unsigned char *dst, int dstmax)
 {
-    char *inbuf, *outbuf;
-    size_t inleft, outleft, ret;
-
-    if (iconv_utf16be == (iconv_t)-1) {
-        /* //IGNORE matches mdxfind: a password that is not valid UTF-8
-         * is converted with the bad sequences skipped rather than the
-         * conversion failing, which is what mdxfind hashed. */
-        iconv_utf16be = iconv_open("UTF-16BE//IGNORE", "UTF-8");
-        if (iconv_utf16be == (iconv_t)-1) return 0;
-    }
-
-    inbuf = (char *)src;
-    inleft = srclen;
-    outbuf = (char *)dst;
-    outleft = dstmax;
-
-    ret = iconv(iconv_utf16be, &inbuf, &inleft, &outbuf, &outleft);
-    if (ret == (size_t)-1 && outleft == (size_t)dstmax) {
-        iconv(iconv_utf16be, NULL, NULL, NULL, NULL);
-        return 0;
-    }
-    iconv(iconv_utf16be, NULL, NULL, NULL, NULL);
-    return dstmax - (int)outleft;
+    int n = utf8_to_utf16(src, srclen, dst, dstmax,
+                          WS->u32a, WS_U32_COUNT, UTF16_BE);
+    return n < 0 ? 0 : n;
 }
 
 /* mdxfind's to_utf16le is a naive byte expansion -- each input byte becomes
@@ -9364,39 +9352,29 @@ static void compute_md5md5ucp(const unsigned char *pass, int passlen, const unsi
 /* Interpret as chain: MD5UC → MD5 → SHA1 → MD5 → MD5 */
 /* This is: MD5(hex(MD5(hex(SHA1(hex(MD5(hexUC(MD5(pass))))))))) */
 
-/* SHA1UTF7 — SHA1(UTF-7 encoded password) */
-/* Uses iconv UTF-8→UTF-7 with 'X' padding trick from mdxfind:
- * Prepend 'X' before iconv so the converter enters the right state,
- * then skip the leading 'X' and subtract 1 from the output length. */
+/* SHA1UTF7 - SHA1(UTF-7 encoded password).
+ * The 'X' padding trick is gone.  mdxfind APPENDED an X and dropped the last
+ * byte, this PREPENDED one and skipped the first; both existed only to make
+ * iconv flush its shift state, and utf8_to_utf7 flushes because it is told to.
+ * Note a pre-existing divergence left alone here: mdxfind skips a candidate
+ * whose UTF-7 form is itself, so it never emits SHA1UTF7 for pure ASCII, while
+ * this will still verify such a line. */
 static void compute_sha1utf7(const unsigned char *pass, int passlen,
     const unsigned char *salt, int saltlen, unsigned char *dest)
 {
-    (void)salt; (void)saltlen;
-    if (!WS || WS->cd_utf7 == (iconv_t)-1) {
-        SHA1(pass, passlen, dest);
-        return;
-    }
-    /* Build padded input: 'X' + pass */
-    unsigned char *padded = WS->gp1;
-    padded[0] = 'X';
-    memcpy(padded + 1, pass, passlen);
-    size_t inleft = passlen + 1;
-    char *inptr = (char *)padded;
     unsigned char *u7out = WS->gp2;
-    size_t outleft = MAXLINE - 1;
-    char *outptr = (char *)u7out;
-    iconv(WS->cd_utf7, NULL, NULL, NULL, NULL); /* reset state */
-    size_t rc = iconv(WS->cd_utf7, &inptr, &inleft, &outptr, &outleft);
-    if (rc == (size_t)-1) {
+    int u7len;
+    (void)salt; (void)saltlen;
+
+    u7len = utf8_to_utf7(pass, passlen, (char *)u7out, WS_GP_SIZE,
+                         WS->u32a, WS_U32_COUNT);
+    if (u7len < 0) {
+        /* Ill-formed UTF-8.  Keeps the shape of the old iconv-unavailable
+           fallback; mdxfind would not emit a line for such a candidate. */
         SHA1(pass, passlen, dest);
         return;
     }
-    /* Flush any pending shift state (e.g. trailing encoded chars) */
-    iconv(WS->cd_utf7, NULL, NULL, &outptr, &outleft);
-    /* Skip leading 'X', compute SHA1 on the UTF-7 result */
-    int u7len = (int)((char *)outptr - (char *)u7out) - 1;
-    if (u7len < 0) u7len = 0;
-    SHA1(u7out + 1, u7len, dest);
+    SHA1(u7out, u7len, dest);
 }
 
 /* ================================================================= */
@@ -34074,6 +34052,10 @@ static int emit_user_matches(struct workitem *item, int *outpos)
     int nuser = userdef_count();
     const char *fdig, *fsalt;   /* digest and salt located by a stored form */
     int fdiglen, fsaltlen;
+    const char *ufield;         /* hash field re-cut for a colon-bearing form */
+    int ufieldlen;
+    const char *ucut_tail;      /* raw tail after a re-cut field, for output  */
+    int ucut_taillen;
     int matched = 0;
     int u;
     int uu;
@@ -34173,8 +34155,69 @@ static int emit_user_matches(struct workitem *item, int *outpos)
          */
         fdig = item->hashstr; fdiglen = item->hashlen;
         fsalt = NULL; fsaltlen = 0;
+        /* A FORM MAY CONTAIN LITERAL COLONS, and the field parse_line handed
+         * us was cut at the FIRST colon, because that is the hash/candidate
+         * separator for every other type. A form such as
+         *
+         *     form = digest(32) . ":" . salt
+         *
+         * therefore arrived truncated to just the digest, userdef_form_split
+         * could never match it, and the type silently verified nothing --
+         * while the same type declared with KoreLogic's colon-free
+         * salt(8) . digest(32) worked, which is what made this look like a
+         * salted-user-type failure rather than a separator one.
+         *
+         * Re-cut the field here, for this type only: a form carrying L literal
+         * colons owns the first L colons after the one parse_line used, and
+         * the candidate is everything after that. Scanning from the raw tail
+         * keeps the man page's rule intact -- "the password is everything
+         * after the field that precedes it" -- so a password containing a
+         * colon still parses, exactly as it does for a built-in salted type.
+         *
+         * A colon inside a VARIABLE-width trailing field stays ambiguous and
+         * takes the shortest reading, the same bargain the password side
+         * makes; $HEX[] remains the way to say it unambiguously.
+         *
+         * Nothing outside this branch moves: item->hashstr and item->hashlen
+         * are untouched, so every built-in type and every colon-free form
+         * sees exactly what it saw before. */
+        const unsigned char *ucand    = cand;
+        int                  ucandlen = candlen;
+        ufield = item->hashstr; ufieldlen = item->hashlen;
+        ucut_tail = NULL; ucut_taillen = 0;
         if (ut->form.npieces) {
-            if (!userdef_form_split(&ut->form, item->hashstr, item->hashlen,
+            int form_colons = 0, _pi;
+            for (_pi = 0; _pi < ut->form.npieces; _pi++) {
+                if (ut->form.piece[_pi].kind != UDF_LITERAL) continue;
+                const char *_lp;
+                for (_lp = ut->form.piece[_pi].lit; *_lp; _lp++)
+                    if (*_lp == ':') form_colons++;
+            }
+            if (form_colons > 0) {
+                /* rest_p starts just past the colon parse_line split on. */
+                const char *_q = rest_p;
+                const char *_lim = rest_p + rest_l;
+                int _need = form_colons, _dec2;
+                while (_need > 0 && _q < _lim) {
+                    if (*_q == ':') _need--;
+                    _q++;
+                }
+                if (_need > 0) continue;   /* not enough colons for this form */
+                ufieldlen = item->hashlen + 1 + (int)((_q - 1) - rest_p);
+                ufield    = item->hashstr;
+                /* Candidate is the remainder, decoded the same way the
+                 * pre-loop candidate was, so $HEX[] still works here. */
+                _dec2 = decode_hex_password(_q, (int)(_lim - _q),
+                                            (unsigned char *)WS->vpassbuf2,
+                                            MAXLINE);
+                if (_dec2 >= 0) { ucand = (unsigned char *)WS->vpassbuf2; ucandlen = _dec2; }
+                else            { ucand = (const unsigned char *)_q; ucandlen = (int)(_lim - _q); }
+                /* Raw remainder, kept for OUTPUT: the emitted line must be the
+                 * shape that was read, so the tail is reprinted verbatim
+                 * rather than from the decoded copy. */
+                ucut_tail = _q; ucut_taillen = (int)(_lim - _q);
+            }
+            if (!userdef_form_split(&ut->form, ufield, ufieldlen,
                                     &fdig, &fdiglen, &fsalt, &fsaltlen,
                                     NULL, NULL))
                 continue;                /* field does not match this form */
@@ -34188,7 +34231,11 @@ static int emit_user_matches(struct workitem *item, int *outpos)
          * expression referencing `salt` could never verify -- it was silently
          * computed over an empty salt and never matched. */
         vsalt = ""; vsaltlen = 0;
-        vcand = cand; vcandlen = candlen;
+        /* ucand/ucandlen are cand/candlen unless a colon-bearing form re-cut
+         * the field above, in which case they are the remainder after the
+         * form's own colons. The salted branch below is unreachable when a
+         * form supplied the salt, so its use of vpassbuf2 cannot collide. */
+        vcand = ucand; vcandlen = ucandlen;
         if (fsalt) {
             /* The form already located the salt inside the hash field, so the
              * tail is the password in full -- do NOT also split it on a colon,
@@ -34230,6 +34277,8 @@ static int emit_user_matches(struct workitem *item, int *outpos)
             int    save_saltlen        = item->saltlen;
             char  *save_pass           = item->password;
             int    save_passlen        = item->passlen;
+            char  *save_hashstr        = item->hashstr;
+            int    save_hashlen        = item->hashlen;
             int    olen;
 
             memset(&synth, 0, sizeof(synth));
@@ -34256,8 +34305,21 @@ static int emit_user_matches(struct workitem *item, int *outpos)
                 synth.flags      = 0;
                 item->salt       = NULL;
                 item->saltlen    = 0;
-                item->password   = item->rest ? item->rest : save_pass;
-                item->passlen    = item->rest ? item->restlen : save_passlen;
+                if (ucut_tail) {
+                    /* The form carried literal colons, so the field printed
+                     * must be the RE-CUT one -- item->hashstr is still cut at
+                     * the first colon, which would print the digest alone and
+                     * then dump the form's own salt into the plaintext. Print
+                     * the field the form actually matched, and the tail that
+                     * followed it, so the line feeds straight back in. */
+                    item->hashstr = (char *)ufield;
+                    item->hashlen = ufieldlen;
+                    item->password = (char *)ucut_tail;
+                    item->passlen  = ucut_taillen;
+                } else {
+                    item->password   = item->rest ? item->rest : save_pass;
+                    item->passlen    = item->rest ? item->restlen : save_passlen;
+                }
             } else if (ut->slot_mask & USERDEF_SLOT_SALT) {
                 /* Report hash:salt:password, matching what mdxfind emits for
                  * a salted user type. Feeding the unsplit tail here printed
@@ -34295,6 +34357,8 @@ static int emit_user_matches(struct workitem *item, int *outpos)
             item->saltlen    = save_saltlen;
             item->password   = save_pass;
             item->passlen    = save_passlen;
+            item->hashstr    = save_hashstr;
+            item->hashlen    = save_hashlen;
         }
     }
 

@@ -30,21 +30,17 @@ endif
 ifeq ($(UNAME_S),Darwin)
   OSOPT = -DMACOSX
   LIBSEARCH = . /opt/local/lib /usr/local/lib /usr/lib
-  ICONVNAME = iconv
   LDEXTRA =
   INCEXTRA = -I/opt/local/include
 else ifeq ($(UNAME_S),FreeBSD)
   OSOPT =
   LIBSEARCH = . /usr/local/lib /usr/lib
-  ICONVNAME = iconv
   LDEXTRA = -Wl,--allow-multiple-definition
   INCEXTRA = -I/usr/local/include
 else
   # Linux and others
   OSOPT =
-  # glibc provides iconv itself, so no separate library is needed.
   LIBSEARCH = . /usr/lib/$(MULTIARCH) /usr/local/lib /usr/lib
-  ICONVNAME =
   LDEXTRA = -ldl
   INCEXTRA = -I/usr/local/include
 endif
@@ -78,14 +74,12 @@ LDFLAGS = -pthread -O3
 # Override explicitly if you want to force one or the other:
 #   make COMPRESS='-lz -llzma -lbz2'                    # dynamic
 #   make COMPRESS='/path/to/libz.a /path/to/liblzma.a /path/to/libbz2.a'
-#   make ICONV=-liconv
 pick_lib = $(firstword $(wildcard $(addsuffix /$(1),$(LIBSEARCH))) -l$(2))
 
 COMPRESS = $(call pick_lib,libz.a,z) $(call pick_lib,liblzma.a,lzma) $(call pick_lib,libbz2.a,bz2)
-ICONV = $(if $(ICONVNAME),$(call pick_lib,lib$(ICONVNAME).a,$(ICONVNAME)))
 LIBS = libssl.a libcrypto.a libsph.a libmhash.a librhash.a md6.a \
        gosthash/gost2012/gost2012.a bcrypt-master/bcrypt.a \
-       argon2/argon2.a libJudy.a $(ICONV) $(COMPRESS)
+       argon2/argon2.a libJudy.a $(COMPRESS)
 
 # yescrypt (object files, not a .a archive)
 YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
@@ -93,7 +87,21 @@ YESCRYPT_OBJS = yescrypt/yescrypt-common.o yescrypt/yescrypt-opt.o \
 
 HX_OBJS = hx_lib.o hx_ast.o hx_compile.o hx_vm.o hx_func.o hx.tab.o hx.lex.o
 
-OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o userdef.o $(HX_OBJS)
+# Encoding conversions: UTF-8 <-> UTF-16, UTF-7, and the CP1251/CP1252 tables,
+# shared verbatim with mdxfind. These replaced iconv rather than wrapping it.
+# iconv's //IGNORE silently DROPPED what it could not convert, so a malformed
+# candidate was shortened and hashed instead of refused; glibc and macOS
+# libiconv disagreed on what //IGNORE returned, so the same candidate was
+# accepted on one platform and skipped on the other; and glibc's iconv dlopens
+# its gconv modules at runtime, which in a static binary reads a wild address
+# on any host whose glibc differs from the build host's. These decode through
+# utf8_to_utf32(), so they agree with the -8 rule engine on every boundary
+# condition by construction, and they return a length or an error, never a
+# partial result.
+ENCODING_OBJS = ruleproc32.o classify_utf8.o
+
+OBJS = hashpipe.o yarn.o myprogress.o crypt-des.o userdef.o $(HX_OBJS) \
+       $(ENCODING_OBJS)
 
 # argon2 fill-block selection: SSE on x86_64, portable ref elsewhere
 ifeq ($(UNAME_M),x86_64)
@@ -147,6 +155,14 @@ hx.tab.o: hx.tab.c hx_ast.h
 
 hx.lex.o: hx.lex.c hx.tab.h
 	$(CC) $(CFLAGS) -c hx.lex.c
+
+# Encoding conversions (see ENCODING_OBJS above)
+ruleproc32.o: ruleproc32.c ruleproc32.h rule_ops.h latin_case.h combining.h \
+              classify_utf8.h
+	$(CC) $(CFLAGS) -c ruleproc32.c
+
+classify_utf8.o: classify_utf8.c classify_utf8.h
+	$(CC) $(CFLAGS) -c classify_utf8.c
 
 argon2/argon2.a:
 	cd argon2 && $(CC) $(CFLAGS) -c argon2.c core.c encoding.c thread.c $(ARGON2_FILL_SRC) && \
