@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.221 2026/10/06 22:31:43 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.222 2026/10/09 18:51:36 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.222  2026/10/09 18:51:36  dlr
+ * Three input and output defects on degenerate lines, all reported by Waffle against real 47.2611 records. Hashpipe is expected to deal with degenerate input and must always give an answer that is correct AND reusable; an undesired answer is acceptable, since several constructions can produce one digest, but a wrong or unreplayable one is not. (1) Stop fabricating a password field that the input never carried. The hard-path reading enumeration opened with a Split 0 that set salt to the ENTIRE rest and the password to empty, ahead of any real colon split. For a salted type a line must carry hash and salt AND password, so hash:salt alone is incomplete and must not resolve. Split 0 made it resolve anyway, and because it ran first it pre-empted the correct reading. The asymmetry it produced is the tell: 46eb9698601b8d82797921cf5669b22e with the 30-byte vBulletin salt whose 16th character is a colon resolved as MD5SALT with no password, while the colon-free equivalent of the same shape was correctly rejected -- identical arity, two answers, decided only by whether the salt happened to contain a colon, because only a colon in the rest routes an item to the hard path at all. Split 0 was also redundant: a genuine empty password is written hash:salt: and arrives as a trailing separator, and colpos is built right-to-left so that separator is colpos[0] and the ordinary splits already cover it. Removed. (2) Emit the salt field for a salted type even when the salt is empty. The no-salt reading of an ambiguous line leaves item->salt NULL while the matched type is HTF_SALTED, and the output predicate required item->salt to be non-NULL, so the field was dropped entirely: MD5-MD5SALT-PASSx01 followed by hash:HEX-wrapped-password, two fields where a salted type needs three. A consumer splitting on the documented hash colon salt colon password shape reads that password as the salt, and this program cannot re-verify its own line. The comment at that site already named the hazard; the predicate did not implement it. The separator is now always written for a salted type in mdxfind format, with the bytes copied only when present. John output still requires a non-empty field, since a trailing dollar sign is not a shape John reads back. (3) Decode a HEX or TESTVEC wrapper on the salt, salt2, pepper and user bindings in hx expression mode. The -p channel has decoded since 1.114 and these four never did, so the wrapper worked on exactly one of the five values a command line can supply. Measured: -s with the wrapper for NaCl hashed the fourteen literal characters of the wrapper instead of the four bytes it denotes. The wrapper exists so a value containing a colon, a newline or a non-UTF-8 byte can be given at all, and a salt or a username needs that as much as a password does. Decoded once through the same hx_bind_candidate the password uses, via a new hx_bind_var helper that allocates only when a wrapper is actually present, so the ordinary literal case costs nothing and the single-password path cannot diverge from the stdin loop. Verified: self-test 1057 passed 0 failed. Arity matrix of six cases all correct, with exactly one behaviour change, the incomplete colon-bearing line now rejected; the legitimate empty-password form, the colon-free forms, an ordinary hash:salt:password and a password containing a colon are all unchanged. All four bindings now agree with their literal spelling and -p is untouched, and a salt of Na:Cl supplied as a wrapper now produces the digest Python computes for it. Differential against the pre-fix binary over real corpora: 369,196 lines through -m e31 are byte-identical as multisets, and 15,259 lines through identification mode differ on exactly 4 lines, which are the two reformatted records. Resolved-line counts are identical on both corpora and no record lost its resolution, so removing Split 0 cost nothing on 384,455 real lines. Note for a future reader that hashpipe output order varies between runs because it is threaded: the first unsorted diff showed 558,566 differences on a corpus whose contents were identical, and a differential here must sort before comparing.
+ *
  * Revision 1.221  2026/10/06 22:31:43  dlr
  * Let a stored form carry literal colons, so a user type declared as digest(32) . ":" . salt verifies and round-trips. parse_line cuts the hash field at the FIRST colon because that is the hash/candidate separator for every other type, so such a form arrived truncated to just the digest, userdef_form_split could never match it, and the type silently verified nothing. The same type declared with KoreLogic colon-free salt(8) . digest(32) worked, which is what made this present as a salted-user-type failure rather than a separator one: Waffle reported mdxfind emitting USER_BWTDT e50e34c4838378bee4f9a883ec95f3bb:Sync:password and hashpipe echoing it back unresolved. Per Waffle 2026-10-06, a form must load in the shape it declares, with the split following the normal extended-seek colon discipline. A form carrying L literal colons now owns the first L colons after the one parse_line used, and the candidate is everything after that -- the man page rule that the password is everything after the field that precedes it, applied one field further along, so a password containing a colon still parses exactly as it does for a built-in salted type. The re-cut is confined to the user-defined verify path: item->hashstr and item->hashlen are untouched, so every built-in and every colon-free form sees what it saw before. The OUTPUT needed the same treatment and not only the parse. Once verification succeeded the emitted line still printed the digest alone and dumped the form own salt into the plaintext as $HEX[Sync:password], because the fsalt branch prints the hash field in full on the assumption the salt sits inside it, which is true for salt(8).digest(32) and false for a re-cut field. The re-cut field and its raw tail now reach format_output, which is what makes the line round-trip rather than merely verify. A colon inside a VARIABLE-width trailing field stays ambiguous and takes the shortest reading, the same bargain the password side makes, with $HEX[] as the unambiguous form. Verified: mdxfind and hashpipe now emit byte-identical lines for the reported case; a password containing a colon comes back $HEX-wrapped; a wrong password and a wrong salt both stay unresolved; u47 unsalted, e1, e1 with a colon password, e7 and e31 are unchanged. Recorded because it cost a self-inflicted regression during the work: ufield and ufieldlen were initially set only inside the colon branch while being used unconditionally in the split call, so every colon-free form passed uninitialised values and verified nothing -- a failure indistinguishable from the bug being fixed.
  *
@@ -31723,18 +31726,29 @@ static void format_output(struct workitem *item, char *outbuf, int *outlen)
      * John's canonical form separates the salt with '$'; mdxfind uses ':'. */
     {
     int salt_consumed;
-    if (item->match_type && item->match_type->verify)
-        salt_consumed = (item->salt != NULL && item->saltlen > 0);
-    else
-        salt_consumed = (item->match_type != NULL &&
-                         (item->match_type->flags & HTF_SALTED) != 0 &&
-                         item->salt != NULL &&
-                         (item->saltlen > 0 || !johnfmt));
+            if (item->match_type && item->match_type->verify)
+                salt_consumed = (item->salt != NULL && item->saltlen > 0);
+            else
+                /* A NULL salt is still a salt FIELD for a salted type.  The
+                 * no-salt reading of an ambiguous line leaves item->salt NULL
+                 * while the matched type is HTF_SALTED: MD5-MD5SALT-PASS
+                 * answering with an empty salt and the whole rest as the
+                 * password, for one.  Requiring item->salt != NULL dropped the
+                 * field and emitted hash:password, which a consumer splitting
+                 * on the documented hash[:salt]:password shape reads as the
+                 * password being the salt -- not reusable, and not
+                 * re-verifiable by this program.  Emit the empty field. */
+                salt_consumed = (item->match_type != NULL &&
+                                 (item->match_type->flags & HTF_SALTED) != 0 &&
+                                 (item->saltlen > 0 ||
+                                  (!johnfmt && item->saltlen == 0)));
 
-    if (salt_consumed) {
-        outbuf[pos++] = johnfmt ? '$' : ':';
-        memcpy(outbuf + pos, item->salt, item->saltlen);
-        pos += item->saltlen;
+            if (salt_consumed) {
+                outbuf[pos++] = johnfmt ? '$' : ':';
+                if (item->salt != NULL && item->saltlen > 0) {
+                    memcpy(outbuf + pos, item->salt, item->saltlen);
+                    pos += item->saltlen;
+                }
     } else if (ModeDefaultSalt && ModeDefaultSaltLen > 0 &&
              item->match_type && (item->match_type->flags & HTF_SALTED)) {
         outbuf[pos++] = johnfmt ? '$' : ':';
@@ -31977,15 +31991,21 @@ static void worker(void *dummy)
                     if (rp[j] == ':') colpos[nrc++] = rp + j;
                 }
 
-                /* Split 0: empty password (salt = entire rest) */
-                item->salt = (char *)rp;
-                item->saltlen = rlen;
-                item->password = (char *)rp + rlen;
-                item->passlen = 0;
-                item->alt_salt = NULL; item->alt_saltlen = 0;
-                item->alt_password = NULL; item->alt_passlen = 0;
-                verify_item(item, &hot_type, &hot_iter, hot_list, &nhot);
-                if (item->verified) goto hard_ok;
+                /* NO Split 0 here, deliberately.  It used to try salt = the
+                 * ENTIRE rest with an EMPTY password, ahead of any real split,
+                 * which fabricated a password field the input never had.  For a
+                 * salted type the line must carry hash, salt AND password, so
+                 * hash:salt on its own is incomplete and must not resolve.  A
+                 * genuine empty password is written hash:salt: and arrives as a
+                 * trailing separator; colpos is built right-to-left so that
+                 * separator is colpos[0] and the splits below already cover it.
+                 * Split 0 was therefore redundant for the legitimate case and
+                 * wrong for the incomplete one, and running first it pre-empted
+                 * the correct reading.  Measured: hash:]|i&Y*+X/Ks$4)9:?WBELY{
+                 * zoECrTZ resolved as MD5SALT with a 30-byte salt and no
+                 * password, while the colon-free equivalent hash:NaCl was
+                 * correctly rejected -- the same shape, two answers, decided
+                 * only by whether the salt happened to contain a colon. */
 
                 /* Splits 1..nrc: at each colon boundary, right to left */
                 { int ci;
@@ -34414,11 +34434,34 @@ static void hx_register_hashpipe_types(void)
     }
 }
 
+/* Decode a $HEX[...] / $TESTVEC[...] wrapper on an hx variable binding,
+ * leaving anything else exactly as given.  Allocates only when a wrapper is
+ * actually present, so the ordinary literal case costs nothing. */
+static void hx_bind_var(const char *src, const char **out_p, int *out_l)
+{
+    int srclen = src ? (int)strlen(src) : 0;
+    *out_p = src ? src : "";
+    *out_l = srclen;
+    if (srclen > 6 && (strncmp(src, "$HEX[", 5) == 0 ||
+                       strncmp(src, "$TESTVEC[", 9) == 0)) {
+        size_t decmax = (size_t)TESTVECSIZE + 32u;
+        unsigned char *buf = malloc(decmax);
+        if (buf == NULL) {
+            fprintf(stderr, "FATAL %s:%d: cannot allocate %zu bytes to decode "
+                            "an hx variable binding\n", __FILE__, __LINE__, decmax);
+            exit(1);
+        }
+        hx_bind_candidate(src, srclen, buf, (int)decmax, out_p, out_l);
+    }
+}
+
 static int run_hx_mode(const char *expr, const char *hx_file,
                         const char *hx_salt, const char *hx_salt2,
                         const char *hx_pepper, const char *hx_user,
                         const char *hx_pass, int hx_dump)
 {
+    const char *bv_salt = "", *bv_salt2 = "", *bv_pepper = "", *bv_user = "";
+    int bv_saltlen = 0, bv_salt2len = 0, bv_pepperlen = 0, bv_userlen = 0;
     hx_program *prog;
     hx_vm vm;
     struct workspace *_ws;
@@ -34444,6 +34487,26 @@ static int run_hx_mode(const char *expr, const char *hx_file,
     }
 
     hx_vm_init(&vm, prog);
+
+    /* $HEX[...] and $TESTVEC[...] on the salt, salt2, pepper and user
+     * bindings.  -p has decoded them since 1.114 and these four never did,
+     * so the wrapper worked on exactly one of the five values a command line
+     * can supply.  The wrapper exists so a value containing a colon, a
+     * newline or a non-UTF-8 byte can be given at all, and a salt or a
+     * username needs that as much as a password does -- measured, -s
+     * '$HEX[4e61436c]' hashed the 14 literal characters of the wrapper
+     * instead of the 4 bytes of NaCl.  Decoded once here rather than at each
+     * use, so the single-password path and the stdin loop cannot diverge. */
+    { const char *bv_s, *bv_s2, *bv_pp, *bv_u; int bl_s, bl_s2, bl_pp, bl_u;
+      hx_bind_var(hx_salt,   &bv_s,  &bl_s);
+      hx_bind_var(hx_salt2,  &bv_s2, &bl_s2);
+      hx_bind_var(hx_pepper, &bv_pp, &bl_pp);
+      hx_bind_var(hx_user,   &bv_u,  &bl_u);
+      bv_salt = bv_s; bv_saltlen = bl_s;
+      bv_salt2 = bv_s2; bv_salt2len = bl_s2;
+      bv_pepper = bv_pp; bv_pepperlen = bl_pp;
+      bv_user = bv_u; bv_userlen = bl_u;
+    }
 
     if (hx_pass) {
         /* single password mode.
@@ -34479,10 +34542,10 @@ static int run_hx_mode(const char *expr, const char *hx_file,
 
         hx_val result = hx_vm_run(&vm,
             pass_p, pass_l,
-            hx_salt, strlen(hx_salt),
-            hx_salt2, strlen(hx_salt2),
-            hx_pepper, strlen(hx_pepper),
-            hx_user, strlen(hx_user));
+            bv_salt,   bv_saltlen,
+            bv_salt2,  bv_salt2len,
+            bv_pepper, bv_pepperlen,
+            bv_user,   bv_userlen);
         if (!prog->has_emit) {
             if (result.data && result.len > 0)
                 fwrite(result.data, 1, result.len, stdout);
@@ -34558,10 +34621,10 @@ static int run_hx_mode(const char *expr, const char *hx_file,
                               &cand_p, &cand_l);
             result = hx_vm_run(&vm,
                 cand_p, cand_l,
-                hx_salt, strlen(hx_salt),
-                hx_salt2, strlen(hx_salt2),
-                hx_pepper, strlen(hx_pepper),
-                hx_user, strlen(hx_user));
+                        bv_salt,   bv_saltlen,
+                        bv_salt2,  bv_salt2len,
+                        bv_pepper, bv_pepperlen,
+                        bv_user,   bv_userlen);
             if (!prog->has_emit) {
                 if (result.data && result.len > 0)
                     fwrite(result.data, 1, result.len, stdout);
