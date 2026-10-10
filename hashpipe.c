@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.222 2026/10/09 18:51:36 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.223 2026/10/10 04:56:07 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.223  2026/10/10 04:56:07  dlr
+ * Decline a no-op capitalization in the MD5CAPMD5USER family, so a digest the plain type already answers keeps the plain designator. Reported by Waffle, 2026-10-09, against 31 real MD5SALT records whose 30-character salt ends in a colon: all 30 that resolve came back labelled MD5CAPMD5USERx01 instead of MD5SALT. The designator is what mdsplit files by, so every one of those records lands under the wrong type. MD5CAPMD5USER is md5(cap(md5(pass)) . user) and MD5CAPMD5MD5USER md5(cap(md5(cap(md5(pass)))) . user). The cap only fires when the first character of the intermediate hex is a lowercase letter, 6 cases in 16; on the other 10 the capped value is bit-identical to the uncapped one, so the two types compute precisely what MD5MD5USER and MD5MD5MD5USER compute and emitting them hands a second label to a digest those types already own. Both route through user2_engine, so one sticky capped flag and one early return covers both, in the same shape verify_md5cap has used for e353 since 1.219. The flag is sticky across the nmd5 rounds because once any round has capped the value really does diverge. Of Waffles 31 records, 30 had an inner md5 beginning with a digit and all 30 now report MD5SALT, which is what they are. Why this surfaced only on those records: on the ordinary path MD5SALT already won, as its own -z vector shows; a colon inside the salt routes the line onto the ambiguous-split path, and there a verify type is tried ahead of the compute types, so the degenerate MD5CAPMD5USER pre-empted the correct answer. Registration order does not decide it -- MD5SALT registers at 26465, well before MD5CAPMD5USER at 27225, and still lost. The two registered self-test vectors had to be regenerated and the reason matters: both used password123, whose md5 begins with 4, so the cap was a no-op on every round and the vectors were really MD5MD5USER and MD5MD5MD5USER values wearing cap labels. They passed for years only because nothing checked that the cap had fired, which is the same trap as a self-generated vector proving nothing. The replacements use cap1, whose md5 begins with b and whose second round begins with a, so both rounds genuinely cap, and they were taken from mdxfind -z rather than computed here. Audited the whole cap family rather than assuming its shape, and the damaging set is far smaller than the 22 catalog entries that use cap(). The eight COMPUTE cap types need nothing: e358 is genuinely degenerate, 239 of 400 vectors identical to e178 MD5SHA1, yet identification already reports MD5SHA1 because the plain alias registers first and both sit in the same compute class. The position-enumerating cap(x, N) types are not degenerate at all: e664 against e160 and e632 against e475 measured zero identical digests across 4,815 and 9,562 vectors, contradicting a prediction made by stripping the cap from the expression and running tools/hx_dedup_check -- the empirical comparison is the authority and the stripped-expression method over-counted. So only the verifies whose alias is a compute could pre-empt, and in practice only on the ambiguous-split path. Verified: self-test 1057 passed 0 failed, restored from the 1055/2 the first attempt produced before the vectors were regenerated. Differential against released 1.222 over 315,153 real lines through identification mode: zero lines in old and not new, zero in new and not old, 315,153 resolved both, identical type distribution. Waffles records go from 30 MD5CAPMD5USERx01 to 30 MD5SALT with no change in how many resolve, so this is a relabelling and not a recovery gain or loss. No salt-over-user preference was added: -m already decides it by argument order, and in identification mode MD5SALT precedes MD5MD5USER once the cap verify stops pre-empting, so the general case would need the verify and compute dispatch restructured on a hot path for no further benefit here.
+ *
  * Revision 1.222  2026/10/09 18:51:36  dlr
  * Three input and output defects on degenerate lines, all reported by Waffle against real 47.2611 records. Hashpipe is expected to deal with degenerate input and must always give an answer that is correct AND reusable; an undesired answer is acceptable, since several constructions can produce one digest, but a wrong or unreplayable one is not. (1) Stop fabricating a password field that the input never carried. The hard-path reading enumeration opened with a Split 0 that set salt to the ENTIRE rest and the password to empty, ahead of any real colon split. For a salted type a line must carry hash and salt AND password, so hash:salt alone is incomplete and must not resolve. Split 0 made it resolve anyway, and because it ran first it pre-empted the correct reading. The asymmetry it produced is the tell: 46eb9698601b8d82797921cf5669b22e with the 30-byte vBulletin salt whose 16th character is a colon resolved as MD5SALT with no password, while the colon-free equivalent of the same shape was correctly rejected -- identical arity, two answers, decided only by whether the salt happened to contain a colon, because only a colon in the rest routes an item to the hard path at all. Split 0 was also redundant: a genuine empty password is written hash:salt: and arrives as a trailing separator, and colpos is built right-to-left so that separator is colpos[0] and the ordinary splits already cover it. Removed. (2) Emit the salt field for a salted type even when the salt is empty. The no-salt reading of an ambiguous line leaves item->salt NULL while the matched type is HTF_SALTED, and the output predicate required item->salt to be non-NULL, so the field was dropped entirely: MD5-MD5SALT-PASSx01 followed by hash:HEX-wrapped-password, two fields where a salted type needs three. A consumer splitting on the documented hash colon salt colon password shape reads that password as the salt, and this program cannot re-verify its own line. The comment at that site already named the hazard; the predicate did not implement it. The separator is now always written for a salted type in mdxfind format, with the bytes copied only when present. John output still requires a non-empty field, since a trailing dollar sign is not a shape John reads back. (3) Decode a HEX or TESTVEC wrapper on the salt, salt2, pepper and user bindings in hx expression mode. The -p channel has decoded since 1.114 and these four never did, so the wrapper worked on exactly one of the five values a command line can supply. Measured: -s with the wrapper for NaCl hashed the fourteen literal characters of the wrapper instead of the four bytes it denotes. The wrapper exists so a value containing a colon, a newline or a non-UTF-8 byte can be given at all, and a salt or a username needs that as much as a password does. Decoded once through the same hx_bind_candidate the password uses, via a new hx_bind_var helper that allocates only when a wrapper is actually present, so the ordinary literal case costs nothing and the single-password path cannot diverge from the stdin loop. Verified: self-test 1057 passed 0 failed. Arity matrix of six cases all correct, with exactly one behaviour change, the incomplete colon-bearing line now rejected; the legitimate empty-password form, the colon-free forms, an ordinary hash:salt:password and a password containing a colon are all unchanged. All four bindings now agree with their literal spelling and -p is untouched, and a salt of Na:Cl supplied as a wrapper now produces the digest Python computes for it. Differential against the pre-fix binary over real corpora: 369,196 lines through -m e31 are byte-identical as multisets, and 15,259 lines through identification mode differ on exactly 4 lines, which are the two reformatted records. Resolved-line counts are identical on both corpora and no record lost its resolution, so removing Split 0 cost nothing on 384,455 real lines. Note for a future reader that hashpipe output order varies between runs because it is threaded: the first unsorted diff showed 558,566 differences on a corpus whose contents were identical, and a differential here must sort before comparing.
  *
@@ -4838,7 +4841,7 @@ static int user2_engine(const char *hashstr, int hashlen,
     char *run = (char *)WS->gp2;
     const char *colon;
     const unsigned char *user;
-    int userlen, k, sh, iter;
+    int userlen, k, sh, iter, capped = 0;
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 32) return 0;
@@ -4852,12 +4855,36 @@ static int user2_engine(const char *hashstr, int hashlen,
 
     rhash_msg(RHASH_MD5, pass, passlen, bin);
     prmd5(bin, hx, 32);
-    if (docap && hx[0] >= 'a' && hx[0] <= 'f') hx[0] -= 32;
+    if (docap && hx[0] >= 'a' && hx[0] <= 'f') { hx[0] -= 32; capped = 1; }
     for (k = 1; k < nmd5; k++) {
         rhash_msg(RHASH_MD5, (unsigned char *)hx, 32, bin);
         prmd5(bin, hx, 32);
-        if (docap && hx[0] >= 'a' && hx[0] <= 'f') hx[0] -= 32;
+        if (docap && hx[0] >= 'a' && hx[0] <= 'f') { hx[0] -= 32; capped = 1; }
     }
+
+
+    /* Decline a no-op cap, exactly as verify_md5cap does for e353.  hx[0] is a
+     * hex nibble, so the cap fires only on a lowercase letter -- 6 cases in 16.
+     * On the other 10 the capped value is bit-identical to the uncapped one, so
+     * MD5CAPMD5USER computes precisely what MD5MD5USER computes, and
+     * MD5CAPMD5MD5USER what MD5MD5MD5USER computes.  Emitting it anyway hands a
+     * second designator to a digest those types already answer, and the
+     * designator is what mdsplit files by, so the record lands under the wrong
+     * type.  Measured on 31 real MD5SALT records whose salt ends in a colon: 30
+     * had an inner md5 beginning with a digit and all 30 came back labelled
+     * MD5CAPMD5USERx01, and all 30 now report MD5SALT, which is what they are.
+     * The 31st resolves under neither type and did not before either, so the
+     * change is a pure relabelling: 30 of 31 resolved before and after.
+     *
+     * Sticky across the nmd5 rounds: once any round has capped, the value really
+     * does diverge from the uncapped construction. */
+    /* The registered vectors for both types had to be regenerated for this:
+     * they used password123, whose md5 begins with '4', so the cap was a no-op
+     * on every round and the vectors were really MD5MD5USER and MD5MD5MD5USER
+     * values wearing cap labels.  They passed only because nothing checked that
+     * the cap had fired.  The replacements use cap1, whose md5 begins with 'b'
+     * and whose second round begins with 'a', so both rounds genuinely cap. */
+    if (docap && !capped) return 0;
 
     for (sh = 0; sh < 2; sh++) {
         int n = 32;
@@ -27222,8 +27249,8 @@ static void init_hashtypes(void)
     HT_ALT("MD5MD5USER",      16, HTF_SALTED | HTF_COMPOSED, compute_md5md5user, compute_md5md5user_colon, "423a170b613885b19cdc496242a80787:testsalt:password123");
     HT_ALT("SHA1MD5USER",     20, HTF_SALTED | HTF_COMPOSED, compute_sha1md5user, compute_sha1md5user_colon, "18768e979e77779052a467262d0cf1d486c76d2c:testsalt:password123");
     HT("SHA1SHA1USER",    20, HTF_SALTED | HTF_COMPOSED, compute_sha1sha1user, "3b8240b10f2caefcc6cd7c970b332b4109d7e63c:testsalt:password123");
-    HTV("MD5CAPMD5USER", HTF_SALTED, verify_md5capmd5user, "225342c927041c489e98d77561c0bb77:0:password123");
-    HTV("MD5CAPMD5MD5USER", HTF_SALTED, verify_md5capmd5md5user, "203a0dc2c7fd903d8c79e1fd923d7946:0:password123");
+    HTV("MD5CAPMD5USER", HTF_SALTED, verify_md5capmd5user, "72cf3a7895c7e5ed71a814bf9f7b1a6e:0:cap1");
+    HTV("MD5CAPMD5MD5USER", HTF_SALTED, verify_md5capmd5md5user, "4cd15a3bd2f8928dd1379b21066f9c05:0:cap1");
     HTV("MD5MD5MD5USER", HTF_SALTED, verify_md5md5md5user, "966fb8f379de3a2dbdbf249470a76e86:testsalt:password123");
     HT("MD5USERPASS",     16, HTF_SALTED, compute_md5userpass, "4e48abb76d3e0295f3f89eb02d05b344:testsalt:password123");
     HT("SHA512SHA512RAWUSER", 64, HTF_SALTED | HTF_COMPOSED, compute_sha512sha512rawuser, "7f132a28e5e5af1fb9536c9bed74c85a26059b43ec740e445c0dfcc97d499e8d0a7ac8dc93833f366c58fafb9dc53408f52118580d82fe153bea8e4dfac79229:testsalt:password123");
