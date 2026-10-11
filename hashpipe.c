@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.223 2026/10/10 04:56:07 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.224 2026/10/11 13:20:02 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.224  2026/10/11 13:20:02  dlr
+ * Sync e1059 BCRYPTMD5PASSSALT from mdxfind.c 1.624. Types[] appended in the same order so the positional index matches exactly, verified at 1059 against mdxfind by resolving the name in both. verify_bcryptmd5passsalt needs no salt2 slot and no new parse, which was the open question Waffle raised: crypt_rn takes the bcrypt salt, the version prefix and the cost straight out of the stored MCF, so the only thing the site salt has to do is reach the md5 preimage, and it arrives inside hashstr already. By the time a verify runs, hashstr spans the MCF, a colon and the site salt, either because the whole field arrived that way or because the hash-colon-salt reconstruction in the ModeList and slow-queue scans put it back together after the parse split it; the function locates the colon at offset 60 and splits there, the same way user2_engine splits at 32 for MD5CAPMD5USER. A HEX-wrapped site salt is already decoded by hash_verify, which does that once for every verify function that reads a salt out of hashstr. Registered with HTF_SALTED, unlike the rest of the bcrypt family which carries flags 0: the flag is what makes the output path re-emit the field it consumed, so a solved line comes back as MCF then site salt then password and round-trips. No stack buffers: ctx1 holds the md5, gp1 its hex, gp2 the crypt_rn output, gp3 the preimage and gp4 a NUL-terminated copy of the MCF. The MCF is copied out rather than handing crypt_rn the whole hashstr as verify_bcryptmd5 can, because hashstr carries the salt after it and is not guaranteed terminated at hashlen on every path in. The dollar-2k form is declined: crypt_rn does not know that prefix and answers with its error marker, which BC_Start in mdxfind learned the hard way was then compared as though it were a hash. bench_cost is 256 rather than the family 4096 because the registered vector is cost 8 and that argument is the iteration count of the type own test vector. bench_rates.h 1.17 carries the measured rate. Verified: self-test 1058 passed 0 failed 2 skipped here and identically on dev1 arm64; the vendor vector and two independently built records verify under -m e1059 and under bare auto-detect; mdxfind output is byte-identical to hashpipe output on the same three records; wrong passwords report unresolved rather than matching; a site salt with high bytes round-trips as a HEX wrapper between the two tools; and the six registered bcrypt-family vectors still resolve to exactly the same labels as the released binary, including the pre-existing BCRYPTSHA256-to-BCRYPT256 alias.
+ *
  * Revision 1.223  2026/10/10 04:56:07  dlr
  * Decline a no-op capitalization in the MD5CAPMD5USER family, so a digest the plain type already answers keeps the plain designator. Reported by Waffle, 2026-10-09, against 31 real MD5SALT records whose 30-character salt ends in a colon: all 30 that resolve came back labelled MD5CAPMD5USERx01 instead of MD5SALT. The designator is what mdsplit files by, so every one of those records lands under the wrong type. MD5CAPMD5USER is md5(cap(md5(pass)) . user) and MD5CAPMD5MD5USER md5(cap(md5(cap(md5(pass)))) . user). The cap only fires when the first character of the intermediate hex is a lowercase letter, 6 cases in 16; on the other 10 the capped value is bit-identical to the uncapped one, so the two types compute precisely what MD5MD5USER and MD5MD5MD5USER compute and emitting them hands a second label to a digest those types already own. Both route through user2_engine, so one sticky capped flag and one early return covers both, in the same shape verify_md5cap has used for e353 since 1.219. The flag is sticky across the nmd5 rounds because once any round has capped the value really does diverge. Of Waffles 31 records, 30 had an inner md5 beginning with a digit and all 30 now report MD5SALT, which is what they are. Why this surfaced only on those records: on the ordinary path MD5SALT already won, as its own -z vector shows; a colon inside the salt routes the line onto the ambiguous-split path, and there a verify type is tried ahead of the compute types, so the degenerate MD5CAPMD5USER pre-empted the correct answer. Registration order does not decide it -- MD5SALT registers at 26465, well before MD5CAPMD5USER at 27225, and still lost. The two registered self-test vectors had to be regenerated and the reason matters: both used password123, whose md5 begins with 4, so the cap was a no-op on every round and the vectors were really MD5MD5USER and MD5MD5MD5USER values wearing cap labels. They passed for years only because nothing checked that the cap had fired, which is the same trap as a self-generated vector proving nothing. The replacements use cap1, whose md5 begins with b and whose second round begins with a, so both rounds genuinely cap, and they were taken from mdxfind -z rather than computed here. Audited the whole cap family rather than assuming its shape, and the damaging set is far smaller than the 22 catalog entries that use cap(). The eight COMPUTE cap types need nothing: e358 is genuinely degenerate, 239 of 400 vectors identical to e178 MD5SHA1, yet identification already reports MD5SHA1 because the plain alias registers first and both sit in the same compute class. The position-enumerating cap(x, N) types are not degenerate at all: e664 against e160 and e632 against e475 measured zero identical digests across 4,815 and 9,562 vectors, contradicting a prediction made by stripping the cap from the expression and running tools/hx_dedup_check -- the empirical comparison is the authority and the stripped-expression method over-counted. So only the verifies whose alias is a compute could pre-empt, and in practice only on the ambiguous-split path. Verified: self-test 1057 passed 0 failed, restored from the 1055/2 the first attempt produced before the vectors were regenerated. Differential against released 1.222 over 315,153 real lines through identification mode: zero lines in old and not new, zero in new and not old, 315,153 resolved both, identical type distribution. Waffles records go from 30 MD5CAPMD5USERx01 to 30 MD5SALT with no change in how many resolve, so this is a relabelling and not a recovery gain or loss. No salt-over-user preference was added: -m already decides it by argument order, and in identification mode MD5SALT precedes MD5MD5USER once the cap verify stops pre-empting, so the general case would need the verify and compute dispatch restructured on a hot path for no further benefit here.
  *
@@ -2387,6 +2390,7 @@ char *Types[] = {
     "HMAC-SHA256-SHA1SALTPASS",
     "MD5SQL5MD5MD5",
     "MD5SQL5MD5MD5MD5",
+    "BCRYPTMD5PASSSALT",
 
 NULL
 
@@ -12266,6 +12270,71 @@ static int verify_bcryptmd5(const char *hashstr, int hashlen, const unsigned cha
     if (!crypt_rn(hex, hashstr, result, WS_GP_SIZE))
         return 0;
     return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* BCRYPTMD5PASSSALT (e1059): bcrypt(md5(pass . sitesalt)).
+ *
+ * Two salts, from two different places.  The bcrypt salt, the version prefix
+ * and the COST all come out of the stored MCF, so a cost-8 and a cost-12
+ * record in the same file each compute at their own cost with no special
+ * handling.  The SITE salt is a separate per-record field -- fixed per site in
+ * the one deployment this has been seen in, but carried per hash so it is free
+ * to vary -- and it is what gets folded into the md5 preimage.
+ *
+ * This needs no salt2 slot and no new parse.  The stored form is
+ *   <60-char MCF>:<site salt>
+ * and that is exactly what hashstr spans by the time this runs: either the
+ * whole field arrived that way, or the hash:salt reconstruction in the ModeList
+ * and slow-queue scans put it back together after the parse split it.  A
+ * $HEX[] site salt has already been decoded by hash_verify, which does that
+ * once for all seventy-nine verify functions that read a salt out of hashstr.
+ */
+static int verify_bcryptmd5passsalt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5 = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp1;
+    char *result = (char *)WS->gp2;
+    unsigned char *pre = (unsigned char *)WS->gp3;
+    char *setting = (char *)WS->gp4;
+    extern char *crypt_rn(const char *key, const char *setting,
+                          void *output, int size);
+    const int mcflen = 60;
+    int saltlen;
+
+    /* 60 for the MCF, 1 for the colon, at least 1 of site salt. */
+    if (hashlen < mcflen + 2 || hashstr[0] != '$') return 0;
+    /* crypt_rn does not know the $2k$ prefix and answers with its error marker
+     * "*0"; BC_Start in mdxfind.c learned the hard way that comparing that as
+     * though it were a hash emits nonsense. */
+    if (hashstr[2] == 'k') return 0;
+    if (hashstr[mcflen] != ':') return 0;
+    saltlen = hashlen - mcflen - 1;
+    if (passlen + saltlen >= WS_GP_SIZE) return 0;
+
+    /* bench_cost is 256 -- 2^8 -- because the registered vector is cost 8, and
+     * this argument is the iteration count of the type's OWN test vector. */
+    { int cost = atoi(hashstr + 4);
+      if (cost > 0 && cost < 32 &&
+          verify_cost_exceeds(WS->cur_rate, 256.0, (double)(1 << cost)))
+          return 0;
+    }
+
+    /* The MCF is copied out NUL-terminated rather than handing crypt_rn the
+     * whole hashstr the way verify_bcryptmd5 can: hashstr carries :salt after
+     * it and is not guaranteed terminated at hashlen on every path in. */
+    memcpy(setting, hashstr, mcflen);
+    setting[mcflen] = 0;
+
+    memcpy(pre, pass, passlen);
+    memcpy(pre + passlen, hashstr + mcflen + 1, saltlen);
+    rhash_msg(RHASH_MD5, pre, passlen + saltlen, md5);
+    prmd5(md5, hex, 32);
+    hex[32] = 0;
+
+    if (!crypt_rn(hex, setting, result, WS_GP_SIZE))
+        return 0;
+    return strcmp(result, setting) == 0;
 }
 
 /* BCRYPTSHA1: bcrypt(hex(SHA1(pass))) */
@@ -27423,6 +27492,12 @@ static void init_hashtypes(void)
     HTV("BCRYPT",     0, verify_bcrypt, "$2a$12$DG3Vk1qDyvwkh96yaCuf6.HqWPKac6Ur7nOitGIbrN05iqtnveM7C:password123");
     HTV("BCRYPTMD5",  0, verify_bcryptmd5, "$2b$12$M708MGo3FgbZp6Fy83zKTOP3oqrEjAJam0PrYYkHr8mHEvnPqJsru:password123");
     HTV("BCRYPTSHA1", 0, verify_bcryptsha1, "$2b$12$0gky1pAf50ToA0A9tqo8P.JCO.x82x3oKv7QflLyP/ZuuDVWFs43m:password123");
+    /* HTF_SALTED, unlike the rest of the bcrypt family: the site salt is a
+     * field of its own on the line, and the flag is what makes the output path
+     * re-emit the field it consumed, so a solved line round-trips as
+     * <MCF>:<site salt>:<password>.  The vector is vendor data, confirmed
+     * against the python bcrypt module rather than against either tool. */
+    HTV("BCRYPTMD5PASSSALT", HTF_SALTED, verify_bcryptmd5passsalt, "$2a$08$..DDtELgljVzbx9bmQjOS.vy3jJXTbRt2WT2RG2vFyJnvyD7WodAq:wRz9MO9i25:nikolai13");
     HTV("BCRYPTSHA256", 0, verify_bcryptsha256, "$2b$05$jrDCJDU1FinZhcjIQ343Gedf.eY3OEUtP3uAvu7CuaYAAYgeWo0Hm:password123");
     HTV("BCRYPTHMACSHA256", 0, verify_bcrypthmacsha256, "$bcrypt-sha256$v=2,t=2b,r=5$RndSa1tRndSa1tRndSa1tu$wLxHrJMAHPX7Br7IB1EkHSpfXdnxnTC:password123");
     HTV("PHPBB3",     0, verify_phpbb3, "$H$997LdNzHMtxNZ26WousH1K.At2SnCs0:password123");
