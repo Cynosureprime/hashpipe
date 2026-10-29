@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.227 2026/10/29 00:01:33 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.228 2026/10/29 02:20:16 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.228  2026/10/29 02:20:16  dlr
+ * Make complete bench_rates coverage a release gate, and state the real failure mode at init_rates. bench_rates.h 1.19 measures e1060 MD5USERDESCRYPT at 187152 and e1061 MD5CRYPTMD5 at 4248 on dev1, the last two registered types with no entry, so the table now covers e1 through e1062 in 1061 entries; the only absences are e0 NONE and e426 PARALLEL, which have no test vector to benchmark and which hashpipe -h does not list either, so the coverage check needs no exception list. e1062 was re-measured in the same run at 4681357, replacing 5019723 from a separate run. The annotation this revision adds is the content. 1.216 recorded that a missing entry only kills the -L cost guard; that is true and it is not the serious half. init_rates defaults an unmeasured type to rate 1 and the fast identification passes skip anything below AUTODETECT_RATE_MIN of 1000 as a slow KDF. Try 5 and Try 6 were written to pick up that skipped band, but both compute at base_depth with no iteration, so an unmeasured type is recoverable at x01 and unreachable at every deeper round. The type therefore passes -m eNNNN, -c, the labelled path AND an unhinted line at x01, which is every test anyone thinks to run, and fails silently only on an unhinted line at x02 or below. e1060 and e1061 shipped in 1.227 that way. The comment now carries the one-line coverage check to run before publishing. Note the guard is hashpipe only: AUTODETECT_RATE_MIN does not exist in mdxfind.c, which reads the same table for rate-based lineswanted batch scheduling, so there a missing entry costs throughput on that type rather than correctness. Verified: all three resolve unhinted after the change, e1061 and e1060 from their self-test vectors and e1062 at x02 against an mdxfind -z reference; self-test 1061 passed, 0 failed, 2 skipped, unchanged; coverage check prints nothing.
+ *
  * Revision 1.227  2026/10/29 00:01:33  dlr
  * Add e1062 SHA256BASE64 in parity with mdxfind.c 1.642. Types[] appended at the end so the positional index matches mdxfind exactly, verified at 1062 on both sides; compute_sha256base64 base64 encodes into a WS slot and hashes it, with no stack buffer; an outer_tab entry of compute_sha256 so iteration past x01 applies the outermost hash rather than re-running the whole construction. Self-test 1061 passed, 0 failed, 2 skipped, up from 1060. Worth recording, because it cost most of the time this change took and the skill documents the consequence too narrowly: a type with NO bench_rates entry does not merely lose its -L cost guard, it is EXCLUDED FROM AUTODETECT. init_rates defaults an unmeasured type to rate 1, the easy and hard unsalted identification passes both skip any candidate whose rate is below AUTODETECT_RATE_MIN of 1000 on the ground that it is a slow KDF, and so an unhinted line could not be identified above x01 while -c, -m and the labelled path all verified it correctly. The symptom is a type that looks finished under every direct test and silently fails only on bare hash colon password input. Measured on dev1 at 5019723 hashes per second and added to bench_rates.h, after which unhinted identification resolves x01, x02 and x03. Noted but NOT fixed here: e1060 and e1061 have no bench entry either and carry the same defaulted rate. Verified against an INDEPENDENT python oracle on three passwords, both of Waffle external vectors reproduce, and four wrong passwords at -i 5 give 0 false positives.
  *
@@ -34153,11 +34156,26 @@ static void usage(int brief)
  *
  * Measured on dev1, the canonical host named in the bench_rates.h header;
  * numbers from another machine are not substitutable. The incremental path is
- * documented at the top of bench_rates.h. As of 1.216 the table covers every
- * registered type that can be measured: 1052 entries for e1 through e1053. The
+ * documented at the top of bench_rates.h. As of 1.228 the table covers every
+ * registered type that can be measured: 1061 entries for e1 through e1062. The
  * two absent indices are exactly the two the self-test skips, e0 none and e426
  * PARALLEL, neither of which has a test vector to benchmark against. A gap
  * anywhere else means a type was added without measuring it.
+ *
+ * COMPLETE COVERAGE IS A RELEASE GATE, not a tidiness goal, and the reason is
+ * not the cost guard. init_rates defaults an unmeasured type to rate = 1, and
+ * the fast identification passes skip any candidate whose rate is below
+ * AUTODETECT_RATE_MIN, so a type added without a benchmark run is treated as a
+ * slow KDF. Try 5 and Try 6 pick up that skipped band, but both compute at
+ * base_depth with no iteration, so an unmeasured type is recoverable at x01
+ * and UNREACHABLE at every deeper round. It still resolves under -m eNNNN,
+ * under -c, on a labelled line, and unhinted at x01 -- so the obvious smoke
+ * test passes -- and fails silently only on an unhinted line at x02 or below.
+ * e1060 and e1061 shipped that way and were caught after release. Before
+ * publishing, this must print nothing:
+ *
+ *   comm -13 <(grep -oE '{[0-9]+,' bench_rates.h | tr -d '{,' | sort -n) \
+ *            <(./hashpipe -h | awk '$1 ~ /^e[0-9]+$/{print substr($1,2)+0}' | sort -n)
  */
 static void init_rates(void)
 {
