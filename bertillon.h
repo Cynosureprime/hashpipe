@@ -2,6 +2,9 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.27  2026/10/15 12:40:30  dlr
+ * A tag match pins the type, so the cost tier does not apply to it. The tier answers whether a bulk crack is affordable, which is the right question for a bare digest and the wrong one once the input names its own family: identifying a 1$salt$hash as md5crypt costs one hash, not 1000 per candidate. Before this a 1$ value reported 16 types at the easy tier, every one of them unable to produce a leading dollar at all, while MD5CRYPT sat among the 37 counted as costing more than the tier allows and surfaced only at --tier hard among 53; the operator saw a confident list with the right answer absent. The pin only ever ADDS, and only to a row the input itself selected, so it cannot hide a type the way cutting the untagged rows would; the tag being a sample rather than a specification argues against REJECTING on it, not against trusting a positive match. --only names one band explicitly and keeps its exact meaning. Also adds bert_tag_match, which treats the bcrypt version byte as a variant rather than a discriminator, since dollar-2a, 2b, 2x and 2y are one stored format read by one parser and a row carries whichever its sample held. It is used at the shape cut as well as the pin, because that cut runs first and a rejected variant never reaches the pin. Deliberately narrow: that is the only prefix family in the table whose varying byte is known to be a version. Measured: 1$ now reports 18 at the easy tier including e511 and e1061, with a line saying which were admitted over the tier and why; all four bcrypt spellings resolve identically where 2y previously matched no bcrypt type; dollar-H$ gains e455 and e537. Untagged input is unchanged at 195, 271 and 274 types across the three tiers, byte-identical to the released binary. Self-test 1060 passed 0 failed. JUNIPERIVE still needs --tier hard for a 1$ value: it accepts that prefix at the parse but advertises a 104-char AES blob as its sample, so there is no tag to match.
+ *
  * Revision 1.26  2026/09/25 22:52:25  dlr
  * Windows portability: guard the sys-wait include and the WIFEXITED decode. mingw has no sys/wait.h, and _pclose returns the exit code itself rather than a wait status, so there is nothing to decode there. No change on POSIX. Unblocks the Windows x86_64 and ARM64 cross-compiles for the v1.209 release.
  *
@@ -1341,7 +1344,38 @@ struct bert_red {
     /* Why a row was not tried, in the reader's terms rather than the
      * partition's. */
     int cut_shape, cut_nosalt, cut_wantsalt;
+    /* Rows admitted because the INPUT's own tag matched the row's, over a
+     * cost tier that would otherwise have hidden them. */
+    int tagpin;
 };
+
+/*
+ * Does the input carry the tag this row advertises?
+ *
+ * Exact prefix, with ONE family rule: the bcrypt MCF spells its version in a
+ * single byte between the dollars, and $2a$ $2b$ $2x$ $2y$ are the same stored
+ * format read by the same parser. A row's tag is whichever of those its own
+ * sample vector happened to carry, so an exact compare answers "is this the
+ * same variant" when the question is "is this the same type" -- which is how a
+ * $2y$ from PHP password_hash() missed BCRYPT entirely while a $2a$ matched.
+ *
+ * Deliberately narrow. This is the only prefix family in the table where the
+ * varying byte is known to be a version rather than a discriminator, so the
+ * rule is written for it by name instead of as a general wildcard that would
+ * start merging types that merely look alike.
+ */
+static int bert_tag_match(const char *hash, const char *tag)
+{
+    size_t n;
+    if (!tag || !tag[0]) return 0;
+    n = strlen(tag);
+    if (!strncmp(hash, tag, n)) return 1;
+    if (n == 4 && tag[0] == '$' && tag[1] == '2' && tag[3] == '$' &&
+        hash[0] == '$' && hash[1] == '2' && hash[2] && hash[3] == '$' &&
+        strchr("abxy", tag[2]) && strchr("abxy", hash[2]))
+        return 1;
+    return 0;
+}
 
 /*
  * One target, one reading. `have_salt` says whether the caller is offering a
@@ -1371,7 +1405,9 @@ static void bert_reduce_one(const char *hash, int have_salt, const char *label,
 
         if (r->udef && !Bert_include_udef) continue;
 
-        if (r->tag[0] && strncmp(hash, r->tag, strlen(r->tag))) { part = BP_INAPPLICABLE; R.cut_shape++; }
+        /* bert_tag_match, not a bare strncmp: this cut runs BEFORE the pin
+         * below, so a bcrypt variant rejected here never reaches it. */
+        if (r->tag[0] && !bert_tag_match(hash, r->tag)) { part = BP_INAPPLICABLE; R.cut_shape++; }
         else if (!r->tag[0] && r->d_bytes > 0 && hexish && hb > 0 && r->d_bytes != hb) {
             /* TRUNCATION-ABLE is its own axis: a LONGER digest is reachable if
              * the list carries chopped hashes. Counted, named, never default. */
@@ -1416,7 +1452,35 @@ static void bert_reduce_one(const char *hash, int have_salt, const char *label,
         else {
 keep:
             t = bert_tier_of(r, &why);
-            if (Bert_only ? (t != Bert_tier) : (t > Bert_tier)) part = BP_UNAFFORDABLE;
+            /*
+             * A TAG MATCH PINS THE TYPE, and the cost tier does not apply to it.
+             *
+             * The tier answers "can I afford to CRACK this", which is the right
+             * question for a bare digest where the candidate set is large and
+             * undifferentiated. It is the wrong question once the input names
+             * its own family: identifying $1$kKwJaW3X$Dcc... as md5crypt costs
+             * one hash, not 1000 per candidate, and the answer is the same
+             * whatever the operator can afford.
+             *
+             * Before this, a $1$ value reported 16 types at the easy tier --
+             * YAF-SHA1, POSTGRESQL, CISCOPIX and the like, every one of them
+             * unable to produce a leading '$' at all -- while MD5CRYPT sat in
+             * the 37 counted as "cost more than the easy tier allows" and only
+             * surfaced at --tier hard, among 53. The operator saw a confident
+             * list with the right answer absent.
+             *
+             * This only ever ADDS, and only to a row the input itself selected,
+             * so it cannot hide a type the way cutting the untagged rows would.
+             * The tag is a sample rather than a specification (see 1.23), which
+             * is an argument against REJECTING on it -- not against trusting a
+             * positive match. --only names one band explicitly and keeps its
+             * exact meaning.
+             */
+            if (!Bert_only && bert_tag_match(hash, r->tag)) {
+                part = BP_APPLICABLE;
+                if (t > Bert_tier) R.tagpin++;
+            }
+            else if (Bert_only ? (t != Bert_tier) : (t > Bert_tier)) part = BP_UNAFFORDABLE;
             else part = BP_APPLICABLE;
         }
 
@@ -1536,6 +1600,16 @@ keep:
                                 "lower-case the value and re-run.\n",
                         R.casecut, R.casecut == 1 ? " was" : "s were",
                         casenames, R.casecut > 3 ? ", ..." : "");
+        }
+        if (R.tagpin) {
+            /* Say it, because the count would otherwise contradict the tier:
+             * "16 types to try (easy tier)" that includes a 1000-round type
+             * reads as a costing bug unless the reason is on the page. */
+            fprintf(stderr, "           INCLUDES %d type%s whose cost exceeds this tier, "
+                            "admitted because\n           the value's own tag names "
+                            "them. The tag identifies; the tier only\n           says "
+                            "what a bulk run can afford.\n",
+                    R.tagpin, R.tagpin == 1 ? "" : "s");
         }
         if (R.untranslatable && ap) {
             const char *what = (Bert_emit == BE_HASHCAT) ? "hashcat mode"

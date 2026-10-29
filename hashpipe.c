@@ -14,10 +14,19 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.224 2026/10/11 13:20:02 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.227 2026/10/29 00:01:33 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.227  2026/10/29 00:01:33  dlr
+ * Add e1062 SHA256BASE64 in parity with mdxfind.c 1.642. Types[] appended at the end so the positional index matches mdxfind exactly, verified at 1062 on both sides; compute_sha256base64 base64 encodes into a WS slot and hashes it, with no stack buffer; an outer_tab entry of compute_sha256 so iteration past x01 applies the outermost hash rather than re-running the whole construction. Self-test 1061 passed, 0 failed, 2 skipped, up from 1060. Worth recording, because it cost most of the time this change took and the skill documents the consequence too narrowly: a type with NO bench_rates entry does not merely lose its -L cost guard, it is EXCLUDED FROM AUTODETECT. init_rates defaults an unmeasured type to rate 1, the easy and hard unsalted identification passes both skip any candidate whose rate is below AUTODETECT_RATE_MIN of 1000 on the ground that it is a slow KDF, and so an unhinted line could not be identified above x01 while -c, -m and the labelled path all verified it correctly. The symptom is a type that looks finished under every direct test and silently fails only on bare hash colon password input. Measured on dev1 at 5019723 hashes per second and added to bench_rates.h, after which unhinted identification resolves x01, x02 and x03. Noted but NOT fixed here: e1060 and e1061 have no bench entry either and carry the same defaulted rate. Verified against an INDEPENDENT python oracle on three passwords, both of Waffle external vectors reproduce, and four wrong passwords at -i 5 give 0 false positives.
+ *
+ * Revision 1.226  2026/10/15 12:40:30  dlr
+ * Sync e1061 MD5CRYPTMD5 from mdxfind.c 1.630. Types[] appended in the same order so the positional index matches, verified at 1061 by resolving the name in both tools. verify_md5cryptmd5 is the e538 shape one crypt over: md5 the password, render its hex, delegate to verify_md5crypt. The hex is staged in gp5 rather than gp1 because verify_md5crypt writes its own result into gp1, and the e538 sibling happens to hand in a key that lives there; a separate slot keeps the key alive across the call whatever the callee does with its scratch, which is the same reason the mdxfind arm stages at linebuf+MAXLINE. No stack buffers: ctx1 the md5, gp5 its hex. Registered with flags 0 like e511, since the output path echoes the whole stored form it verified. The self-test vector deliberately uses the house salt and password123: bertillon strips a vector plaintext by matching Bert_plains, so a password it does not recognise leaves the whole line measured as the stored form, and the first draft of this row reported fields 2 and salt_len 14 where e511 reports 1 and 0. With the conventional vector the two rows are identical in every measured column. Verified: self-test 1060 passed 0 failed 2 skipped, up one from 1059; the live record and 35 openssl-built records verify under -m e1061 and under bare auto-detect; mdxfind output is byte-identical to hashpipe output on all 70 lines of a combined e511 plus e1061 run; a wrong password reports unresolved rather than matching; and the original record with the md5 hex as its plaintext still resolves to e511 alone.
+ *
+ * Revision 1.225  2026/10/13 18:14:38  dlr
+ * Sync e1060 MD5USERDESCRYPT from mdxfind.c 1.626. Types[] appended in the same order so the positional index matches, verified at 1060 against mdxfind by resolving the name in both. verify_md5userdescrypt is verify_md5descrypt with a second field: hashstr spans digest, salt AND user, so the splits are at offset 32 and the next colon, and the descrypt output is taken whole, all 13 characters including the salt prefix. Registered with flags 0 rather than HTF_SALTED, matching e501, because the output path echoes the whole hashstr it verified and digest:salt:user:password comes back out without the flag -- confirmed by feeding e501 its own registered vector first rather than assuming. The password is truncated to eight bytes before descrypt as e501 does, since descrypt uses only the first eight characters of the key. The user field is decoded when it arrives $HEX[] wrapped, which it does whenever the name carries a high or control byte; mdxfind had the same gap and it is fixed there in the same revision, where it was a true round-trip failure because that tool both emits and reads the form. No stack buffers: gp1 the truncated key, gp2 the descrypt output, gp3 the decoded salt, gp4 the computed digest, gp5 the md5 preimage, gp6 the decoded user, ctx1 the digest. Reports through hex_iter_match with ITER_MD5 so the label carries its iteration depth and agrees with mdxfind, which emits MD5USERDESCRYPTx01. Verified: self-test 1059 passed 0 failed 2 skipped, up one from 1058; the live vector and three independently built records verify under -m e1060 and under bare auto-detect; output is byte-identical to mdxfind on the same records; a non-ASCII user round-trips as a $HEX[] wrapper between the two tools; wrong passwords report unresolved rather than matching; and e501 MD5DESCRYPT resolves identically to the released binary.
+ *
  * Revision 1.224  2026/10/11 13:20:02  dlr
  * Sync e1059 BCRYPTMD5PASSSALT from mdxfind.c 1.624. Types[] appended in the same order so the positional index matches exactly, verified at 1059 against mdxfind by resolving the name in both. verify_bcryptmd5passsalt needs no salt2 slot and no new parse, which was the open question Waffle raised: crypt_rn takes the bcrypt salt, the version prefix and the cost straight out of the stored MCF, so the only thing the site salt has to do is reach the md5 preimage, and it arrives inside hashstr already. By the time a verify runs, hashstr spans the MCF, a colon and the site salt, either because the whole field arrived that way or because the hash-colon-salt reconstruction in the ModeList and slow-queue scans put it back together after the parse split it; the function locates the colon at offset 60 and splits there, the same way user2_engine splits at 32 for MD5CAPMD5USER. A HEX-wrapped site salt is already decoded by hash_verify, which does that once for every verify function that reads a salt out of hashstr. Registered with HTF_SALTED, unlike the rest of the bcrypt family which carries flags 0: the flag is what makes the output path re-emit the field it consumed, so a solved line comes back as MCF then site salt then password and round-trips. No stack buffers: ctx1 holds the md5, gp1 its hex, gp2 the crypt_rn output, gp3 the preimage and gp4 a NUL-terminated copy of the MCF. The MCF is copied out rather than handing crypt_rn the whole hashstr as verify_bcryptmd5 can, because hashstr carries the salt after it and is not guaranteed terminated at hashlen on every path in. The dollar-2k form is declined: crypt_rn does not know that prefix and answers with its error marker, which BC_Start in mdxfind learned the hard way was then compared as though it were a hash. bench_cost is 256 rather than the family 4096 because the registered vector is cost 8 and that argument is the iteration count of the type own test vector. bench_rates.h 1.17 carries the measured rate. Verified: self-test 1058 passed 0 failed 2 skipped here and identically on dev1 arm64; the vendor vector and two independently built records verify under -m e1059 and under bare auto-detect; mdxfind output is byte-identical to hashpipe output on the same three records; wrong passwords report unresolved rather than matching; a site salt with high bytes round-trips as a HEX wrapper between the two tools; and the six registered bcrypt-family vectors still resolve to exactly the same labels as the released binary, including the pre-existing BCRYPTSHA256-to-BCRYPT256 alias.
  *
@@ -2391,6 +2400,9 @@ char *Types[] = {
     "MD5SQL5MD5MD5",
     "MD5SQL5MD5MD5MD5",
     "BCRYPTMD5PASSSALT",
+    "MD5USERDESCRYPT",
+    "MD5CRYPTMD5",
+    "SHA256BASE64",
 
 NULL
 
@@ -8872,6 +8884,16 @@ static void compute_md5base64(const unsigned char *pass, int passlen, const unsi
     (void)salt; (void)saltlen;
     blen = base64_encode(pass, passlen, b64, WS_GP_SIZE);
     rhash_msg(RHASH_MD5, (unsigned char *)b64, blen, dest);
+}
+
+/* SHA256BASE64 = SHA256(base64(password)) -- sibling of MD5BASE64 */
+static void compute_sha256base64(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    char *b64 = (char *)WS->gp1;
+    int blen;
+    (void)salt; (void)saltlen;
+    blen = base64_encode(pass, passlen, b64, WS_GP_SIZE);
+    SHA256((unsigned char *)b64, blen, dest);
 }
 
 /* SHA1DRU — 1M iterations of SHA1(hex(prev) + password) */
@@ -16663,6 +16685,70 @@ static int verify_md5descrypt(const char *hashstr, int hashlen,
     return hex_iter_match(computed, hashstr, ITER_MD5);
 }
 
+/* MD5USERDESCRYPT (e1060): md5(user . descrypt(pass, salt))
+ *   "32hex:SS:user:password"
+ *
+ * Two fields are consumed, not one, so hashstr spans digest, salt AND user, and
+ * the splits are at offset 32 and the next colon.  The descrypt output is taken
+ * WHOLE -- all 13 characters including the salt prefix -- which the live vector
+ * settles: md5("Riederer" . "DX1HFRwVm6AP.") is the stored digest, md5 over the
+ * 11-character checksum alone is not.
+ *
+ * Registered with flags 0 rather than HTF_SALTED, matching e501: the output path
+ * echoes the whole hashstr it verified, so digest:salt:user:password comes back
+ * out and the line round-trips without the flag.
+ *
+ * The password is truncated to 8 bytes before descrypt, as e501 does, because
+ * descrypt uses only the first 8 characters of the key.  A $HEX[] user is
+ * decoded: mdxfind wraps that field on the same predicate as a salt, so it can
+ * arrive encoded. */
+static int verify_md5userdescrypt(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    char *passbuf  = (char *)WS->gp1;
+    char *desout   = (char *)WS->gp2;
+    char *saltdec  = (char *)WS->gp3;
+    char *computed = (char *)WS->gp4;
+    char *pre      = (char *)WS->gp5;
+    unsigned char *md5 = (unsigned char *)WS->ctx1;
+    const char *c1, *c2, *salt;
+    const unsigned char *user;
+    struct Desinfo *di;
+    char *s;
+    int plen, saltlen, ulen, dlen;
+
+    c1 = memchr(hashstr, ':', hashlen);
+    if (!c1 || c1 - hashstr != 32) return 0;
+    c2 = memchr(c1 + 1, ':', hashlen - 33);
+    if (!c2) return 0;
+    saltlen = (int)(c2 - c1 - 1);
+    ulen = hashlen - (int)(c2 - hashstr) - 1;
+    if (ulen <= 0) return 0;
+    if (saltlen == 2) {
+        if (!is_des_salt_char(c1[1]) || !is_des_salt_char(c1[2])) return 0;
+    } else if (!(saltlen >= 6 && memcmp(c1 + 1, "$HEX[", 5) == 0)) {
+        return 0;
+    }
+    salt = descrypt_decode_salt(c1 + 1, saltlen, saltdec, WS_GP_SIZE);
+    user = (const unsigned char *)c2 + 1;
+    { int d = decode_hex_password(c2 + 1, ulen, (unsigned char *)WS->gp6, MAXLINE);
+      if (d >= 0) { user = (const unsigned char *)WS->gp6; ulen = d; } }
+    plen = passlen > 8 ? 8 : passlen;
+    if (plen >= (int)WS_GP_SIZE) return 0;
+    memcpy(passbuf, pass, plen);
+    passbuf[plen] = 0;
+    di = get_desinfo();
+    s = bsd_crypt_des(passbuf, salt, desout, di);
+    if (!s) return 0;
+    dlen = (int)strlen(s);
+    if (ulen + dlen >= (int)WS_GP_SIZE) return 0;
+    memcpy(pre, user, ulen);
+    memcpy(pre + ulen, s, dlen);
+    rhash_msg(RHASH_MD5, (unsigned char *)pre, ulen + dlen, md5);
+    prmd5(md5, computed, 32);
+    return hex_iter_match(computed, hashstr, ITER_MD5);
+}
+
 /* MD4DESCRYPT: MD4(descrypt(pass, salt)) — "32hex:SS:password" */
 static int verify_md4descrypt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
@@ -16856,6 +16942,26 @@ static int verify_md5crypt(const char *hashstr, int hashlen,
 
     do_md5crypt((const char *)pass, passlen, salt, saltlen, "$1$", 3, result, WS_GP_SIZE);
     return strncmp(result, hashstr, hashlen) == 0;
+}
+
+/* MD5CRYPTMD5 (e1061): md5crypt(hexlower(md5(pass)), salt).
+ *
+ * The hex preimage is staged in gp5, NOT gp1: verify_md5crypt below writes
+ * its own result into gp1, and gp1 is where the e538 sibling happens to put
+ * the string it then passes in as the key.  Using a separate slot here keeps
+ * the key alive across the call regardless of what the callee does with its
+ * scratch, which is the same reason the mdxfind arm stages at linebuf+MAXLINE
+ * rather than linebuf. */
+static int verify_md5cryptmd5(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *md5 = (unsigned char *)WS->ctx1;
+    char *hex = (char *)WS->gp5;
+
+    rhash_msg(RHASH_MD5, pass, passlen, md5);
+    prmd5(md5, hex, 32);
+    hex[32] = 0;
+    return verify_md5crypt(hashstr, hashlen, (unsigned char *)hex, 32);
 }
 
 static int b64_decode(const char *src, unsigned char *dst, int srclen);
@@ -27118,6 +27224,7 @@ static void init_hashtypes(void)
 
     /* --- BASE64 types --- */
     HT("MD5BASE64",              16, 0, compute_md5base64, "22e702d475c22fd8f118ccd2e105a509:password123");
+    HT("SHA256BASE64",           32, 0, compute_sha256base64, "7ea37d0251e86c0334b82d8f2af4be5d888fd947a847b1e327d0def96d442f57:password123");
     HT("MD5BASE64MD5",           16, 0, compute_md5base64md5, "becc0e75cc89ed81bbae16ec5164e792:password123");
     HT("MD5BASE64MD5MD5",        16, 0, compute_md5base64md5md5, "13331e53f7f30c8b4b989186ec1a6bfe:password123");
     HT("MD5BASE64MD5SHA1",      16, 0, compute_md5base64md5sha1, "d67002a4ca782e4f8b1d77049a179a60:password123");
@@ -27765,11 +27872,20 @@ static void init_hashtypes(void)
     HTV("DESCRYPT",    0, verify_descrypt, "..UZoIyj/Hy/c:password");
     HTV("BSDICRYPT",   0, verify_bsdicrypt, "_J9......I6Q/yEZj5OA:password123");
     HTV("MD5CRYPT",    0, verify_md5crypt, "$1$rndSa1t$Qprc9yqwxuXgLPGQYn8/M1:password123");
+    /* Vector uses the house salt and password123 so bertillon can strip the
+     * plaintext (Bert_plains[]) and measure the stored form; a password it
+     * does not recognise leaves the whole line measured as the hash, which
+     * is how the first draft of this row reported fields=2, salt_len=14.
+     * The live example this type was built from is
+     * $1$kKwJaW3X$DccD8UxNJ2wwKmsmNEUDU1:20100718193554, where the inner
+     * md5 is of the date string 20100718193554. */
+    HTV("MD5CRYPTMD5", 0, verify_md5cryptmd5, "$1$rndSa1t$hflGCQUqJm7K.D5kkg.091:password123");
     HTV("JUNIPERIVE",  0, verify_juniperive, "hn9NPzVmhLxotWISQlgcHIt7y1p5zPDZXqW5AGKrTSNi7lgSKXbXGCGVIgfwMDir8FuS+x0+4MxIfdErHoaZ6aDkvMuMSlYSXG8hvw==:password123");
     HTV("SHA256CRYPT",  0, verify_sha256crypt, "$5$rndSa1t$128qLp1GH7Qcc2/kyO/.6dtTlHHiHyRcNMAdCAFSjU1:password123");
     HTV("SHA512CRYPT",  0, verify_sha512crypt, "$6$rndSa1t$DOby8RCDS9bqigcwmpaMwAlFOxGdrhVKkZNgli1bqKDoKl0w62cJ3BF6ze4AF0vY3wvOj6iLJNUc.D45MxjTM0:password123");
     HTV("SHA512CRYPTMD5", 0, verify_sha512cryptmd5, "$6$rndSa1t$VEiMRPskJtV5DgDifIJPozJKKcU9qnofAewMbRvGQz0F5pG6kimj02ELUVsQOozdhtM1X8Qya4d9HzW7Wistg/:password123");
     HTV("MD5DESCRYPT",  0, verify_md5descrypt, "a090d5a8fd2dec240048fc92bf704dc0:..:password");
+    HTV("MD5USERDESCRYPT", 0, verify_md5userdescrypt, "324dadaa6fe669162c541da0b5597ba9:DX:Riederer:tennis");
     HTV("MD4DESCRYPT",  0, verify_md4descrypt, "1eecdf5abc568f7822aa9a00ff39e876:..:password");
     HTV("SHA1DESCRYPT", 0, verify_sha1descrypt, "4ac9fce4c379eeaafa815a81da1bd451be87ea52:..:password");
     HTV("MD4UTF16DESCRYPT", 0, verify_md4utf16descrypt, "6c29032ff65d0cab0b4f83cda5af788e:..:password");
@@ -28506,6 +28622,7 @@ static void init_hashtypes(void)
         { "MD5-3xMD5-MD5MD5MD5", (hashfn_t)compute_md5 },
         { "MD5-3xMD5-SHA1", (hashfn_t)compute_md5 },
         { "MD5BASE64", (hashfn_t)compute_md5 },
+        { "SHA256BASE64", (hashfn_t)compute_sha256 },
         { "MD5BASE64MD5", (hashfn_t)compute_md5 },
         { "MD5BASE64MD5MD5", (hashfn_t)compute_md5 },
         { "MD5BASE64MD5SHA1", (hashfn_t)compute_md5 },
