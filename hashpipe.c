@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.228 2026/10/29 02:20:16 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.229 2026/11/04 12:22:37 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.229  2026/11/04 12:22:37  dlr
+ * verify_rorails_sha1 accepts a salt of any width, matching mdxfind.c 1.657. The function required hashlen 81 and copied exactly 40 salt bytes, agreeing with hashcat module_27200.c and with nothing the algorithm does: restful_authentication joins its arguments with a double dash and never consults the width or alphabet of the salt. 40 hex is only what Rails make_token, itself a SHA-1 hexdigest, emits; an app that keeps the restful_authentication digest and swaps its token generator produced hashes this function reported as not this type. That is the common case: 1,707,447 of the 1,729,406 published 27200 records carry a 20-character mixed-case token against 20,502 with a 40-hex salt. The salt is now taken verbatim as everything after the colon, with no case folding and no hex validation, because a token salt is case-significant and is not hex. The 40 hex characters of the HASH half are now validated, which they were not: the old length-only gate passed a non-hex hash straight into hex2bin. A bounds check keeps both operands plus the six delimiter bytes inside WS_GP_SIZE. Measured on the full corpus: 20,501 lines verified before, 1,727,898 after, with the remaining 1,076 correctly recognised as SHA1SALTPASS, the same construction attacked as mode 120 with the delimiters folded into the salt field. Self-test 1061 passed 0 failed 2 skipped, hashcat own published 27200 vector verifies, and the three malformed shapes, missing colon, short hash and non-hex hash, are all still rejected.
+ *
  * Revision 1.228  2026/10/29 02:20:16  dlr
  * Make complete bench_rates coverage a release gate, and state the real failure mode at init_rates. bench_rates.h 1.19 measures e1060 MD5USERDESCRYPT at 187152 and e1061 MD5CRYPTMD5 at 4248 on dev1, the last two registered types with no entry, so the table now covers e1 through e1062 in 1061 entries; the only absences are e0 NONE and e426 PARALLEL, which have no test vector to benchmark and which hashpipe -h does not list either, so the coverage check needs no exception list. e1062 was re-measured in the same run at 4681357, replacing 5019723 from a separate run. The annotation this revision adds is the content. 1.216 recorded that a missing entry only kills the -L cost guard; that is true and it is not the serious half. init_rates defaults an unmeasured type to rate 1 and the fast identification passes skip anything below AUTODETECT_RATE_MIN of 1000 as a slow KDF. Try 5 and Try 6 were written to pick up that skipped band, but both compute at base_depth with no iteration, so an unmeasured type is recoverable at x01 and unreachable at every deeper round. The type therefore passes -m eNNNN, -c, the labelled path AND an unhinted line at x01, which is every test anyone thinks to run, and fails silently only on an unhinted line at x02 or below. e1060 and e1061 shipped in 1.227 that way. The comment now carries the one-line coverage check to run before publishing. Note the guard is hashpipe only: AUTODETECT_RATE_MIN does not exist in mdxfind.c, which reads the same table for rate-based lineswanted batch scheduling, so there a missing entry costs throughput on that type rather than correctness. Verified: all three resolve unhinted after the change, e1061 and e1060 from their self-test vectors and e1062 at x02 against an mdxfind -z reference; self-test 1061 passed, 0 failed, 2 skipped, unchanged; coverage check prints nothing.
  *
@@ -20311,7 +20314,18 @@ static int verify_sqlcipher(const char *hashstr, int hashlen,
 
 /* RORAILS-SHA1 (e962, hashcat mode 27200)
  * Ruby on Rails Restful Auth: SHA1("--" + salt + "--" + pass + "--")
- * Format: 40hex:40hex (hash:salt) */
+ * Format: 40hex:salt -- the salt is ANY width, taken verbatim.
+ *
+ * hashcat's module_27200.c pins the salt token to 40 characters of hex, and
+ * this function used to agree with it. Neither matches what the algorithm
+ * does: restful_authentication joins its arguments with "--" and never looks
+ * at the salt's width or alphabet. 40 hex is only what Rails' own make_token
+ * happens to emit, and an app that swapped its token generator keeps the same
+ * digest with a salt of some other shape -- the published 27200 corpus is
+ * mostly 20-character mixed-case tokens. Those verified as "not this type".
+ *
+ * The salt is used verbatim: no case folding, no hex validation. A token salt
+ * is case-significant and is not hex. */
 static int verify_rorails_sha1(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -20319,15 +20333,20 @@ static int verify_rorails_sha1(const char *hashstr, int hashlen,
     unsigned char *computed = (unsigned char *)WS->ctx2;
     char *buf = WS->gp1;
 
-    /* Format: 40hex_hash:40hex_salt */
-    if (hashlen != 81) return 0;
+    /* Format: 40hex_hash ':' salt */
+    if (hashlen < 41) return 0;
     if (hashstr[40] != ':') return 0;
+    { int _h; for (_h = 0; _h < 40; _h++)
+        if (!isxdigit((unsigned char)hashstr[_h])) return 0; }
+    int saltlen = hashlen - 41;
+    /* 6 delimiter bytes plus both operands must fit the workspace buffer. */
+    if (saltlen + passlen + 6 > WS_GP_SIZE) return 0;
     hex2bin(hashstr, 40, expected);
     const char *salt = hashstr + 41;
     /* Build: "--" + salt + "--" + pass + "--" */
     int pos = 0;
     buf[pos++] = '-'; buf[pos++] = '-';
-    memcpy(buf + pos, salt, 40); pos += 40;
+    memcpy(buf + pos, salt, saltlen); pos += saltlen;
     buf[pos++] = '-'; buf[pos++] = '-';
     memcpy(buf + pos, pass, passlen); pos += passlen;
     buf[pos++] = '-'; buf[pos++] = '-';
