@@ -242,7 +242,7 @@ to stderr. **The two streams are the result.**
 |---|---|
 | `-c` | verify each line against its OWN leading TYPE label only. No detection, no fallback. ~240:1 faster than identification on an iterated salted type. |
 | `-m spec` | strict FILTER, not a hint. Append `auto` whenever the type is uncertain, or an omitted type under-reports silently. |
-| `-L N` | max estimated seconds per verify, **default 1000**. A SKIPPED verify is reported exactly like a FAILED one — line to stderr, no distinguishing diagnostic. Raise for scrypt, Argon2, high-cost bcrypt. |
+| `-L N` | max estimated seconds per verify, **default 1000**. A SKIPPED verify is reported exactly like a FAILED one — line to stderr, no distinguishing diagnostic. No real hash type exceeds the default, so by default no hash is excluded; lower it (e.g. 0.1) to skip long-running hashes. |
 | `-s file` | **DUAL USE, no diagnostic**: statistics filename in a normal run, the hx salt value in `-X`/`-F` expression mode. Not both. |
 | `-T` / `-G` | self-tests over every registered type. Run FIRST after any build. |
 | `-N` | type table as TSV: index, name, hashcat modes, flag letters, self-test vector. |
@@ -307,7 +307,7 @@ the line decides it.
 | `Working on hash types: MD5` and nothing else | no `-m`/`-h`/`-M` reached before the file | reorder: selection BEFORE `-F`/`-J` |
 | run completes, `None found, sorry!`, too few lines processed | one over-long line ended the dictionary read | `LC_ALL=C awk 'length($0)>0 && length($0)<=256'` |
 | whole file matches nothing, presents as a wrong wordlist | CRLF list against LF candidates | `bertillon -p` reports it; `file list.txt` |
-| a type "is not registered" | it was SKIPPED FOR COST — same message | raise `-L`; `bertillon --gate` sets it from the work factor |
+| a type "is not registered" under a lowered `-L` | it was SKIPPED FOR COST — same message | drop the `-L`; at the default a skip means a wrong bench_rates.h rate, a defect to report |
 | gate line comes back bare | three indistinguishable causes, in this order: password wrong; fields in wrong order; construction not registered | for the last, write it in `hx` + a `userdef` entry. A wider search will NOT find it. |
 | a verified line, but candidates derived from it yield nothing | **salt folded into the password field.** Verifies perfectly, so verification cannot catch it. Every recorded plaintext carries the salt. | `bertillon -p`. It reports a run only where EVERY record shares it, so it sees a CONSTANT salt and is blind to one that VARIES — two hex characters over 256 values share no run. Silence there is not a negative. |
 | `bertillon` answers `NOTHING to try` for a value `hashpipe` identifies | **version skew.** `bertillon` and `hashpipe` are ONE binary reached two ways. They cannot disagree unless they are different builds. | run both on the same line; `command -v hashpipe bertillon`; compare md5 |

@@ -38,7 +38,7 @@ hashpipe -X 'expr' | -F progfile [-p pass] [-s salt] [-S salt2] [-P pepper] [-u 
 
 **`-s F`** — Append statistics to file.  Writes three tables at exit: hot list hits (per algorithm/salt-length pair), per-algorithm try counts, and per-algorithm solution counts.  Stats are collected unconditionally; this option controls whether they are written out.
 
-**`-L secs`** — Maximum estimated time, in seconds, for a single iterated verify (default: 1000).  When an input hash specifies an iteration count that would exceed this limit — estimated from the benchmark rates — the verify is skipped.  This prevents a misidentified hash with an extreme iteration count from stalling the run.  Note that a skipped verify is reported as unresolved on stderr with no diagnostic distinguishing it from a genuine non-match, so a run that finds nothing may simply have declined to try; raise the limit when working with deliberately expensive types.
+**`-L secs`** — Maximum estimated time, in seconds, for a single iterated verify (default: 1000).  When an input hash specifies an iteration count that would exceed this limit — estimated from the benchmark rates — the verify is skipped.  This prevents a misidentified hash with an extreme iteration count from stalling the run.  Note that a skipped verify is reported as unresolved on stderr with no diagnostic distinguishing it from a genuine non-match, so a run that finds nothing under a lowered limit may simply have declined to try.  No real hash type exceeds the default, so by default no hash is excluded; lower `-L` (for example to 0.1) to skip long-running hashes deliberately.
 
 **`-b S`** — Benchmark selected types (e.g., `-b e1-e10,e15`)
 

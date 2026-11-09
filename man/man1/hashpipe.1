@@ -1,6 +1,15 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.15 $
+.\" $Revision: 1.18 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.18  2026/11/09 21:45:23  dlr
+.\" TH version to hashpipe 1.230; it still named 1.219.
+.\"
+.\" Revision 1.17  2026/11/09 18:44:31  dlr
+.\" EXAMPLES: replace the -L 100000 memory-hard example with -L 0.1, the deliberate use of the limit; the default excludes no hash.
+.\"
+.\" Revision 1.16  2026/11/09 18:41:46  dlr
+.\" -L: document the default as excluding no hash. The estimate is the type benchmark rate scaled by the parsed cost; no type exceeds 1000 s, so a user lowers -L, e.g. to 0.1, to skip long hashes deliberately. The 0.00 s tell applies to a lowered limit.
+.\"
 .\" Revision 1.15  2026/10/03 15:12:48  dlr
 .\" Document the salt-field rule, and bump TH to 1.219.
 .\"
@@ -69,7 +78,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-10-03" "hashpipe 1.219" "Password Recovery"
+.TH HASHPIPE 1 "2026-11-09" "hashpipe 1.230" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -276,13 +285,16 @@ A verify whose estimated cost exceeds this limit is
 .I skipped,
 and a skipped verify is reported exactly like a failed one: the line goes to
 standard error as unresolved and the run reports nothing found.  There is no
-distinguishing diagnostic.  Memory-hard and high-round types \(em scrypt,
-Argon2, high-cost bcrypt, and anything with a parsed cost far above its
-benchmark cost \(em routinely trip the default and need
-.B \-L
-raised explicitly.
+distinguishing diagnostic.
 .IP
-The tell is wall-clock time.  If a verify of an expensive hash returns in
+The estimate is the benchmark rate for the type, scaled by the cost parsed
+from the hash.  No hash type exceeds the default, so by default no hash is
+excluded.  Set
+.B \-L
+lower, for example to 0.1 or less, to skip long-running hashes deliberately.
+.IP
+With a lowered limit, the tell is wall-clock time.  If a verify of an
+expensive hash returns in
 about 0.00 seconds, it did not run.  Time a single candidate before
 believing any negative result on a slow type.
 .BR mdxfind (1)
@@ -651,13 +663,11 @@ hashpipe \-m e1,e8,1000,auto < pairs.txt
 .fi
 .RE
 .PP
-Verify an expensive memory-hard type.  Without
-.BR \-L ,
-this reports nothing found in no time at all:
+Skip any verify estimated to take longer than a tenth of a second:
 .PP
 .RS
 .nf
-hashpipe \-m e1001 \-L 100000 < cmiyc.txt
+hashpipe \-L 0.1 < pairs.txt
 .fi
 .RE
 .PP
