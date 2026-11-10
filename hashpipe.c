@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.229 2026/11/04 12:22:37 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.230 2026/11/09 21:46:51 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.230  2026/11/09 21:46:51  dlr
+ * Release carrying ruleproc32.c 1.20 and rule_ops.h 1.5, which add the hashcat N rule; hashpipe uses only the UTF-32 conversions from those files, so no hashpipe behaviour changes. No code change in this file.
+ *
  * Revision 1.229  2026/11/04 12:22:37  dlr
  * verify_rorails_sha1 accepts a salt of any width, matching mdxfind.c 1.657. The function required hashlen 81 and copied exactly 40 salt bytes, agreeing with hashcat module_27200.c and with nothing the algorithm does: restful_authentication joins its arguments with a double dash and never consults the width or alphabet of the salt. 40 hex is only what Rails make_token, itself a SHA-1 hexdigest, emits; an app that keeps the restful_authentication digest and swaps its token generator produced hashes this function reported as not this type. That is the common case: 1,707,447 of the 1,729,406 published 27200 records carry a 20-character mixed-case token against 20,502 with a 40-hex salt. The salt is now taken verbatim as everything after the colon, with no case folding and no hex validation, because a token salt is case-significant and is not hex. The 40 hex characters of the HASH half are now validated, which they were not: the old length-only gate passed a non-hex hash straight into hex2bin. A bounds check keeps both operands plus the six delimiter bytes inside WS_GP_SIZE. Measured on the full corpus: 20,501 lines verified before, 1,727,898 after, with the remaining 1,076 correctly recognised as SHA1SALTPASS, the same construction attacked as mode 120 with the delimiters folded into the salt field. Self-test 1061 passed 0 failed 2 skipped, hashcat own published 27200 vector verifies, and the three malformed shapes, missing colon, short hash and non-hex hash, are all still rejected.
  *
