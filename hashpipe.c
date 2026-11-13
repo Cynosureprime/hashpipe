@@ -14,10 +14,16 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.230 2026/11/09 21:46:51 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.232 2026/11/13 13:13:09 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.232  2026/11/13 13:13:09  dlr
+ * Reword the 1.231 log entry to describe the algorithm and its verification only.
+ *
+ * Revision 1.231  2026/11/13 13:10:14  dlr
+ * Add e1063 SHA1PASSUSERPASSUSER, sha1(pass . user . pass . user), in parity with mdxfind.c. The digest is that of PHP sha1(str_repeat($password . $username, 2)), the user from the userid channel. Types[] appended at the end so the index is 1063 on both sides. verify_sha1passuserpassuser reads 40hex:username exactly as verify_useridcolonpass does, builds pass.user and doubles it in a WS slot with no stack buffer, and checks later rounds as sha1 of the previous round lowercase hex, as mdxfind iterates. An HTV vector from mdxfind -z, password123 with user administrator, 335cd5dbf936db96572b99341e3fb9aa624f2215, which an independent python computation reproduces. Self-test 1062 passed, 0 failed, up from 1061. Every line mdxfind prints for the type verifies, including usernames it writes as $HEX[]; an unlabelled hash:user:pass line resolves to e1063 at x01 and x02; a wrong password does not verify. bench_rates.h carries a measured rate for the type, so the coverage gate is complete.
+ *
  * Revision 1.230  2026/11/09 21:46:51  dlr
  * Release carrying ruleproc32.c 1.20 and rule_ops.h 1.5, which add the hashcat N rule; hashpipe uses only the UTF-32 conversions from those files, so no hashpipe behaviour changes. No code change in this file.
  *
@@ -2412,6 +2418,7 @@ char *Types[] = {
     "MD5USERDESCRYPT",
     "MD5CRYPTMD5",
     "SHA256BASE64",
+    "SHA1PASSUSERPASSUSER",
 
 NULL
 
@@ -21205,6 +21212,42 @@ static int verify_sha1usercolonpass(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 { return verify_useridcolonpass(hashstr, hashlen, pass, passlen, 0); }
 
+/* SHA1PASSUSERPASSUSER (e1063): SHA1(pass + user + pass + user)
+ * Format "40hex:username", as SHA1USERCOLONPASS. Iteration past x01 is
+ * sha1 of the previous round's lowercase hex, as mdxfind does. */
+static int verify_sha1passuserpassuser(const char *hashstr, int hashlen,
+    const unsigned char *pass, int passlen)
+{
+    unsigned char *expected = (unsigned char *)WS->ctx1;
+    unsigned char *digest   = (unsigned char *)WS->ctx2;
+    char *hexbuf = (char *)WS->gp1;
+    char *buf    = (char *)WS->gp2;
+    const char *colon, *user;
+    int half, userlen, iter;
+
+    colon = memchr(hashstr, ':', hashlen);
+    if (!colon || colon - hashstr != 40) return 0;
+    if (hex2bin(hashstr, 40, expected) != 20) return 0;
+    user = colon + 1;
+    userlen = hashlen - 41;
+    if (userlen < 0) return 0;
+    half = passlen + userlen;
+    if (2 * half > (int)WS_GP_SIZE) return 0;
+
+    memcpy(buf, pass, passlen);
+    memcpy(buf + passlen, user, userlen);
+    memcpy(buf + half, buf, half);
+
+    SHA1((unsigned char *)buf, 2 * half, digest);
+    if (memcmp(digest, expected, 20) == 0) { WS->verify_iter = 1; return 1; }
+    for (iter = 2; iter <= Maxiter; iter++) {
+        prmd5(digest, hexbuf, 40);
+        SHA1((unsigned char *)hexbuf, 40, digest);
+        if (memcmp(digest, expected, 20) == 0) { WS->verify_iter = iter; return 1; }
+    }
+    return 0;
+}
+
 /* MD5USERMD5PASSSALT (e1011): md5(user . md5(pass) . salt)  — John dynamic_15
  *   hashstr "32hex:salt:user"
  * Splits the tail on its FIRST colon, matching mdxfind's combined-salt
@@ -27955,6 +27998,7 @@ static void init_hashtypes(void)
     HTV("MANGOS",        0, verify_mangos, "716717f7db22169656a82f9c35fe0537458c90c7:Admin:password123");
     HTV("SHA1UCUSERPASS", 0, verify_sha1ucuserpass, "ed62e880d893dfe7f953000951602ce7932e8503:administrator:password123");
     HTV("SHA1USERCOLONPASS", 0, verify_sha1usercolonpass, "0c0a719f6d39e6685856e8aef8317a41800bbe99:administrator:password123");
+    HTV("SHA1PASSUSERPASSUSER", 0, verify_sha1passuserpassuser, "335cd5dbf936db96572b99341e3fb9aa624f2215:administrator:password123");
     HTV("MD5USERMD5PASSSALT", 0, verify_md5usermd5passsalt, "77700f6a12d5939b42df03fa313055c2:aaaSXB:administrator:password123");
     HTV("YAF-SHA1",      0, verify_yafsalt, "YUP9EPH6qT7jBfUkagiaK2Np0lk= AQIDBA==:password123");
     HTV("PROGRESSENCODE",0, verify_progressencode, "abajejaayicndEbj:password123");
