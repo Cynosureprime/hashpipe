@@ -2,6 +2,37 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.30  2026/11/16 07:08:43  dlr
+ * bertillon: the depth column is the depth actually verified, for every type. A verify type reports the depth its verify function reached, through hash_verify (which clears verify_iter first and decodes a $HEX[] salt), instead of a fixed x01. Iteration case: a plain type keeps exact case, so MD5 and MD5UC stay distinct; a salted or composed UC type tries both lower- and upper-case iteration hex and compares without regard to case, since HTF_UC does not say which the iteration uses (SHA1UCWRL iterates lower, MD5UCBASE64MD5RAW upper). Verified: SHA1USERCOLONPASS x03 and MD5CAP x02 report x03 and x02; SHA1UCWRL and MD5UCBASE64MD5RAW resolve at x01 to x03; a wrong password, a wrong user and a random digest verify nothing; self-test 1062 passed 0 failed 2 skipped.
+ *
+ * Revision 1.29  2026/11/16 04:56:06  dlr
+ * bertillon: report the verified iteration depth as a separate TSV column.
+ *
+ * bert_verify_one now returns the depth at which the pair matched (1 == x01)
+ * instead of a bool, and the VERIFIED line gains an x%02d field. The depth is
+ * measured by bert_iter_match, not reconstructed from a label, so it stays an
+ * identification and nothing mdsplit would ingest as a founds line. Previously a
+ * value needing iteration (e.g. three rounds) verified but reported only the base
+ * type, giving no sign iteration was involved.
+ *
+ * Revision 1.28  2026/11/16 02:32:17  dlr
+ * bertillon single-value gate: sweep the iteration axis for compute candidates.
+ *
+ * The identification gate computed each compute type once and compared the x01
+ * digest, while the detection path (verify_item) iterates the outermost hash to
+ * Maxiter, so an xNN>1 value whose base type WAS in the candidate list reported
+ * no match -- GOSTHEXSALTx03 the reported case. New bert_iter_match mirrors the
+ * verify_item ModeList step: salt or alt base applied once at x01, outermost hash
+ * re-applied over the hex 2..Maxiter, raw-digest variant for ITER_RAW, and the
+ * per-family iter-fn fallback (plain unsalted re-runs compute; salted or composed
+ * use the registered outer hash, else hash_by_len). It replaces the single
+ * compute in bert_verify_one. Verify types are unaffected: their verify functions
+ * already walk the chain internally.
+ *
+ * Verified: self-test 1062 passed 0 failed 2 skipped; the reported line resolves
+ * to e186 GOSTHEXSALT; MD5x03, SHA1x02 and SHA256x05 positive controls resolve;
+ * a wrong password, a wrong salt and a random digest all report not solved.
+ *
  * Revision 1.27  2026/10/15 12:40:30  dlr
  * A tag match pins the type, so the cost tier does not apply to it. The tier answers whether a bulk crack is affordable, which is the right question for a bare digest and the wrong one once the input names its own family: identifying a 1$salt$hash as md5crypt costs one hash, not 1000 per candidate. Before this a 1$ value reported 16 types at the easy tier, every one of them unable to produce a leading dollar at all, while MD5CRYPT sat among the 37 counted as costing more than the tier allows and surfaced only at --tier hard among 53; the operator saw a confident list with the right answer absent. The pin only ever ADDS, and only to a row the input itself selected, so it cannot hide a type the way cutting the untagged rows would; the tag being a sample rather than a specification argues against REJECTING on it, not against trusting a positive match. --only names one band explicitly and keeps its exact meaning. Also adds bert_tag_match, which treats the bcrypt version byte as a variant rather than a discriminator, since dollar-2a, 2b, 2x and 2y are one stored format read by one parser and a row carries whichever its sample held. It is used at the shape cut as well as the pin, because that cut runs first and a rejected variant never reaches the pin. Deliberately narrow: that is the only prefix family in the table whose varying byte is known to be a version. Measured: 1$ now reports 18 at the easy tier including e511 and e1061, with a line saying which were admitted over the tier and why; all four bcrypt spellings resolve identically where 2y previously matched no bcrypt type; dollar-H$ gains e455 and e537. Untagged input is unchanged at 195, 271 and 274 types across the three tiers, byte-identical to the released binary. Self-test 1060 passed 0 failed. JUNIPERIVE still needs --tier hard for a 1$ value: it accepts that prefix at the parse but advertises a 104-char AES blob as its sample, so there is no tag to match.
  *
@@ -1676,6 +1707,91 @@ keep:
  * the answer was one compute away. "SOLVED -- a line on stdout with its type.
  * Done. No reduction was needed and none should be printed." (10a.1b)
  */
+/*
+ * Sweep the iteration axis for a COMPUTE candidate exactly as hashpipe's own
+ * verify_item() does, instead of comparing a single x01 digest.
+ *
+ * bert_verify_one used to call hash_compute() once and compare, while
+ * hashpipe's detection iterates the outermost hash up to Maxiter (the -i
+ * default of 128).  The correct base type was therefore already in the
+ * candidate list yet never matched for any xNN>1 value -- GOSTHEXSALTx03 the
+ * reported case -- so bertillon returned a confident "none matched" that
+ * hashpipe contradicted.  Verify types are unaffected: their verify functions
+ * already walk the chain internally, which is why bcrypt and the rest resolve.
+ *
+ * This mirrors verify_item()'s ModeList step, including the detail that the
+ * iteration-function fallback DIFFERS by family: a plain unsalted type
+ * re-applies its own compute (iterating MD4 means re-running MD4), but a
+ * salted or composed type must NOT -- that would re-apply the salt or the
+ * inner steps -- so it uses the registered outermost hash and, lacking one,
+ * hash_by_len by width, matching the salted and composed branches in
+ * verify_item() (hashpipe.c ~31236 and ~31174).
+ *
+ * Case: for a PLAIN type the case is part of the stored form (MD5 and MD5UC
+ * are separate types), so a UC type renders and iterates uppercase and the
+ * compare is exact.  For a salted or composed type HTF_UC does not say which
+ * case the iteration uses -- SHA1UCWRL iterates over lower-case hex,
+ * MD5UCBASE64MD5RAW over upper-case -- so such a type tries both, as the
+ * hinted path in verify_item() does, and compares without regard to case
+ * (mdxfind emits both in lower case).  Returns the
+ * matching depth (>=1) or 0; the caller reports it as its own column.
+ */
+static int bert_iter_match(struct hashtype *ht,
+                           const unsigned char *pass, int passlen,
+                           const unsigned char *salt, int saltlen,
+                           const char *digest)
+{
+    unsigned char iterbuf[MAX_HASH_BYTES], computed[MAX_HASH_BYTES];
+    char hexout[MAX_HASH_BYTES * 2 + 1];
+    int fullbytes = ht->hashlen, iter, b;
+    int plain = !(ht->flags & (HTF_SALTED | HTF_COMPOSED));
+    int uc, ucmax = (!plain && (ht->flags & HTF_UC)) ? 1 : 0;
+    hashfn_t itf = ht->iter_fn  ? ht->iter_fn  :
+                   ht->outer_fn ? ht->outer_fn :
+                   plain        ? ht->compute  : NULL;
+
+    if (fullbytes <= 0 || fullbytes > MAX_HASH_BYTES) return 0;
+
+    for (uc = 0; uc <= ucmax; uc++)
+    for (b = 0; b < 3; b++) {
+        int upper = plain ? (ht->flags & HTF_UC) != 0 : uc;
+        if (b == 1 && !ht->compute_alt)  continue;
+        if (b == 2 && !ht->compute_alt2) continue;
+        /* x01 seed -- salt (and any chain) applied ONCE, as hash_compute does.
+         * A multi-emit type (HT_ALT/HT_ALT2) emits more than one digest per
+         * password; seed from each so an alt shape is not stuck at base depth. */
+        if      (b == 0) hash_compute(ht, pass, passlen, salt, saltlen, iterbuf);
+        else if (b == 1) ht->compute_alt(pass, passlen, salt, saltlen, iterbuf);
+        else             ht->compute_alt2(pass, passlen, salt, saltlen, iterbuf);
+
+        for (iter = 1; iter <= Maxiter; iter++) {
+            if (upper) prmd5UC(iterbuf, hexout, fullbytes * 2);
+            else       prmd5(iterbuf, hexout, fullbytes * 2);
+            hexout[fullbytes * 2] = '\0';
+            if ((plain ? strcmp(hexout, digest) : strcasecmp(hexout, digest)) == 0)
+                return iter;
+
+            /* Advance one depth: iterate the OUTERMOST hash over the hex, or
+             * the raw binary digest for an HTF_ITER_RAW type. */
+            if (ht->flags & HTF_ITER_RAW)
+                hash_by_len(fullbytes, iterbuf, fullbytes, computed);
+            else if (itf)
+                itf((unsigned char *)hexout, fullbytes * 2, NULL, 0, computed);
+            else
+                hash_by_len(fullbytes, (unsigned char *)hexout, fullbytes * 2, computed);
+
+            memcpy(iterbuf, computed, fullbytes);
+        }
+    }
+    return 0;
+}
+
+/*
+ * Returns the iteration DEPTH at which the pair verified (1 == x01), or 0 for
+ * no match. A verify type walks the chain inside its own verify function and
+ * reports the depth in WS->verify_iter; one that does not iterate leaves it 0,
+ * which is the base depth.
+ */
 static int bert_verify_one(const struct bert_row *r,
                            const char *stored, int storedlen,
                            const char *digest,
@@ -1699,26 +1815,21 @@ static int bert_verify_one(const struct bert_row *r,
         char tmp[512];
         if (storedlen >= (int)sizeof(tmp)) return 0;
         memcpy(tmp, stored, storedlen); tmp[storedlen] = '\0';
-        return ht->verify(tmp, storedlen, pass, passlen) ? 1 : 0;
+        /* hash_verify, not ht->verify: it clears verify_iter first (not every
+         * verify function assigns it) and decodes a $HEX[] salt. */
+        if (!hash_verify(ht, tmp, storedlen, pass, passlen)) return 0;
+        return WS->verify_iter > 0 ? WS->verify_iter : 1;
     }
     if (((ht->compute && ht->hashlen > 0) || ht->nchain > 0)
         && ht->hashlen <= MAX_HASH_BYTES) {
-        unsigned char dest[MAX_HASH_BYTES];
-        char hexout[MAX_HASH_BYTES * 2 + 1];
-        memset(dest, 0, sizeof(dest));
-        hash_compute(ht, pass, passlen, salt, saltlen, dest);
         /*
-         * Render in the type's OWN case and compare exactly. The self-test
-         * compares case-insensitively, which is right there because every type
-         * checks its own vector -- but a gate that ignores case makes MD5UC
-         * verify a lower-case digest, and hashpipe's real path reports only
-         * MD5. MD5 and MD5UC are separate registered types precisely because
-         * the case is part of the stored form.
+         * Sweep the iteration axis as hashpipe does, not a single x01 compute.
+         * The correct base type was already in the candidate list, but an
+         * xNN>1 value (GOSTHEXSALTx03) never matched because this gate stopped
+         * at depth one.  Case is handled inside bert_iter_match: exact for a
+         * plain type, so MD5 and MD5UC stay separately identifiable.
          */
-        if (ht->flags & HTF_UC) prmd5UC(dest, hexout, ht->hashlen * 2);
-        else                    prmd5(dest, hexout, ht->hashlen * 2);
-        hexout[ht->hashlen * 2] = '\0';
-        return strcmp(hexout, digest) == 0;
+        return bert_iter_match(ht, pass, passlen, salt, saltlen, digest);
     }
     return 0;
 }
@@ -1744,6 +1855,7 @@ static int bert_gate_reading(const char *whole, const char *stored,
         struct bert_row *r = &Bert_rows[i];
         int ti = (r->id[0] == 'e') ? atoi(r->id + 1) : -1;
         int has_verify = (ti >= 0 && ti < Numtypes && Hashtypes[ti].verify) ? 1 : 0;
+        int depth;
         if (r->udef) continue;
         /*
          * The tag is a SAMPLE, not a specification: it is whatever prefix that
@@ -1768,7 +1880,8 @@ static int bert_gate_reading(const char *whole, const char *stored,
         if (!r->tag[0] && !has_verify
             && !!strchr(r->flags, 's') != !!have_salt) continue;
         tried++;
-        if (bert_verify_one(r, stored, sl, digest, pass, passlen, salt, saltlen)) {
+        depth = bert_verify_one(r, stored, sl, digest, pass, passlen, salt, saltlen);
+        if (depth) {
             /*
              * An IDENTIFICATION, deliberately NOT a found line.
              *
@@ -1776,15 +1889,21 @@ static int bert_gate_reading(const char *whole, const char *stored,
              * not a founds harvester. Emitting hashpipe's "MD5x01 hash:pass"
              * shape would invite mdsplit to ingest it, and getting the suffix
              * wrong splits the ledger: the same recovered hash filed under
-             * MD5SALT by one tool and MD5SALTx01 by another. An attempt at
-             * reproducing that suffix here got MD5SALT wrong on the first try,
-             * which is reason enough not to reproduce it at all. Founds come
-             * from hashpipe and mdxfind, which own the format.
+             * MD5SALT by one tool and MD5SALTx01 by another. Founds come from
+             * hashpipe and mdxfind, which own that format.
+             *
+             * The iteration DEPTH is a separate matter. It is not reconstructed
+             * from a label -- bert_verify_one returns the depth at which the
+             * compute actually matched -- so it is ground truth, not the guess
+             * that once got MD5SALT wrong. Reporting it as its own TSV column
+             * keeps the non-found stance (no hash:pass, nothing mdsplit would
+             * ingest as a founds line) while no longer hiding that a value like
+             * GOSTHEXSALTx03 required three iterations to resolve.
              *
              * TSV, because the separator this whole exercise distrusts is the
              * colon, and a stored form is full of them.
              */
-            printf("VERIFIED\t%s\t%s\n", r->id, r->name);
+            printf("VERIFIED\t%s\t%s\tx%02d\n", r->id, r->name, depth);
             fflush(stdout);          /* keep the answer ahead of the receipt */
             hits++;
         }

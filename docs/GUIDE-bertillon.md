@@ -118,7 +118,7 @@ is printed:
 
     $ bertillon < solved.txt
     614ddb184f43854169db7941decabc42:%!!((^
-    VERIFIED	e1	MD5
+    VERIFIED	e1	MD5	x01
 
     bertillon: SOLVED as hash:plaintext -- 1 type(s) verified of 824 tried.
 
@@ -126,9 +126,9 @@ is printed:
 
     $ bertillon < collision.txt
     459c5c282e5e6c017f20cbdcc488b507c100bbaa:0000009611
-    VERIFIED	e8	SHA1
-    VERIFIED	e21	AICH
-    VERIFIED	e732	SHA1UTF7
+    VERIFIED	e8	SHA1	x01
+    VERIFIED	e21	AICH	x01
+    VERIFIED	e732	SHA1UTF7	x01
 
     bertillon: SOLVED as hash:plaintext -- 3 type(s) verified of 824 tried.
       3 types produce identical hash results for this input.
@@ -341,8 +341,8 @@ the same cost, and the same password *must* give the same result -- right? But
 this is the result of two different hash algorithms producing *similar* looking
 hashes. bertillon knows the difference:
 
-    VERIFIED	e450	BCRYPT
-    VERIFIED	e451	BCRYPTMD5
+    VERIFIED	e450	BCRYPT	x01
+    VERIFIED	e451	BCRYPTMD5	x01
 
 `BCRYPTMD5` is bcrypt over the MD5 of the password rather than over the
 password. Nothing in the stored form even hints at this, and both are `$2a$` at
@@ -357,7 +357,7 @@ byte:
     $2x$05$i/bXB/oO3QurEv2Tlx0WSuMF4fpAxSyOECrnh1fBUN2J3.QKXpRoO:password
     $2y$05$i/bXB/oO3QurEv2Tlx0WSuMF4fpAxSyOECrnh1fBUN2J3.QKXpRoO:password
 
-    VERIFIED	e450	BCRYPT        (all four)
+    VERIFIED	e450	BCRYPT        (all four)	x01
 
 `$2a$`, `$2b$`, `$2x$` and `$2y$` are bcrypt revisions, not different
 algorithms. PHP's `password_hash()` writes `$2y$` and most current libraries
@@ -368,9 +368,9 @@ nothing about what was hashed.
 32-character hex value is the one everybody reads on sight:
 
     $ echo '664fb595fdd4304eaec39789e22c8b96:1953' | bertillon
-    VERIFIED	e369	NTLM
-    VERIFIED	e496	MD4UTF16
-    VERIFIED	e786	NTLMH
+    VERIFIED	e369	NTLM	x01
+    VERIFIED	e496	MD4UTF16	x01
+    VERIFIED	e786	NTLMH	x01
 
     bertillon: SOLVED as hash:plaintext -- 3 type(s) verified of 824 tried.
 

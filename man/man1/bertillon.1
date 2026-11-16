@@ -343,12 +343,16 @@ A verification prints one line per type that reproduced the hash:
 .PP
 .RS
 .nf
-VERIFIED	e1	MD5
+VERIFIED	e1	MD5	x01
 .fi
 .RE
 .PP
-That is an identification \(em type number and name \(em and deliberately
-not a found line.
+The columns are the type number, the type name and the iteration depth at
+which the pair verified \(em
+.B x01
+for one round,
+.B x03
+for three.  That is an identification, and deliberately not a found line.
 .PP
 Under
 .B \-\-gate
@@ -531,7 +535,7 @@ A value carrying its plaintext is answered outright:
 .RS
 .nf
 $ ./bertillon < solved.txt
-VERIFIED	e1	MD5
+VERIFIED	e1	MD5	x01
 
 bertillon: SOLVED as hash:plaintext \-\- 1 type(s) verified of 723 tried.
 .fi
@@ -542,9 +546,9 @@ Three types reproducing one 40-character hex value:
 .RS
 .nf
 $ ./bertillon < collision.txt
-VERIFIED	e8	SHA1
-VERIFIED	e21	AICH
-VERIFIED	e732	SHA1UTF7
+VERIFIED	e8	SHA1	x01
+VERIFIED	e21	AICH	x01
+VERIFIED	e732	SHA1UTF7	x01
 
 bertillon: SOLVED as hash:plaintext \-\- 3 type(s) verified of 723 tried.
   3 types produce identical hash results for this input.
@@ -557,9 +561,9 @@ different constructions still reproduce the hash:
 .RS
 .nf
 $ ./bertillon 'df9e335fc1cdd7c5c38824a15b1e0acd:ox5:000015'
-VERIFIED	e31	MD5SALT
-VERIFIED	e286	MD5MD5USER
-VERIFIED	e517	MD5\-MD5PASS\-SALT
+VERIFIED	e31	MD5SALT	x01
+VERIFIED	e286	MD5MD5USER	x01
+VERIFIED	e517	MD5\-MD5PASS\-SALT	x01
 
 bertillon: SOLVED \-\- 3 type(s) verified of 413 tried. No candidate set.
   3 types produce identical hash results for this record.

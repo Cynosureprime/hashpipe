@@ -14,10 +14,31 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.232 2026/11/13 13:13:09 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.239 2026/11/16 12:31:29 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.239  2026/11/16 12:31:29  dlr
+ * Make -c keep the label on a verify-type line when the hot list holds a compute type that also matches it. The pre-hint hot fast path tries only non-verify types for a verify-type label, so under -c hot_label_ok() always rejects it, but the attempt has already rewritten the item salt, password and hash length; the later passes then saw a mangled line and could return the other type. Seen as SHA1MD51SALTMD5 lines with a one-character salt, which also verify as SHA1-MD5SALT, re-emitted as SHA1-MD5SALTx01, varying run to run with what the hot list held. The path is now skipped under -c, where it can accept nothing. Verified: SHA1-MD5SALT and SHA1MD51SALTMD5 lines mixed, 6 of 6 runs keep every label; full corpus -c 7232530 verified, identical over 3 runs; wrong-depth corpus 0 of 1559 accepted; wrongly typed lines still rejected; self-test 1062 passed 0 failed 2 skipped.
+ *
+ * Revision 1.238  2026/11/16 07:08:53  dlr
+ * Three UC variants whose name puts UC after the outer hash -- SHA1UCUTF16LE, MD5UCBASE64SHA1RAW and MD5UCBASE64MD5RAW -- are reached from, and lead back to, their base through an explicit table in find_uc_variant and find_uc_base, so an uppercase-fed value above x01 carries the UC type label instead of the base, which mdxfind cannot produce under the base. The -m pass for a UC type no longer excludes composed types, and both the plain pass and the -m UC pass seed from every registered base encoding, so the stripped base64 shape is no longer lost above x01. Measured on mdxfind output, -m: MD5UCBASE64MD5RAW 22 to 110 of 110, MD5BASE64MD5RAW 66 to 110, MD5UCBASE64SHA1RAW 11 to 55, SHA1UCUTF16LE 9 to 45 (the remaining 10 have ill-formed UTF-8 passwords, which both tools skip). Auto-detect: the 12 changed labels in a 4078-line per-label sample all now agree with mdxfind. -c over 7234793 lines verifies 7232530 before and after. Self-test 1062 passed 0 failed 2 skipped.
+ *
+ * Revision 1.237  2026/11/15 15:59:03  dlr
+ * A GPU kernel, library, function or pipeline that fails to build is fatal on both backends, with file:line, device, host and the build log; every fallback to another kernel, a degraded device or the CPU on a build failure is removed, with the code only those fallbacks reached. The MD5-family codegen kernel decodes masks with a 32-bit-limb mixed-radix peel (no 64-bit runtime divide), drops the mask-total loop, and inlines every outer helper, identical on OpenCL and Metal. hashpipe defines getentropy locally so it runs on glibc 2.19 hosts.
+ *
+ * Revision 1.236  2026/11/15 12:16:18  dlr
+ * mdxfind 1.675 / hashpipe 1.236: SHA1PASS-TRUNC, SHA1SHA1PASS-TRUNC1SALT and SHA1SHA1TRUNC-SHA1PASS-3 use the first min(len,3) password bytes (PHP substr) instead of reading past a short password. Crypto++ legacy/default records accept an empty site key. ARM SHA-1/256/512 and x86 SHA-1 hardware paths are safe for in-place calls. A 7z CRC confirmation overrides a padding failure when the whole stream is present. -b runs on the CPU. hashpipe KRB5PA23 accepts the empty password. hashcat mode 40026 maps to MD5SALTPASS.
+ *
+ * Revision 1.235  2026/11/15 08:06:24  dlr
+ * mdxfind 1.674 / hashpipe 1.235: 7z loaders read the 13-field (Delta filter) record and use its Delta distance in the CRC check; hashcat and John record forms both load. hashpipe verify_7zip moved to work-space slots. An ill-formed UTF-16 conversion (-b candidate, MSCACHE user) now skips the hash instead of hashing the raw bytes. hashpipe output write failures are fatal.
+ *
+ * Revision 1.234  2026/11/15 05:05:32  dlr
+ * Every type emits a -z line and is found for the empty password: SHA1_xSHA1psubp takes the empty prefix, the DECBASE64 types hash a valid empty decode while a failed decode still emits nothing, and the revBASE64x types accept an empty encoding. hashpipe UTF-16 conversion returns a negative value for ill-formed input, so an empty password verifies and ill-formed input is refused. 7ZIP -z with no archive loaded writes a record the password opens, and the 7z coder check reads the full filter nibble so DELTA plus LZMA streams verify.
+ *
+ * Revision 1.233  2026/11/14 22:14:31  dlr
+ * The GPU rules engine now covers every GPU type on OpenCL and Metal, including the crypt types, MD5MD5SALT and the MD5PASS family, with masks and iteration. The S rule is removed and the v rule runs on the GPU. Each GPU job covers exactly its own slice of the mask, and Metal mask jobs are chunked below 2^32. Unused Kernel-A test code and profiling knobs are removed. GPU dispatch and replay failures are fatal, and hash counts are accounted on every GPU path.
+ *
  * Revision 1.232  2026/11/13 13:13:09  dlr
  * Reword the 1.231 log entry to describe the algorithm and its verification only.
  *
@@ -860,11 +881,38 @@ static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.232 20
 #include <ctype.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <errno.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
 #endif
 #include <sys/time.h>
+
+/* OpenSSL 1.1.1's CSPRNG (libcrypto.a rand_unix.o) carries a WEAK undefined
+ * getentropy, which glibc supplies only from 2.25.  Unresolved, it survives
+ * the link as a versioned import and an older loader refuses the binary
+ * before main(): on an EGLIBC 2.19 host, a hashpipe built against a newer glibc died
+ * there with "version `GLIBC_2.25' not found".  A local definition binds
+ * the weak reference at link time.  mdxfind gets this from mymd5.c and
+ * mdindex from its own copy; hashpipe does not link mymd5.o (its procsaltbb
+ * needs mdxfind internals), so the definition is repeated here, as in
+ * mdindex.c.  mymd5.c's twin, explicit_bzero, is not referenced by this
+ * link and is not repeated.  macOS and Windows are excluded. */
+#if !defined(__APPLE__) && !defined(_WIN32)
+#include <fcntl.h>
+int getentropy(void *buf, size_t buflen)
+{
+    int     fd = open("/dev/urandom", O_RDONLY);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, buf, buflen);
+    close(fd);
+    return (n == (ssize_t)buflen) ? 0 : -1;
+}
+#endif
+
 #include "ruleproc32.h"
 #include <openssl/sha.h>
 #include "yarn.h"
@@ -1204,7 +1252,11 @@ static void blake2b_hash(unsigned char *out, size_t outlen,
 #define BATCH_BUFSIZE (1024 * 1024)
 #define MAX_HASH_BYTES 64   /* SHA-512 — max output of any hash function */
 #define MAX_INPUT_HASH (MAXLINE/2 + 16)  /* max binary bytes from input hex string */
-#define MAX_SALT_BYTES 256
+/* A salt is bounded by the line it came from and nothing else.  At 256 a
+ * longer salt was cut to its first 256 bytes, so the line could never verify.
+ * The three salt slots are heap (ws_init_rhash), and every compute that joins
+ * the salt to something else checks the sum against its WS slot size. */
+#define MAX_SALT_BYTES MAXLINE
 /* Must exceed the number of types reachable from the shortest digest width.
  * get_candidates_by_hashlen walks every hashlen at or above the input and
  * stops at this cap, so at 512 it silently dropped 217 of the 729 types a
@@ -1234,6 +1286,34 @@ static inline int verify_cost_exceeds(long long bench_rate, double bench_cost,
     if (bench_rate <= 0 || bench_cost <= 0.0) return 0;  /* no data */
     double est = (parsed_cost / bench_cost) / (double)bench_rate;
     return est > MaxVerifyLimit;
+}
+
+/* Write all of buf to fd, or die. A short or failed write of a result is a
+ * lost verdict that nothing downstream can detect, so it is fatal with
+ * file:line, operation, host and error (external-failures-are-fatal). Short
+ * writes loop; EINTR retries. */
+#define WRITE_ALL(fd, buf, n) hp_write_all((fd), (buf), (size_t)(n), __FILE__, __LINE__)
+static void hp_write_all(int fd, const void *buf, size_t n, const char *file, int line)
+{
+    const char *p = (const char *)buf;
+    while (n > 0) {
+        ssize_t w = write(fd, p, n);
+        if (w > 0) { p += w; n -= (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        {   int e = (w < 0) ? errno : 0;
+            char host[256];
+#ifdef _WIN32
+            const char *h = getenv("COMPUTERNAME");
+            snprintf(host, sizeof(host), "%s", h ? h : "?");
+#else
+            if (gethostname(host, sizeof(host)) != 0) strcpy(host, "?");
+            host[sizeof(host) - 1] = 0;
+#endif
+            fprintf(stderr, "FATAL %s:%d: write(fd %d, %zu bytes left) on %s: %s\n",
+                    file, line, fd, n, host, e ? strerror(e) : "wrote 0 bytes");
+            exit(1);
+        }
+    }
 }
 
 /* ---- Per-job workspace (heap-allocated, avoids stack overflow) ---- */
@@ -1873,6 +1953,7 @@ struct MapHashcat {
     {35500, 993},  /* 35500 | WordPress bcrypt(hmac-sha384($pass)) */
     {35600, 994},  /* 35600 | gost12512crypt */
     {35800, 992},  /* 35800 | Symfony Legacy SHA256 */
+    {40026, 394},  /* 40026 | PrestaShop - md5($salt.$pass) */
     {46100, 998},  /* 46100 | gost-yescrypt (team-local mode; not upstream hashcat) */
     {67000, 995},  /* 67000 | yescrypt */
     {65535, 65535}  /* EOF */
@@ -3157,18 +3238,17 @@ static void compute_md4(const unsigned char *pass, int passlen,
 
 /* UTF-8 -> UTF-16, via the conversions in ruleproc32.c -- the same ones
  * mdxfind.c uses, built on the utf8_to_utf32 that defines well-formed UTF-8 for
- * the -8 rule engine.  These keep their old signatures, so every caller is
- * unchanged, but the CONTRACT is now strict: ill-formed input returns 0 rather
- * than being silently shortened and converted around it.  That matters here
- * because hashpipe exists to agree with mdxfind, and mdxfind now refuses such a
- * candidate; //IGNORE made the two disagree, and disagreed between glibc and
- * macOS libiconv as well. */
+ * the -8 rule engine.  The contract is strict and the same as mdxfind's: the
+ * byte count, 0 for the EMPTY input, and a negative RULE32_ERR_* for ill-formed
+ * input (or no room) -- never a shortened conversion.  0 must not double as the
+ * failure value, or an empty password cannot verify and an ill-formed one
+ * verifies as if it were empty.  Every caller tests < 0. */
 static int utf8_to_utf16le(const unsigned char *src, int srclen,
     unsigned char *dst, int dstmax)
 {
     int n = utf8_to_utf16(src, srclen, dst, dstmax,
                           WS->u32a, WS_U32_COUNT, UTF16_LE);
-    return n < 0 ? 0 : n;
+    return n;
 }
 
 static int utf8_to_utf16be(const unsigned char *src, int srclen,
@@ -3176,7 +3256,7 @@ static int utf8_to_utf16be(const unsigned char *src, int srclen,
 {
     int n = utf8_to_utf16(src, srclen, dst, dstmax,
                           WS->u32a, WS_U32_COUNT, UTF16_BE);
-    return n < 0 ? 0 : n;
+    return n;
 }
 
 /* mdxfind's to_utf16le is a naive byte expansion -- each input byte becomes
@@ -3210,11 +3290,12 @@ static void compute_ntlm(const unsigned char *pass, int passlen,
     int u16len;
     (void)salt; (void)saltlen;
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE);
+    if (u16len < 0) { memset(dest, 0, 16); return; }
     rhash_msg(RHASH_MD4, utf16, u16len, dest);
 }
 
 /* UTF-16LE wrapper types: hash(utf16le(pass)) */
-#define MAKE_UTF16LE(fname, hash_fn) \
+#define MAKE_UTF16LE(fname, hash_fn, dsize) \
 static void compute_##fname(const unsigned char *pass, int passlen, \
     const unsigned char *salt, int saltlen, unsigned char *dest) \
 { \
@@ -3222,6 +3303,7 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     int _u16len; \
     (void)salt; (void)saltlen; \
     _u16len = utf8_to_utf16le(pass, passlen, _u16, WS_U16_SIZE); \
+    if (_u16len < 0) { memset(dest, 0, dsize); return; } \
     hash_fn(_u16, _u16len, NULL, 0, dest); \
 }
 
@@ -3264,11 +3346,11 @@ static void compute_sha512(const unsigned char *pass, int passlen,
 }
 
 /* UTF-16LE wrapper instantiations (must come after base hash functions) */
-MAKE_UTF16LE(md5utf16le, compute_md5)
-MAKE_UTF16LE(sha1utf16le, compute_sha1)
-MAKE_UTF16LE(sha256utf16le, compute_sha256)
-MAKE_UTF16LE(sha384utf16le, compute_sha384)
-MAKE_UTF16LE(sha512utf16le, compute_sha512)
+MAKE_UTF16LE(md5utf16le, compute_md5, 16)
+MAKE_UTF16LE(sha1utf16le, compute_sha1, 20)
+MAKE_UTF16LE(sha256utf16le, compute_sha256, 32)
+MAKE_UTF16LE(sha384utf16le, compute_sha384, 48)
+MAKE_UTF16LE(sha512utf16le, compute_sha512, 64)
 
 /* UTF-16BE wrappers */
 static void compute_sha1utf16be(const unsigned char *pass, int passlen,
@@ -3278,6 +3360,7 @@ static void compute_sha1utf16be(const unsigned char *pass, int passlen,
     int u16len;
     (void)salt; (void)saltlen;
     u16len = utf8_to_utf16be(pass, passlen, u16, WS_U16_SIZE);
+    if (u16len < 0) { memset(dest, 0, 20); return; }
     SHA1(u16, u16len, dest);
 }
 
@@ -3290,6 +3373,7 @@ static void compute_sha1utf16bez(const unsigned char *pass, int passlen,
     /* hx.8 e728: sha1(utf16be(pass) . "\x00") -- a single trailing NUL byte,
        not a full UTF-16 NUL code unit. */
     u16len = utf8_to_utf16be(pass, passlen, u16, WS_U16_SIZE - 2);
+    if (u16len < 0) { memset(dest, 0, 20); return; }
     u16[u16len++] = 0;
     SHA1(u16, u16len, dest);
 }
@@ -3302,6 +3386,7 @@ static void compute_sha1zutf16le(const unsigned char *pass, int passlen,
     (void)salt; (void)saltlen;
     u16[0] = 0;
     u16len = utf8_to_utf16le(pass, passlen, u16 + 1, WS_U16_SIZE - 1);
+    if (u16len < 0) { memset(dest, 0, 20); return; }
     SHA1(u16, u16len + 1, dest);
 }
 
@@ -3312,6 +3397,7 @@ static void compute_sha1ucutf16le(const unsigned char *pass, int passlen,
     int u16len;
     (void)salt; (void)saltlen;
     u16len = utf8_to_utf16le(pass, passlen, u16, WS_U16_SIZE);
+    if (u16len < 0) { memset(dest, 0, 20); return; }
     SHA1(u16, u16len, dest);
 }
 
@@ -4075,12 +4161,14 @@ static void compute_mscache(const unsigned char *pass, int passlen, const unsign
 
     /* NTLM = rhash_msg(RHASH_MD4, UTF16LE(pass)) */
     u16plen = utf8_to_utf16le(pass, passlen, u16pass, WS_U16_SIZE);
+    if (u16plen < 0) { memset(dest, 0, 16); return; }
     rhash_msg(RHASH_MD4, u16pass, u16plen, ntlm);
 
     /* lowercase salt/username, then UTF16LE */
     for (i = 0; i < saltlen && i < MAXLINE - 1; i++)
         lcsalt[i] = tolower(salt[i]);
     u16slen = utf8_to_utf16le(lcsalt, i, u16salt, WS_U16_SIZE);
+    if (u16slen < 0) { memset(dest, 0, 16); return; }
 
     /* rhash_msg(RHASH_MD4, ntlm + UTF16LE(lc(salt))) */
     ctx = rhash_init(RHASH_MD4);
@@ -4691,6 +4779,7 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     int _u16len; \
     rhash _ctx; \
     _u16len = utf8_to_utf16le(pass, passlen, _u16, WS_U16_SIZE); \
+    if (_u16len < 0) { memset(dest, 0, rhash_get_digest_size(hash_id)); return; } \
     _ctx = rhash_init(hash_id); \
     rhash_update(_ctx, _u16, _u16len); \
     rhash_update(_ctx, salt, saltlen); \
@@ -4705,6 +4794,7 @@ static void compute_##fname(const unsigned char *pass, int passlen, \
     int _u16len; \
     rhash _ctx; \
     _u16len = utf8_to_utf16le(pass, passlen, _u16, WS_U16_SIZE); \
+    if (_u16len < 0) { memset(dest, 0, rhash_get_digest_size(hash_id)); return; } \
     _ctx = rhash_init(hash_id); \
     rhash_update(_ctx, salt, saltlen); \
     rhash_update(_ctx, _u16, _u16len); \
@@ -6109,7 +6199,7 @@ static void compute_sha1revbase64x_outer(const unsigned char *pass, int passlen,
     int outer = salt_to_int(salt, saltlen);
     for (i = 0; i < outer; i++) {
         int blen = base64_encode(cur, curlen, b64, MAXLINE);
-        if (blen <= 0 || blen >= MAXLINE) { memset(dest, 0, 20); return; }
+        if (blen >= MAXLINE) { memset(dest, 0, 20); return; }
         /* reverse into rev */
         {
             int j;
@@ -6507,7 +6597,7 @@ static void compute_md4utf16revbase64x(const unsigned char *pass, int passlen,
     int outer = salt_to_int(salt, saltlen);
     for (i = 0; i < outer; i++) {
         int blen = base64_encode(cur, curlen, b64, MAXLINE);
-        if (blen <= 0 || blen >= MAXLINE) { memset(dest, 0, 16); return; }
+        if (blen >= MAXLINE) { memset(dest, 0, 16); return; }
         {
             int j;
             for (j = 0; j < blen; j++) rev[blen - 1 - j] = b64[j];
@@ -8583,7 +8673,7 @@ static int verify_ntlmh(const char *hashstr, int hashlen,
 
     /* Path 1: iconv //IGNORE — proper UTF-8→UTF-16LE, bad bytes discarded */
     u16len = utf8_to_utf16le(pass, passlen, u16buf, WS_U16_SIZE);
-    if (u16len > 0) {
+    if (u16len >= 0) {
         rhash_msg(RHASH_MD4, u16buf, u16len, result);
         if (memcmp(result, target, 16) == 0) return 1;
     }
@@ -10178,7 +10268,7 @@ static void compute_md5decbase64(const unsigned char *pass, int passlen, const u
     int dlen;
     (void)salt; (void)saltlen;
     dlen = base64_decode((const char *)pass, passlen, decoded, WS_GP_SIZE);
-    if (dlen <= 0) { memset(dest, 0, 16); return; }
+    if (dlen <= 0 && passlen != 0) { memset(dest, 0, 16); return; }
     rhash_msg(RHASH_MD5, decoded, dlen, dest);
 }
 
@@ -10190,7 +10280,7 @@ static void compute_sha1decbase64(const unsigned char *pass, int passlen,
     int dlen;
     (void)salt; (void)saltlen;
     dlen = base64_decode((const char *)pass, passlen, decoded, WS_GP_SIZE);
-    if (dlen <= 0) { memset(dest, 0, 20); return; }
+    if (dlen <= 0 && passlen != 0) { memset(dest, 0, 20); return; }
     SHA1(decoded, dlen, dest);
 }
 
@@ -12741,7 +12831,7 @@ static int verify_peoplesoft(const char *hashstr, int hashlen,
 
     if (hashlen != 28) return 0;
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
     SHA1(utf16, u16len, sha1);
     b64_encode(sha1, 20, b64);
     return memcmp(b64, hashstr, 28) == 0;
@@ -13363,7 +13453,7 @@ static int verify_mssql2000(const char *hashstr, int hashlen,
 
     /* Case-sensitive SHA1: SHA1(UTF16LE(pass) + salt) — check offset _off+8 */
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
     memcpy(utf16 + u16len, salt_bin, 4);
     SHA1(utf16, u16len + 4, sha1);
     prmd5(sha1, hex, 40);
@@ -13398,7 +13488,7 @@ static int verify_mssql2005(const char *hashstr, int hashlen,
     if (hex2bin(hashstr + _off, 8, salt_bin) != 4) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
     memcpy(utf16 + u16len, salt_bin, 4);
     SHA1(utf16, u16len + 4, sha1);
 
@@ -13427,7 +13517,7 @@ static int verify_mssql2012(const char *hashstr, int hashlen,
     if (hex2bin(hashstr + _off, 8, salt_bin) != 4) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE - 4);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
     memcpy(utf16 + u16len, salt_bin, 4);
     SHA512(utf16, u16len + 4, sha512);
 
@@ -13889,7 +13979,7 @@ static int verify_episerver(const char *hashstr, int hashlen,
     if (exp_len < hashbytes) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, utf16, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
 
     { unsigned char *buf = (unsigned char *)WS->gp1;
       if (salt_len + u16len > WS_GP_SIZE) return 0;
@@ -14222,11 +14312,7 @@ static int verify_krb5pa23(const char *hashstr, int hashlen,
     if (hex2bin(p, enc_hex_len, enc_bin) != enc_len) return 0;
 
     /* Compute NTLM hash: MD4(UTF16LE(pass)) */
-    { unsigned char utf16[1024];
-      int u16len = latin1_to_utf16le(pass, passlen, utf16, sizeof(utf16));
-      if (u16len <= 0) return 0;
-      rhash_msg(RHASH_MD4, utf16, u16len, ntlm);
-    }
+    compute_ntlm_latin1(pass, passlen, NULL, 0, ntlm);	/* empty pass is valid */
 
     /* K1 = HMAC-MD5(ntlm, usage_type=1) */
     { unsigned char usage[4] = {1, 0, 0, 0};
@@ -16113,11 +16199,12 @@ static void hp_sz_delta(unsigned char *d, size_t n, unsigned dist) {
 static int hp_sz_tier2(const unsigned char *data, long datalen, long unpacked,
                        const unsigned char *iv, unsigned int crc, long crc_len,
                        const unsigned char *attrs, int attrlen, int type,
-                       const unsigned char key[32]) {
-    unsigned char *plain, *unp, ivcopy[16];
-    AES_KEY ak;
+                       int delta, const unsigned char key[32]) {
+    unsigned char *plain, *unp;
+    unsigned char *ivcopy = (unsigned char *)WS->ctx7;     /* 16 bytes */
+    AES_KEY *ak = (AES_KEY *)((unsigned char *)WS->ctx7 + 64);
     size_t aeslen, uselen, outcap;
-    int authoritative, lownib = type & 0x0f, prepro = (type >> 4) & 0x07, ci;
+    int authoritative, lownib = type & 0x0f, prepro = (type >> 4) & 0x0f, ci;   /* whole nibble: John's DELTA is 8, see mdxfind sevenzip_tier2 */
     int plausible = 0;
 
     if (!data || datalen < 16) return 0;
@@ -16126,11 +16213,14 @@ static int hp_sz_tier2(const unsigned char *data, long datalen, long unpacked,
     plain = hp_sz_grow(&hp_sz_plain, &hp_sz_plain_sz, aeslen);
     if (!plain) return 0;
     memcpy(ivcopy, iv, 16);
-    AES_set_decrypt_key(key, 256, &ak);
-    AES_cbc_encrypt(data, plain, aeslen, &ak, ivcopy, AES_DECRYPT);
+    AES_set_decrypt_key(key, 256, ak);
+    AES_cbc_encrypt(data, plain, aeslen, ak, ivcopy, AES_DECRYPT);
 
     uselen = (unpacked > 0 && (size_t)unpacked <= aeslen) ? (size_t)unpacked : aeslen;
-    authoritative = (prepro == 0) && (lownib==1 || lownib==2 || lownib==6 || lownib==7);
+    /* a DELTA whose distance the line carries (John's 13th field) is a filter
+     * we undo, so a miss there is as authoritative as an unfiltered one */
+    authoritative = (prepro == 0 || (prepro == 8 && delta)) &&
+                    (lownib==1 || lownib==2 || lownib==6 || lownib==7);
 
     outcap = crc_len > 0 ? (size_t)crc_len : HP_SZ_MAX_UNPACK;
     if (outcap > HP_SZ_MAX_UNPACK) outcap = HP_SZ_MAX_UNPACK;
@@ -16166,7 +16256,7 @@ static int hp_sz_tier2(const unsigned char *data, long datalen, long unpacked,
         for (fi = 0; fi < 3; fi++) {
             memcpy(work, unp, clen);
             if (fi == 1) hp_sz_arm64(work, clen);
-            else if (fi == 2) hp_sz_delta(work, clen, 4);
+            else if (fi == 2) hp_sz_delta(work, clen, delta ? (unsigned)delta : 4u);
             if ((unsigned int)crc32(0L, work, (uInt)clen) == crc) return 1;
         }
         /* A genuine decompressor (not the stored passthrough) reaching the
@@ -16188,8 +16278,6 @@ static int hp_sz_tier2(const unsigned char *data, long datalen, long unpacked,
  * Accepts the truncated data field mdxfind uses (last 32 bytes) as well as a
  * full stock 7z2john line, since only the final two blocks are consulted.
  */
-static __thread EVP_MD_CTX *tls_7z_md;
-
 static int verify_7zip(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -16197,16 +16285,19 @@ static int verify_7zip(const char *hashstr, int hashlen,
     unsigned char *u16 = (unsigned char *)WS->u16a;
     unsigned char *stage = (unsigned char *)WS->gp2;
     unsigned char *tail = (unsigned char *)WS->ctx3;
-    unsigned char sz_key[32], sz_salt[64], plain[16], hplain[16];
-    unsigned char sz_iv[16], sz_attrs[8], *sz_data = NULL;
-    char *f[12];
-    int nf = 0, u16len, dlen, dbytes, padsize, b, ok;
+    /* ctx4: key 32 | salt 64 | final block 16 | head block 16 | iv 16 | attrs 8 */
+    unsigned char *sz_key = (unsigned char *)WS->ctx4;
+    unsigned char *sz_salt = sz_key + 32, *plain = sz_key + 96, *hplain = sz_key + 112;
+    unsigned char *sz_iv = sz_key + 128, *sz_attrs = sz_key + 144, *sz_data = NULL;
+    AES_KEY *ak = (AES_KEY *)WS->ctx5;
+    SHA256_CTX *md = (SHA256_CTX *)WS->ctx6;    /* ctx7 belongs to hp_sz_tier2 */
+    char *f[13];
+    int nf = 0, u16len, dlen, dbytes, padsize, b, ok, sz_delta = 0;
     int sz_type = 0, sz_attrlen = 0, tier2avail = 0, hbits = 0, t2 = 0, evidence;
     int truncated = 0, ivb = 0;
     long sz_log2, sz_saltlen, sz_ivlen = 0, sz_packed, sz_unpacked;
     long sz_saltbin = 0, sz_crclen = 0;
     unsigned long sz_crc = 0;
-    unsigned int keylen = 32;
 
     if (hashlen < 20 || hashlen >= (int)WS_GP_SIZE) return 0;
     if (memcmp(hashstr, "$7z$", 4) != 0) return 0;
@@ -16215,11 +16306,13 @@ static int verify_7zip(const char *hashstr, int hashlen,
 
     { char *sp = buf + 4;
       f[nf++] = sp;
-      while (*sp && nf < 12) { if (*sp == '$') { *sp = 0; f[nf++] = sp + 1; } sp++; }
+      while (*sp && nf < 13) { if (*sp == '$') { *sp = 0; f[nf++] = sp + 1; } sp++; }
     }
     /* Shape must be exact: 10 fields, or 12 when the type carries crc_len and
-     * coder attributes. Anything else is malformed, not merely unusual. */
-    if (nf != 10 && nf != 12) return 0;
+     * coder attributes (hashcat 11600 and John), or 13 when John adds the
+     * DELTA filter's property byte (type 0x8N; distance = byte + 1). Anything
+     * else is malformed, not merely unusual. Same rule as mdxfind's loader. */
+    if (nf != 10 && nf != 12 && nf != 13) return 0;
     sz_type     = strtol(f[0], NULL, 10);
     sz_log2     = strtol(f[1], NULL, 10);
     sz_saltlen  = strtol(f[2], NULL, 10);
@@ -16227,7 +16320,13 @@ static int verify_7zip(const char *hashstr, int hashlen,
     sz_crc      = strtoul(f[6], NULL, 10);
     sz_packed   = strtol(f[7], NULL, 10);
     sz_unpacked = strtol(f[8], NULL, 10);
-    if (nf == 12) sz_crclen = strtol(f[10], NULL, 10);
+    if (nf >= 12) sz_crclen = strtol(f[10], NULL, 10);
+    if (nf == 13) {
+        if (((sz_type >> 4) & 0x0f) != 8 || strlen(f[12]) != 2 ||
+            !isxdigit((unsigned char)f[12][0]) || !isxdigit((unsigned char)f[12][1]))
+            return 0;
+        sz_delta = (int)strtol(f[12], NULL, 16) + 1;
+    }
     padsize     = (int)(sz_packed - sz_unpacked);
     dlen        = (int)strlen(f[9]);
     dbytes      = dlen / 2;
@@ -16272,7 +16371,7 @@ static int verify_7zip(const char *hashstr, int hashlen,
         sz_saltbin = hex2bin(f[3], (int)sz_saltlen * 2, sz_salt);
         if (sz_saltbin < 0) return 0;
     }
-    if (nf == 12) {
+    if (nf >= 12) {
         int al = (int)strlen(f[11]);
         if (al > 0 && (al & 1) == 0 && al <= 16 &&
             hex2bin(f[11], al, sz_attrs) == al / 2) sz_attrlen = al / 2;
@@ -16290,11 +16389,9 @@ static int verify_7zip(const char *hashstr, int hashlen,
     if (verify_cost_exceeds(WS->cur_rate, 524288.0, (double)(1ULL << sz_log2))) return 0;
 
     u16len = utf8_to_utf16le(pass, passlen, u16, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
 
-    if (!tls_7z_md) tls_7z_md = EVP_MD_CTX_new();
-    if (!tls_7z_md) return 0;
-    EVP_DigestInit_ex(tls_7z_md, EVP_sha256(), NULL);
+    SHA256_Init(md);
     { const size_t cap = 32768;
       size_t rec = (size_t)sz_saltbin + u16len + 8, nrec, k, coff = (size_t)sz_saltbin + u16len;
       unsigned long long i, total = 1ULL << sz_log2;
@@ -16312,26 +16409,33 @@ static int verify_7zip(const char *hashstr, int hashlen,
               unsigned long long cv = i + k;
               for (b = 0; b < 8; b++) cp[b] = (unsigned char)(cv >> (8 * b));
           }
-          EVP_DigestUpdate(tls_7z_md, stage, batch * rec);
+          SHA256_Update(md, stage, batch * rec);
           i += batch;
       }
     }
-    EVP_DigestFinal_ex(tls_7z_md, sz_key, &keylen);
+    SHA256_Final(sz_key, md);
 
-    { AES_KEY ak;
-      AES_set_decrypt_key(sz_key, 256, &ak);
+    { AES_set_decrypt_key(sz_key, 256, ak);
       /* ---- tier 0: trailing zero pad ---- */
-      AES_decrypt(tail + 16, plain, &ak);
+      AES_decrypt(tail + 16, plain, ak);
       for (b = 0; b < 16; b++) plain[b] ^= tail[b];   /* CBC: XOR preceding ct */
       ok = 1;
       for (b = 16 - padsize; ok && b < 16; b++) if (plain[b]) ok = 0;
-      if (!ok) return 0;
+      if (!ok) {
+          /* A pad failure is final unless the whole stream is here and its
+           * CRC is reproduced: hashcat's 11600 example pads PKCS#7, not with
+           * zeros, and hashcat accepts on the CRC alone. Same as mdxfind. */
+          if (!tier2avail) return 0;
+          return hp_sz_tier2(sz_data, (long)dbytes, sz_unpacked, sz_iv,
+                             (unsigned int)sz_crc, sz_crclen,
+                             sz_attrs, sz_attrlen, sz_type, sz_delta, sz_key) == 1;
+      }
 
       /* ---- tier 1: head structure. Only meaningful when the data field
        * really starts at stream offset 0, i.e. the stream is complete; on a
        * tail-only record its first bytes ARE the last two blocks. ---- */
       if (tier2avail && dbytes >= 32 && sz_ivlen == 16) {
-          AES_decrypt(sz_data, hplain, &ak);
+          AES_decrypt(sz_data, hplain, ak);
           for (b = 0; b < 16; b++) hplain[b] ^= sz_iv[b];
           hbits = hp_sz_head_bits(sz_type, hplain);
           if (hbits < 0) return 0;
@@ -16342,7 +16446,7 @@ static int verify_7zip(const char *hashstr, int hashlen,
     if (tier2avail)
         t2 = hp_sz_tier2(sz_data, (long)dbytes, sz_unpacked, sz_iv,
                          (unsigned int)sz_crc, sz_crclen,
-                         sz_attrs, sz_attrlen, sz_type, sz_key);
+                         sz_attrs, sz_attrlen, sz_type, sz_delta, sz_key);
     if (t2 == 1) return 1;                /* CRC reproduced: confirmed */
     if (t2 < 0) return 0;                 /* declared codec implemented: refuted */
     if (t2 == 2) hbits += 32;             /* decompressed clean, filter erased */
@@ -16861,7 +16965,7 @@ static int verify_md4utf16descrypt(const char *hashstr, int hashlen,
     s = bsd_crypt_des(passbuf, salt, desout, di);
     if (!s) return 0;
     u16len = utf8_to_utf16le((unsigned char *)s, strlen(s), utf16, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
     rhash_msg(RHASH_MD4, utf16, u16len, md4);
     prmd5(md4, computed, 32);
     return hex_iter_match(computed, hashstr, ITER_NTLM);
@@ -17756,6 +17860,7 @@ static int verify_dcc2(const char *hashstr, int hashlen,
     for (i = 0; i < userlen && i < MAXLINE - 1; i++)
         lcsalt[i] = tolower(user[i]);
     u16slen = utf8_to_utf16le(lcsalt, i, u16salt, WS_U16_SIZE);
+    if (u16slen < 0) return 0;
     ctx = rhash_init(RHASH_MD4);
     rhash_update(ctx, ntlm, 16);
     rhash_update(ctx, u16salt, u16slen);
@@ -18413,7 +18518,7 @@ static int verify_ps_token(const char *hashstr, int hashlen,
 
     /* UTF-16LE encode password */
     u16len = utf8_to_utf16le(pass, passlen, u16buf, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
 
     /* SHA1(salt + UTF16LE(pass)) */
     ctx = rhash_init(RHASH_SHA1);
@@ -18452,7 +18557,7 @@ static int verify_winphone(const char *hashstr, int hashlen,
 
     /* UTF-16LE encode password */
     u16len = utf8_to_utf16le(pass, passlen, u16buf, WS_U16_SIZE);
-    if (u16len <= 0) return 0;
+    if (u16len < 0) return 0;
 
     /* SHA256(UTF16LE(pass) + salt) */
     ctx = rhash_init(RHASH_SHA256);
@@ -21315,6 +21420,7 @@ static int verify_yafsalt(const char *hashstr, int hashlen,
     /* iconv, not a byte expansion: mdxfind converts through iconv opened
      * with //IGNORE, so every non-ASCII candidate differed here. */
     ulen = utf8_to_utf16le(pass, passlen, buf, (int)WS_GP_SIZE - 64);
+    if (ulen < 0) return 0;
     memcpy(buf + ulen, salt_bin, salt_len);
     SHA1(buf, ulen + salt_len, sha1);
 
@@ -23131,19 +23237,19 @@ static int verify_sha1sha1passtrunc1salt(const char *hashstr, int hashlen,
     char *hex = (char *)WS->gp1;
     char *computed = (char *)WS->gp2;
     const char *colon, *saltpart;
-    int saltbyte;
+    int saltbyte, n;
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 40) return 0;
     saltpart = colon + 1;
     saltbyte = parse_1salt(saltpart, hashlen - 41);
     if (saltbyte < 9 || saltbyte > 127) return 0;
-    if (passlen < 3) return 0;
+    n = passlen < 3 ? passlen : 3;	/* PHP substr($p,0,3) */
 
     SHA1(pass, passlen, sh);
     prmd5(sh, hex, 40);
-    memcpy(hex + 40, pass, 3);
-    SHA1((unsigned char *)hex, 43, sh);
+    memcpy(hex + 40, pass, n);
+    SHA1((unsigned char *)hex, 40 + n, sh);
     prmd5(sh, hex, 40);
     hex[40] = (char)saltbyte;
     SHA1((unsigned char *)hex, 41, sha1r);
@@ -23645,10 +23751,13 @@ static int verify_sha1_saltsha1u16(const char *hashstr, int hashlen,
      * every one of them failed. */
     u16len = utf8_to_utf16le((const unsigned char *)user, ulen,
                              (unsigned char *)utf16, WS_U16_SIZE - 4);
+    if (u16len < 0) return 0;
     utf16[u16len++] = ':';  /* single ASCII byte, NOT UTF16LE */
-    u16len += utf8_to_utf16le(pass, passlen,
-                              (unsigned char *)utf16 + u16len,
-                              WS_U16_SIZE - u16len - 2);
+    { int _n = utf8_to_utf16le(pass, passlen,
+                               (unsigned char *)utf16 + u16len,
+                               WS_U16_SIZE - u16len - 2);
+      if (_n < 0) return 0;
+      u16len += _n; }
     SHA1((unsigned char *)utf16, u16len, sh);
 
     /* Hex-decode salt to raw binary */
@@ -23685,19 +23794,19 @@ static int verify_sha1sha1trunc_sha1pass_3(const char *hashstr, int hashlen,
     char *hex = (char *)WS->gp1;
     char *computed = (char *)WS->gp2;
     const char *colon, *saltpart;
-    int trunclen;
+    int trunclen, n;
 
     colon = memchr(hashstr, ':', hashlen);
     if (!colon || colon - hashstr != 40) return 0;
     saltpart = colon + 1;
     trunclen = atoi(saltpart);
     if (trunclen < 20 || trunclen > 40) return 0;
-    if (passlen < 3) return 0;
+    n = passlen < 3 ? passlen : 3;	/* PHP substr($p,0,3) */
 
     SHA1(pass, passlen, sh);
     prmd5(sh, hex, 40);
-    memcpy(hex + 40, pass, 3);
-    SHA1((unsigned char *)hex, 43, sh);
+    memcpy(hex + 40, pass, n);
+    SHA1((unsigned char *)hex, 40 + n, sh);
     prmd5(sh, hex, 40);
 
     /* Left-aligned */
@@ -23817,6 +23926,7 @@ static int verify_sha1_salt_utf16_pepper(const char *hashstr, int hashlen,
      * //IGNORE, so a non-ASCII candidate produced a different string here. */
     u16len = utf8_to_utf16le((const unsigned char *)combined, clen,
                              (unsigned char *)utf16, WS_U16_SIZE - 2);
+    if (u16len < 0) return 0;
     SHA1((unsigned char *)utf16, u16len, sha1r);
     prmd5(sha1r, computed, 40);
     return strncasecmp(computed, hashstr, 40) == 0;
@@ -24358,7 +24468,7 @@ static int verify_msonline(const char *hashstr, int hashlen,
      * this type, not the byte expansion it uses for DCC2, so the naive
      * form agreed only for ASCII passwords. */
     int u16len = utf8_to_utf16le(pass, passlen, u16pass, (int)WS_GP_SIZE - 2);
-    if (u16len <= 0 && passlen > 0) return 0;
+    if (u16len < 0) return 0;
 
     /* PBKDF2-HMAC-SHA256(UTF16LE(pass), "", iter, 32) */
     PKCS5_PBKDF2_HMAC((const char *)u16pass, u16len,
@@ -25695,7 +25805,7 @@ static int cppenc_try_key(const struct cppenc_params *p,
     unsigned char *pt = (unsigned char *)WS->gp3;
     int ptl, keyok;
 
-    if (keylen < 1) return 0;
+    if (keylen < 0) return 0;	/* an empty site key is valid */
     if (CPPENC_HBLEN(keylen) > WS_GP_SIZE) return 0;
     ptl = cppenc_decrypt(p, key, keylen, rec, reclen, pt, hb, fx, &keyok);
     if (ptl != passlen) return 0;
@@ -25721,7 +25831,7 @@ static int cppenc_verify_common(const struct cppenc_params *p,
         inlinekey    = (const unsigned char *)(colon + 1);
         inlinekeylen = (int)(hashstr + hashlen - (colon + 1));
         hashlen      = (int)(colon - hashstr);
-        if (inlinekeylen < 1 || hashlen < 2) return 0;
+        if (hashlen < 2) return 0;	/* <rec>::plain = empty key */
     }
     if (hashlen & 1) return 0;
     reclen = hashlen / 2;
@@ -29166,10 +29276,24 @@ static struct hashtype *find_type_by_name(const char *name)
     return NULL;
 }
 
+/* UC variants whose name puts UC after the OUTER hash rather than at the end.
+ * Each is its base iterated with uppercase-hex feedback (equal at x01), so the
+ * "<base>UC" rule cannot find them and an uppercase-fed x02+ value was labelled
+ * as the base -- a value mdxfind cannot produce under that type. */
+static const char *const Uc_infix[][2] = {
+    { "SHA1UTF16LE",      "SHA1UCUTF16LE" },
+    { "MD5BASE64SHA1RAW", "MD5UCBASE64SHA1RAW" },
+    { "MD5BASE64MD5RAW",  "MD5UCBASE64MD5RAW" },
+};
+
 /* Find the UC variant of a type (e.g., MD5 → MD5UC) */
 static struct hashtype *find_uc_variant(struct hashtype *base)
 {
     char ucname[64];
+    size_t k;
+    for (k = 0; k < sizeof(Uc_infix) / sizeof(Uc_infix[0]); k++)
+        if (strcmp(base->name, Uc_infix[k][0]) == 0)
+            return find_type_by_name(Uc_infix[k][1]);
     if (strlen(base->name) + 3 >= sizeof(ucname)) return NULL;
     sprintf(ucname, "%sUC", base->name);
     return find_type_by_name(ucname);
@@ -29192,7 +29316,10 @@ static struct hashtype *find_uc_variant(struct hashtype *base)
 static struct hashtype *find_uc_base(struct hashtype *uc)
 {
     char basename[64];
-    size_t n = strlen(uc->name);
+    size_t n = strlen(uc->name), k;
+    for (k = 0; k < sizeof(Uc_infix) / sizeof(Uc_infix[0]); k++)
+        if (strcmp(uc->name, Uc_infix[k][1]) == 0)
+            return find_type_by_name(Uc_infix[k][0]);
     if (n < 3 || n >= sizeof(basename)) return NULL;
     if (strcmp(uc->name + n - 2, "UC") != 0) return NULL;
     memcpy(basename, uc->name, n - 2);
@@ -29911,7 +30038,11 @@ static void verify_item(struct workitem *item, int *hot_type, int *hot_iter,
     /* --- Hot list fast path (pre-hint): only needed when a verify-type hint
      * would trap us in the verify path.  For un-hinted items, the normal
      * hot list path (after hex2bin) handles them fine. */
-    if (*nhot > 0 && item->rest &&
+    /* -c: skipped. This path tries only non-verify types for a verify-type
+     * label, so hot_label_ok() can never pass it, and the rejected attempt
+     * has already rewritten salt/password/hashlen -- the later passes then
+     * see a mangled line and the label was lost on ~3% of matching lines. */
+    if (!CheckLabel && *nhot > 0 && item->rest &&
         item->hint && item->hint->verify &&
         !(item->hint_iter > 1 && item->hint->compute && item->hint->hashlen > 0)) {
         int h;
@@ -31008,8 +31139,17 @@ retry_with_fullpass:
                  * before when no outer_fn exists. */
                 hashfn_t _pitf = ht->iter_fn ? ht->iter_fn :
                                  ht->outer_fn ? ht->outer_fn : ht->compute;
-                for (uc = 0; uc <= 1; uc++) {
-                    ht->compute(pass, passlen, NULL, 0, iterbuf);
+                /* Seed from every registered base encoding, as the composed and
+                 * salted passes below do: MD5BASE64MD5RAW emits a padded and a
+                 * stripped digest per password, and seeding only the primary
+                 * lost the stripped one at every depth above x01 under -m. */
+                for (uc = 0; uc <= 1; uc++)
+                for (_b = 0; _b < 3; _b++) {
+                    if (_b == 1 && !ht->compute_alt)  continue;
+                    if (_b == 2 && !ht->compute_alt2) continue;
+                    if (_b == 0)      ht->compute(pass, passlen, NULL, 0, iterbuf);
+                    else if (_b == 1) ht->compute_alt(pass, passlen, NULL, 0, iterbuf);
+                    else              ht->compute_alt2(pass, passlen, NULL, 0, iterbuf);
                     for (iter = 2; iter <= Maxiter; iter++) {
                         if (uc)
                             prmd5UC(iterbuf, hexiter, fullbytes * 2);
@@ -31040,16 +31180,24 @@ retry_with_fullpass:
              * The branch above deliberately skips HTF_UC because a UC type is
              * normally reached as the uc=1 variant of its base. When -m names
              * the UC type itself the base is not in ModeList, so that path
-             * never runs and the hash is unfindable -- see find_uc_base(). */
+             * never runs and the hash is unfindable -- see find_uc_base().
+             * HTF_COMPOSED is not excluded: MD5UCBASE64MD5RAW is registered
+             * composed yet is the uppercase-feedback variant of its base, and a
+             * composed UC type with no base (SHA1UCWRL) finds none and skips. */
             if ((ht->flags & HTF_UC) &&
-                !(ht->flags & (HTF_SALTED | HTF_COMPOSED | HTF_NTLM))) {
+                !(ht->flags & (HTF_SALTED | HTF_NTLM))) {
                 struct hashtype *ucbase = find_uc_base(ht);
                 if (ucbase && ucbase->compute && ucbase->hashlen == fullbytes) {
                     hashfn_t _uitf = ht->iter_fn ? ht->iter_fn :
                                      ht->outer_fn ? ht->outer_fn :
                                      ucbase->outer_fn ? ucbase->outer_fn :
                                      ucbase->compute;
-                    ucbase->compute(pass, passlen, NULL, 0, iterbuf);
+                  for (_b = 0; _b < 3; _b++) {
+                    if (_b == 1 && !ucbase->compute_alt)  continue;
+                    if (_b == 2 && !ucbase->compute_alt2) continue;
+                    if (_b == 0)      ucbase->compute(pass, passlen, NULL, 0, iterbuf);
+                    else if (_b == 1) ucbase->compute_alt(pass, passlen, NULL, 0, iterbuf);
+                    else              ucbase->compute_alt2(pass, passlen, NULL, 0, iterbuf);
                     for (iter = 2; iter <= Maxiter; iter++) {
                         prmd5UC(iterbuf, hexiter, fullbytes * 2);
                         _uitf((unsigned char *)hexiter, fullbytes * 2,
@@ -31064,6 +31212,7 @@ retry_with_fullpass:
                         }
                         memcpy(iterbuf, computed, fullbytes);
                     }
+                  }
                 }
             }
 
@@ -32191,7 +32340,7 @@ static void worker(void *dummy)
                 format_output(&b->items[i], WS->fmtbuf, &olen);
                 if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                     possess(OutLock);
-                    write(OutFd, WS->outbuf, outpos);
+                    WRITE_ALL(OutFd, WS->outbuf, outpos);
                     release(OutLock);
                     outpos = 0;
                 }
@@ -32226,7 +32375,7 @@ static void worker(void *dummy)
                             format_output(&b->items[i], WS->fmtbuf, &olen);
                             if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                                 possess(OutLock);
-                                write(OutFd, WS->outbuf, outpos);
+                                WRITE_ALL(OutFd, WS->outbuf, outpos);
                                 release(OutLock);
                                 outpos = 0;
                             }
@@ -32246,7 +32395,7 @@ static void worker(void *dummy)
                     release(ErrLock);
                     if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                         possess(ErrLock);
-                        write(ErrFd, WS->errbuf, errpos);
+                        WRITE_ALL(ErrFd, WS->errbuf, errpos);
                         release(ErrLock);
                         errpos = 0;
                     }
@@ -32390,7 +32539,7 @@ static void worker(void *dummy)
                 release(ErrLock);
                 if (errpos + elen + 1 > (int)(MAXLINE * 2) - 1) {
                     possess(ErrLock);
-                    write(ErrFd, WS->errbuf, errpos);
+                    WRITE_ALL(ErrFd, WS->errbuf, errpos);
                     release(ErrLock);
                     errpos = 0;
                 }
@@ -32409,7 +32558,7 @@ static void worker(void *dummy)
             format_output(item, WS->fmtbuf, &olen);
             if (outpos + olen > (int)(MAXLINE * 2) - 1) {
                 possess(OutLock);
-                write(OutFd, WS->outbuf, outpos);
+                WRITE_ALL(OutFd, WS->outbuf, outpos);
                 release(OutLock);
                 outpos = 0;
             }
@@ -32420,12 +32569,12 @@ static void worker(void *dummy)
         /* Flush remaining */
         if (outpos > 0) {
             possess(OutLock);
-            write(OutFd, WS->outbuf, outpos);
+            WRITE_ALL(OutFd, WS->outbuf, outpos);
             release(OutLock);
         }
         if (errpos > 0) {
             possess(ErrLock);
-            write(ErrFd, WS->errbuf, errpos);
+            WRITE_ALL(ErrFd, WS->errbuf, errpos);
             release(ErrLock);
         }
 
@@ -33577,7 +33726,7 @@ static void process_input(FILE *fp)
             possess(ErrLock);
             record_unresolved_format(linebuf, len);
             linebuf[len] = '\n';
-            write(ErrFd, linebuf, len + 1);
+            WRITE_ALL(ErrFd, linebuf, len + 1);
             release(ErrLock);
             continue;
         }
@@ -34665,7 +34814,7 @@ static int emit_user_matches(struct workitem *item, int *outpos)
 
             if (*outpos + olen > (int)(MAXLINE * 2) - 1) {
                 possess(OutLock);
-                write(OutFd, WS->outbuf, *outpos);
+                WRITE_ALL(OutFd, WS->outbuf, *outpos);
                 release(OutLock);
                 *outpos = 0;
             }
