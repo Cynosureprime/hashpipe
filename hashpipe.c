@@ -14,10 +14,22 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.239 2026/11/16 12:31:29 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.243 2026/11/20 15:45:11 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.243  2026/11/20 15:45:11  dlr
+ * Generic hx walker stages 3b and 4a. New walker bodies: MySQL 3 OLD_PASSWORD as a byte-wise accumulator in the dialect, BLAKE2b-512 and -256 and BLAKE2s-256 over the common b2b and b2s compress functions, and SHA3 and Keccak at 224, 256, 384 and 512 bits over keccakf1600; a final digest shorter than 16 bytes is compared as four words with the upper ones zero. User-defined types may now name mdxfind own hash functions: sha224, sha384, rmd128, rmd160, tiger, wrl, md2, gost, sne128, sne256, the fifteen HAVAL forms, mysql3, blake2b512, blake2b256, blake2s256, sha3_224 to sha3_512 and keccak224 to keccak512, each the call its catalog type makes. hashpipe registers its BLAKE2 digests as hx functions, which the verify registration had hidden. The drift check reads a NAME-prefixed hex digest and the bare digest as one value. 11 more catalog types run on the GPU: e410 e416 e449 e474 e478 e548 e711 e842 e843 e846 e847. Verified: each new user function agrees with its catalog type at x01 to x03 on the CPU and with hashpipe -X; the C mirror agrees for 567 of 567 cores and every earlier core changed only by the added dialect text; on dev3 (M2 Max, Metal) all new catalog types and 42 user types match -G none, and on gp1 (Tahiti, OpenCL) all do except the md2 user type, whose kernel the Tahiti compiler crashes on, which is FATAL there as for any such kernel.
+ *
+ * Revision 1.242  2026/11/20 04:20:19  dlr
+ * SHA1MD5DSALT e590 and SHA1MD5MD5DSALT e591 keep sha1(md5hex . ":" . salt without its last byte) as an alternate beside sha1(salt . ":" . md5hex . ":" . salt). Real stored hashes take that form: 30 distinct e591 hashes in the archive, all with 3-byte salts, which a construction stripping punctuation from the outer salt does not explain. -j and -P report the peppers they ignore: Warning: N peppers ignored: a pepper is at most 80 bytes, or 1 to 126 bytes as $HEX[], and the peppers in use count only those kept. Verified: the 30 archive hashes are found, as by 1.677; hashpipe verifies 3551 of 3551 archived e591 lines and 9090 of 9090 e590 and e591 lines from mdxfind -z; an 81-byte plain and a 127-byte $HEX[] pepper are reported and the other three are used.
+ *
+ * Revision 1.241  2026/11/20 02:52:02  dlr
+ * SHA1MD5DSALT e590 verifies what mdxfind computes: h = md5hex(pass . salt), then SHA1 of h:salt, h:, salt:h:salt, h.salt, or h followed by one byte 9 or 32 to 126. The verifier copied the CPU arm length defect, measuring with the password length where 32 belongs and trying the one-byte form only for passwords of 32 or more characters. Self-test vector regenerated from the corrected mdxfind and confirmed by an independent python oracle. Verified: 9000 of 9000 e590 and 9000 of 9000 e591 lines from mdxfind -z with three salts and two rounds; corrupted digests verify 0.
+ *
+ * Revision 1.240  2026/11/17 01:51:47  dlr
+ * An empty $HEX[] decodes to the empty password, as it does in mdxfind and hx. decode_hex_password rejected a zero-length payload, so every caller fell back to the literal six characters: -X on stdin and -p hashed the text $HEX[], and a hash:$HEX[] line could not verify the empty password. Verified: -X on both channels gives d41d8cd98f00b204e9800998ecf8427e for $HEX[], hash:$HEX[] and hash: both verify under e1, self-test 1062 passed 0 failed.
+ *
  * Revision 1.239  2026/11/16 12:31:29  dlr
  * Make -c keep the label on a verify-type line when the hot list holds a compute type that also matches it. The pre-hint hot fast path tries only non-verify types for a verify-type label, so under -c hot_label_ok() always rejects it, but the attempt has already rewritten the item salt, password and hash length; the later passes then saw a mangled line and could return the other type. Seen as SHA1MD51SALTMD5 lines with a one-character salt, which also verify as SHA1-MD5SALT, re-emitted as SHA1-MD5SALTx01, varying run to run with what the hot list held. The path is now skipped under -c, where it can accept nothing. Verified: SHA1-MD5SALT and SHA1MD51SALTMD5 lines mixed, 6 of 6 runs keep every label; full corpus -c 7232530 verified, identical over 3 runs; wrong-depth corpus 0 of 1559 accepted; wrongly typed lines still rejected; self-test 1062 passed 0 failed 2 skipped.
  *
@@ -23403,8 +23415,9 @@ static int verify_sha1sha1md5md5pass1salt(const char *hashstr, int hashlen,
 
 /* --- 7D: Other salted types --- */
 
-/* SHA1MD5DSALT (e590): MD5(pass+salt)→hex + separator + salt → SHA1
- * Tries 4 separator variants: ":", no sep, 1-byte-salt appended. */
+/* SHA1MD5DSALT (e590): h = md5hex(pass . salt), then SHA1 of one of
+ * h:salt, h:salt without its last byte, h.salt, salt:h:salt, h:, or
+ * h.chr(y) for y = 9, 32..126, as mdxfind computes them. */
 static int verify_sha1md5dsalt(const char *hashstr, int hashlen,
     const unsigned char *pass, int passlen)
 {
@@ -23421,48 +23434,56 @@ static int verify_sha1md5dsalt(const char *hashstr, int hashlen,
     saltlen = hashlen - 41;
     if (saltlen < 0 || saltlen > 200 || passlen > 400) return 0;
 
-    /* MD5(pass + salt) → hex into buf[0..31] */
+    /* MD5(pass + salt) -> hex into buf[0..31] */
     memcpy(buf, pass, passlen);
     memcpy(buf + passlen, salt, saltlen);
     rhash_msg(RHASH_MD5, (unsigned char *)buf, passlen + saltlen, mh);
     prmd5(mh, buf, 32);
 
-    /* Build "md5hex:salt\0" in buf */
+    /* h:salt */
     buf[32] = ':';
     memcpy(buf + 33, salt, saltlen);
-    buf[33 + saltlen] = 0;
-
-    /* mdcur[0]: SHA1(buf, passlen + saltlen + 1) */
-    SHA1((unsigned char *)buf, passlen + saltlen + 1, sha1r);
+    SHA1((unsigned char *)buf, 33 + saltlen, sha1r);
     prmd5(sha1r, computed, 40);
     if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
-    /* mdcur[2]: SHA1(buf, passlen + saltlen) */
-    SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
+    /* h:salt without its last byte */
+    if (saltlen > 0) {
+        SHA1((unsigned char *)buf, 32 + saltlen, sha1r);
+        prmd5(sha1r, computed, 40);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
+
+    /* h: */
+    SHA1((unsigned char *)buf, 33, sha1r);
     prmd5(sha1r, computed, 40);
     if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
-    /* mdcur[3]: SHA1(buf, passlen + 1) */
-    SHA1((unsigned char *)buf, passlen + 1, sha1r);
-    prmd5(sha1r, computed, 40);
-    if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    /* salt:h:salt, built after the hex */
+    { char *ds = buf + 64;
+      memcpy(ds, salt, saltlen);
+      ds[saltlen] = ':';
+      memcpy(ds + saltlen + 1, buf, 32);
+      ds[saltlen + 33] = ':';
+      memcpy(ds + saltlen + 34, salt, saltlen);
+      SHA1((unsigned char *)ds, 2 * saltlen + 34, sha1r);
+      prmd5(sha1r, computed, 40);
+      if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
+    }
 
-    /* Rebuild as "md5hex + salt\0" (no colon) for mdcur[1] */
+    /* h.salt */
     memcpy(buf + 32, salt, saltlen);
-    buf[32 + saltlen] = 0;
-    SHA1((unsigned char *)buf, passlen + saltlen, sha1r);
+    SHA1((unsigned char *)buf, 32 + saltlen, sha1r);
     prmd5(sha1r, computed, 40);
     if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
 
-    /* Variant 4: 1-byte append at [32], SHA1(buf, passlen+1) for bytes 9..126 */
-    if (passlen >= 32) {
-        for (y = 9; y < 127; y++) {
-            if (y == 10) y = ' ';
-            buf[32] = (char)y;
-            SHA1((unsigned char *)buf, passlen + 1, sha1r);
-            prmd5(sha1r, computed, 40);
-            if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
-        }
+    /* h.chr(y) */
+    for (y = 9; y < 127; y++) {
+        if (y == 10) y = ' ';
+        buf[32] = (char)y;
+        SHA1((unsigned char *)buf, 33, sha1r);
+        prmd5(sha1r, computed, 40);
+        if (hex_iter_match(computed, hashstr, ITER_SHA1)) return 1;
     }
 
     return 0;
@@ -28175,7 +28196,7 @@ static void init_hashtypes(void)
     HTV("SHA11SALTMD5SHA256", 0, verify_sha11saltmd5sha256, "1fbe24e8ee1bfb36376dc8715af1c2eb15764c05:$HEX[09]:password123");
     HTV("SHA1SHA1MD5MD5PASS1SALT", 0, verify_sha1sha1md5md5pass1salt, "125a2e1803fb08fb9f14523573f0e3b6f426ce67:0x09:password123");
     /* 7D: Other salted */
-    HTV("SHA1MD5DSALT", 0, verify_sha1md5dsalt, "0d9e801c8ce150ad07cb69cc220d4cfa2b358d83:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123");
+    HTV("SHA1MD5DSALT", 0, verify_sha1md5dsalt, "c1ed3740a8fccf4f6d43fb96d5fd75f21e9bf2df:Aa8NB6AU6v2KsqLjbbLb4EH9mAB9BksY:password123");
     HTV("SHA1MD5MD5DSALT", 0, verify_sha1md5md5dsalt, "29e4ac58c1233cd331820c19fbd56894c107b4de:1122334455667788:password123");
     HTV("SHA1MD5SALTPASSPEPPER", 0, verify_sha1md5saltpasspepper, "0992047fa349ac4e5abb3fef6c0f3f8f8bc6d679:1122334455667788 1122334455667788:password123");
     HTV("SHA1MD5xSALT", 0, verify_sha1md5xsalt, "12d66f224a0fbdf4b7371400f9fece702d4c48a5:1 Salt:password123");
@@ -29368,8 +29389,8 @@ static int decode_hex_password(const char *pass, int passlen,
     if (passlen < 6) return -1;
     if (strncmp(pass, "$HEX[", 5) != 0) return -1;
     if (pass[passlen - 1] != ']') return -1;
-    hexlen = passlen - 6;  /* skip $HEX[ and ] */
-    if (hexlen <= 0 || hexlen > outmax * 2) return -1;
+    hexlen = passlen - 6;  /* skip $HEX[ and ]; $HEX[] is the empty string */
+    if (hexlen > outmax * 2) return -1;
     return hex2bin(pass + 5, hexlen, out);
 }
 
@@ -34883,6 +34904,23 @@ static void hx_register_hashpipe_types(void)
                           ROLE_CAP_UC,
                                   ROLE_HEX);
         }
+    }
+    /* The BLAKE2 types are verify types (HTV replaces their compute, since
+     * their stored form is $BLAKE2$hex or bare hex), so the loop above
+     * skips them; their digests are plain functions and hx.8 names them. */
+    {
+        static const struct { const char *name; void (*fn)(const unsigned char *, int,
+            const unsigned char *, int, unsigned char *); int len; } b2[] = {
+            { "blake2b512", compute_blake2b512, 64 },
+            { "blake2b256", compute_blake2b256, 32 },
+            { "blake2s256", compute_blake2s256, 32 },
+        };
+        for (i = 0; i < (int)(sizeof b2 / sizeof b2[0]); i++)
+            if (!hx_func_lookup(b2[i].name))
+                hx_func_register(b2[i].name, hx_bridge_hash, b2[i].len,
+                                 b2[i].fn, b2[i].len,
+                                 ROLE_CAP_BIN | ROLE_CAP_HEX | ROLE_CAP_B64 |
+                                 ROLE_CAP_UC, ROLE_HEX);
     }
 }
 
