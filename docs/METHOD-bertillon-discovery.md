@@ -303,13 +303,18 @@ the types differ only in the conversion:
 | type | conversions offered |
 |---|---|
 | `NTLM`, `MD4UTF16` | UTF-8 -> UTF-16LE only; ill-formed UTF-8 gives no hash. One computation under two names |
-| `NTLMH` | that, PLUS a UTF-16LE zero-extend of each byte (hashcat's method) |
+| `NTLMH` | that, PLUS a UTF-16LE zero-extend of each byte (hashcat's shortcut, not NTLM) |
 
-No type offers a CP1251 or CP1252 reading; for that, convert the plaintexts
-first (§4).
+**NTLM is what Windows computes:** the text is converted properly, from UTF-8 or
+from a code page, to UTF-16LE, and MD4 is taken over that. hashcat mode 1000 is
+NTLM, and `hashpipe -N` lists it there. hashcat's implementation of it
+zero-extends each byte instead, which agrees with Windows only on ASCII; the
+shortcut has been copied widely. It is detected and verified, but it is NOT
+NTLM, hence the separate name NTLMH. A non-ASCII pair that verifies only as
+NTLMH was made by such an implementation, not by Windows.
 
-`hashpipe -N` lists hashcat mode 1000 on NTLM. hashcat's own conversion is the
-zero-extend, and only NTLMH verifies a non-ASCII pair made that way.
+A code-page password, as Windows hashes it, is NTLM over the code page's
+UTF-16LE reading: convert the plaintexts to UTF-8 first (§4), then verify.
 
 **INFERENCE AVAILABLE — from WHICH labels verify.** On ASCII the two
 conversions coincide and all three verify. On non-ASCII input:
@@ -317,7 +322,7 @@ conversions coincide and all three verify. On non-ASCII input:
 | labels that verify | the plaintext bytes were |
 |---|---|
 | all three | valid UTF-8, decoded as UTF-8 |
-| NTLMH alone | zero-extended: each byte read as one character (Latin-1) |
+| NTLMH alone | zero-extended: each byte read as one character, by a hashcat-style implementation |
 
 So all three agreeing does NOT mean the plaintext is ASCII.
 
