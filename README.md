@@ -459,6 +459,9 @@ different builds. `make install-man` installs its manual page alongside hashpipe
     bertillon -f <file>         what forms are in this file
     bertillon -p <file>         what the list as a whole says
 
+In the outright form the plaintext, and a salt, may be written as `$HEX[...]`, as
+hashpipe reads them.
+
 It narrows a candidate set and does not assert an identity. For a bare 32-character hex
 value the honest answer is 189 types, and nothing about the value separates them.
 

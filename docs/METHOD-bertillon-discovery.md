@@ -202,6 +202,10 @@ selection, so it pipes.
 **Field count decides how a value is read.** Two fields could be `hash:salt` or
 `hash:plaintext` and nothing in the line says which, so BOTH are tried.
 
+**The plaintext and the salt may be `$HEX[...]`**, decoded as hashpipe decodes
+them, in the outright form and under `-g` alike; `$HEX[]` is the empty string and
+a malformed wrapper is literal text. The hash field is never decoded.
+
 **A tier is a budget, not a verdict.** Types outside the selected tier are
 untested, not ruled out. The count is printed on every run.
 
@@ -341,7 +345,6 @@ the line decides it.
 | whole file matches nothing, presents as a wrong wordlist | CRLF list against LF candidates | `bertillon -p` reports it; `file list.txt` |
 | a type "is not registered" under a lowered `-L` | it was SKIPPED FOR COST — same message | drop the `-L`; at the default a skip means a wrong bench_rates.h rate, a defect to report |
 | gate line comes back bare | four indistinguishable causes, in this order: password wrong; fields in wrong order; plaintext recorded in a different ENCODING from the one hashed; construction not registered | for the encoding, convert the plaintexts with `hashpipe -X` (§4) and gate again; for the last, write it in `hx` + a `userdef` entry. A wider search will NOT find either. |
-| `bertillon 'hash:$HEX[...]'` says `field 2 is not the plaintext` for a pair that is right | the verify-outright form does not decode `$HEX[]`, on the command line or in a file; the payload is read as a salt | `bertillon -g`, which decodes it, or give the raw bytes |
 | a verified line, but candidates derived from it yield nothing | **salt folded into the password field.** Verifies perfectly, so verification cannot catch it. Every recorded plaintext carries the salt. | `bertillon -p`. It reports a run only where EVERY record shares it, so it sees a CONSTANT salt and is blind to one that VARIES — two hex characters over 256 values share no run. Silence there is not a negative. |
 | `bertillon` answers `NOTHING to try` for a value `hashpipe` identifies | **version skew.** `bertillon` and `hashpipe` are ONE binary reached two ways. They cannot disagree unless they are different builds. | run both on the same line; `command -v hashpipe bertillon`; compare md5 |
 | `$NT$`-prefixed hashes match nothing under any channel | mdxfind does not strip the John signature | strip, crack bare, restore before `mdsplit` |

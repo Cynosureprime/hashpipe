@@ -14,10 +14,13 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.249 2026/11/27 06:11:24 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.250 2026/11/27 20:23:22 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.250  2026/11/27 20:23:22  dlr
+ * bertillon decodes a $HEX[] plaintext, and a $HEX[] salt given as a separate field, in its hash:plaintext and hash:salt:plaintext forms, as hashpipe reads them (bertillon.h 1.31). No source change in this file; the revision marks the bertillon change. Verified: hashpipe -T 1064 passed, 0 failed.
+ *
  * Revision 1.249  2026/11/27 06:11:24  dlr
  * Built with the hx engine's full charset registry: 141 charsets, among them 78 Windows code pages with Windows' lenient and strict decodes and the OEM glyph readings, the standard single-byte tables (ISO-8859, Apple, Adobe, JIS X 0201, KZ-1048, VISCII, HP-Roman8, DEC-MCS, ATASCII, PETSCII), the CJK standards (Shift_JIS, EUC-JP, ISO-2022-JP, EUC-KR, GB2312, GB 18030-2022) with the WHATWG readings beside them and the C1 readings of EUC-JP and EUC-KR, UTF-32, UTF-16 with a BOM, CESU-8, UTF-7 decoding, GSM 03.38 and T.61. emit(x, "") writes the value alone, wrapped in $HEX[] when it is not printable. The fail token is accepted exactly where a pair can meet something unmappable. No source change in this file; the revision marks the engine it is built with. Verified: hashpipe -T 1064 passed, 0 failed; the full hx proof (golden corpus, 25 stable ids, dedup verdicts, GPU plans, patterns, cores, C mirror) identical; userdef round trip PASS.
  *

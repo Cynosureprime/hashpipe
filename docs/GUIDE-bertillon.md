@@ -122,6 +122,18 @@ is printed:
 
     bertillon: SOLVED as hash:plaintext -- 1 type(s) verified of 824 tried.
 
+The plaintext, and a salt in `hash:salt:plaintext`, may be written as `$HEX[...]`,
+exactly as hashpipe reads them. That is how a password containing a colon, a
+control byte or any non-ASCII byte is given on a line:
+
+    $ echo '07117fe4a1ebd544965dc19573183da2:$HEX[636166c3a9]' | bertillon
+    VERIFIED	e1	MD5	x01
+
+    bertillon: SOLVED as hash:plaintext -- 1 type(s) verified of 856 tried.
+
+`$HEX[]` is the empty password. A wrapper that is not well formed is taken as
+literal text, and the hash field itself is never decoded.
+
 ## When several types verify
 
     $ bertillon < collision.txt

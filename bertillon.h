@@ -2,6 +2,9 @@
  * bertillon.h -- hash shape measurement, reached through argv[0] from hashpipe.
  *
  * $Log: bertillon.h,v $
+ * Revision 1.31  2026/11/27 20:23:22  dlr
+ * bertillon decodes a $HEX[] plaintext and a $HEX[] salt as hashpipe does. In hash:plaintext and hash:salt:plaintext the plaintext field is decoded with decode_hex_password, so a password that is not printable is answered outright; a $HEX[] salt given as the separate operand of a compute type is decoded too, while the stored form keeps the salt as written for hash_verify to decode for a verify type. A malformed wrapper stays literal text. A $HEX[] hash field is not decoded, as in hashpipe. Verified: md5 of password with the plaintext as $HEX[70617373776f7264] solves as e1; $HEX[e9] solves as e1 and e335; $HEX[] solves as the empty password; bcrypt with $HEX[552a55] solves as e450; a malformed wrapper and a wrong plaintext stay unsolved; hash:$HEX[6162]:password finds MD5PASSSALT as well as POSTGRESQL; hashpipe -T 1064 passed, 0 failed.
+ *
  * Revision 1.30  2026/11/16 07:08:43  dlr
  * bertillon: the depth column is the depth actually verified, for every type. A verify type reports the depth its verify function reached, through hash_verify (which clears verify_iter first and decodes a $HEX[] salt), instead of a fixed x01. Iteration case: a plain type keeps exact case, so MD5 and MD5UC stay distinct; a salted or composed UC type tries both lower- and upper-case iteration hex and compares without regard to case, since HTF_UC does not say which the iteration uses (SHA1UCWRL iterates lower, MD5UCBASE64MD5RAW upper). Verified: SHA1USERCOLONPASS x03 and MD5CAP x02 report x03 and x02; SHA1UCWRL and MD5UCBASE64MD5RAW resolve at x01 to x03; a wrong password, a wrong user and a random digest verify nothing; self-test 1062 passed 0 failed 2 skipped.
  *
@@ -2021,6 +2024,25 @@ static int bert_modal_line(const char *path, char *out, size_t outsz,
     return 1;
 }
 
+/*
+ * A plaintext or salt field as hashpipe reads it: $HEX[...] is decoded, and
+ * anything else, including a malformed wrapper, is the literal text. Returns
+ * the bytes to use and sets *len; *heap is the buffer to free, or NULL.
+ */
+static const unsigned char *bert_unhex_field(const char *f, int n, int *len,
+                                       unsigned char **heap)
+{
+    unsigned char *b = (unsigned char *)malloc((size_t)n / 2 + 1);
+    int d = b ? decode_hex_password(f, n, b, n / 2 + 1) : -1;
+    if (d < 0) {
+        free(b);
+        *heap = NULL; *len = n;
+        return (const unsigned char *)f;
+    }
+    *heap = b; *len = d;
+    return b;
+}
+
 /* Field count selects the reading, and the input selects it -- never a flag. */
 static void bert_reduce_target(const char *line, const char *prefix, int emit)
 {
@@ -2044,10 +2066,11 @@ static void bert_reduce_target(const char *line, const char *prefix, int emit)
          * plaintext, verification answers yes or no in microseconds. Gate that
          * reading first and reduce only on failure.
          */
-        int tried = 0;
-        int hits = bert_gate_reading(line, hash, hash,
-                                     (const unsigned char *)(c1 + 1),
-                                     (int)strlen(c1 + 1), NULL, 0, 0, &tried);
+        int tried = 0, pl;
+        unsigned char *ph;
+        const unsigned char *pv = bert_unhex_field(c1 + 1, (int)strlen(c1 + 1), &pl, &ph);
+        int hits = bert_gate_reading(line, hash, hash, pv, pl, NULL, 0, 0, &tried);
+        free(ph);
         if (hits) {
             fprintf(stderr, "\nbertillon: SOLVED as hash:plaintext -- %d type(s) "
                             "verified of %d tried.\n", hits, tried);
@@ -2103,11 +2126,18 @@ static void bert_reduce_target(const char *line, const char *prefix, int emit)
              * type wants the digest with the salt as a separate operand. */
             char sf[600];
             size_t n2 = (size_t)(c2 - line);
+            int pl, svl;
+            unsigned char *ph, *sh;
+            const unsigned char *pv, *sv;
             if (n2 >= sizeof(sf)) n2 = sizeof(sf) - 1;
             memcpy(sf, line, n2); sf[n2] = '\0';
-            hits = bert_gate_reading(line, sf, hash,
-                                     (const unsigned char *)(c2 + 1), (int)strlen(c2 + 1),
-                                     (const unsigned char *)salt, (int)sl, 1, &tried);
+            /* The stored form keeps the salt as written: hash_verify decodes
+             * a $HEX[] salt for a verify type. A compute type takes the salt
+             * as a separate operand, so that one is decoded here. */
+            pv = bert_unhex_field(c2 + 1, (int)strlen(c2 + 1), &pl, &ph);
+            sv = bert_unhex_field(salt, (int)sl, &svl, &sh);
+            hits = bert_gate_reading(line, sf, hash, pv, pl, sv, svl, 1, &tried);
+            free(ph); free(sh);
         }
         if (hits) {
             fprintf(stderr, "\nbertillon: SOLVED -- %d type(s) verified of %d tried. "
