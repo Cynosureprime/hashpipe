@@ -36,6 +36,14 @@ typedef struct {
 	int      depth;         /* current stack depth (for max_stack) */
 	int      max_depth;
 	int      has_emit;      /* set if emit() is called */
+	int      uses_groups;   /* set if a loop iterates charsets() */
+	int      text_loop;     /* set if a for ... in loop was unrolled */
+
+	/* for cs in (...): the loop variables in scope and their current
+	 * encoding names, innermost last (hx-functions.md 19.1) */
+	const char *lv_name[16];
+	const char *lv_val[16];
+	int      nlv;
 } compile_ctx;
 
 /*
@@ -272,7 +280,7 @@ static void validate_role(hx_func_entry *fe, uint8_t role,
 	        line, role_caps_str(fe->supported_roles),
 	        default_role_str(fe->default_role));
 	(void)fname;
-	exit(1);
+	hx_compile_die();
 }
 
 /* ---- recursive compilation ---- */
@@ -323,6 +331,303 @@ static void compile_body(compile_ctx *c, hx_node *body)
 	}
 }
 
+/* ---- text programs: hx-functions.md section 19 ---- */
+
+/* The encoding name a loop variable stands for here, or NULL. */
+static const char *loop_value(compile_ctx *c, const char *name)
+{
+	int i;
+	for (i = c->nlv - 1; i >= 0; i--)
+		if (strcmp(c->lv_name[i], name) == 0) return c->lv_val[i];
+	return NULL;
+}
+
+static void loop_misuse(compile_ctx *c, const char *name, int line)
+{
+	(void)c;
+	fprintf(stderr, "hx:%d: '%s' is a loop over encoding names; it can be "
+	        "used only as a convert(), valid() or roundtrip() encoding, or as "
+	        "an emit() label\n", line, name);
+	hx_compile_die();
+}
+
+/* A compile-time string: a literal with no NUL, or a loop variable.  NULL
+ * for anything else. */
+static const char *const_string(compile_ctx *c, const hx_node *a)
+{
+	if (a->type == HX_LITERAL && !memchr(a->u.literal.str, '\0', a->u.literal.len))
+		return a->u.literal.str;
+	if (a->type == HX_VARIABLE) return loop_value(c, a->u.varname);
+	return NULL;
+}
+
+static void push_const(compile_ctx *c, const char *str)
+{
+	hx_inst inst;
+	memset(&inst, 0, sizeof inst);
+	inst.op = OP_PUSH_STR;
+	inst.u.stridx = add_string(c, str, (int)strlen(str));
+	emit(c, inst);
+	push(c);
+}
+
+static void emit_call(compile_ctx *c, const char *fname, int nargs)
+{
+	hx_inst inst;
+	memset(&inst, 0, sizeof inst);
+	inst.op = OP_CALL;
+	inst.u.call.entry = hx_func_lookup(fname);
+	inst.u.call.nargs = nargs;
+	inst.u.call.role  = ROLE_DEFAULT;
+	if (!inst.u.call.entry) {
+		fprintf(stderr, "hx: %s:%d: no registry entry for %s()\n",
+		        __FILE__, __LINE__, fname);
+		hx_compile_die();
+	}
+	emit(c, inst);
+	pop(c, nargs);
+	push(c);
+}
+
+/* An encoding-name argument of valid() or roundtrip(): its name, or a
+ * compile error. */
+static const char *enc_arg(compile_ctx *c, hx_node *node, int i)
+{
+	const char *v = const_string(c, node->u.call.args[i]);
+	if (!v) {
+		fprintf(stderr, "hx:%d: %s(): argument %d must be a string literal or "
+		        "a loop variable naming an encoding\n", node->line,
+		        node->u.call.name, i + 1);
+		hx_compile_die();
+	}
+	if (!hx_conv_lookup(v)) {
+		fprintf(stderr, "hx:%d: %s(): unknown encoding '%s'\n", node->line,
+		        node->u.call.name, v);
+		hx_compile_die();
+	}
+	return v;
+}
+
+/* convert() between two names, or a compile error naming the function */
+static void check_pair(const char *fname, const char *a, const char *b, int line)
+{
+	hx_inst t;
+	char err[256];
+	if (hx_convert_build(a, b, NULL, 0, &t, err, sizeof err) < 0) {
+		const char *e = strncmp(err, "convert(): ", 11) == 0 ? err + 11 : err;
+		fprintf(stderr, "hx:%d: %s(): %s\n", line, fname, e);
+		hx_compile_die();
+	}
+}
+
+/*
+ * valid(x, cs), roundtrip(x, a, b) -- section 19.2 -- and emit(x, label, ...)
+ * -- section 19.3.  The names and labels are compile-time strings, pushed as
+ * constants, so the program a loop unrolls to is an ordinary one.
+ */
+static void compile_text_call(compile_ctx *c, hx_node *node)
+{
+	const char *fname = node->u.call.name;
+	int i, n = node->u.call.nargs;
+
+	if (strcmp(fname, "valid") == 0) {
+		const char *cs;
+		hx_inst t;
+		char err[256];
+		if (n != 2) {
+			fprintf(stderr, "hx:%d: valid() takes a value and an encoding\n",
+			        node->line);
+			hx_compile_die();
+		}
+		cs = enc_arg(c, node, 1);
+		/* it must be decodable: utf7 and lowbyte16 are encode-only */
+		if (hx_convert_build(cs, hx_conv_kind(hx_conv_lookup(cs)) == HXE_KIND_CHARSET
+		                         ? "utf8" : "raw", NULL, 0, &t, err, sizeof err) < 0) {
+			const char *e = strncmp(err, "convert(): ", 11) == 0 ? err + 11 : err;
+			fprintf(stderr, "hx:%d: valid(): %s\n", node->line, e);
+			hx_compile_die();
+		}
+		compile_node(c, node->u.call.args[0]);
+		push_const(c, cs);
+		emit_call(c, "valid", 2);
+		return;
+	}
+	if (strcmp(fname, "roundtrip") == 0) {
+		const char *a, *b;
+		if (n != 3) {
+			fprintf(stderr, "hx:%d: roundtrip() takes a value and two "
+			        "encodings\n", node->line);
+			hx_compile_die();
+		}
+		a = enc_arg(c, node, 1);
+		b = enc_arg(c, node, 2);
+		check_pair("roundtrip", a, b, node->line);
+		check_pair("roundtrip", b, a, node->line);
+		compile_node(c, node->u.call.args[0]);
+		push_const(c, a);
+		push_const(c, b);
+		emit_call(c, "roundtrip", 3);
+		return;
+	}
+	/* emit(x, label, ...) */
+	{
+		const char *lab[16];
+		if (n - 1 > (int)(sizeof lab / sizeof lab[0])) {
+			fprintf(stderr, "hx:%d: emit(): too many labels\n", node->line);
+			hx_compile_die();
+		}
+		for (i = 1; i < n; i++)
+			if (!(lab[i - 1] = const_string(c, node->u.call.args[i]))) {
+				fprintf(stderr, "hx:%d: emit(): label %d must be a string "
+				        "literal or a loop variable\n", node->line, i);
+				hx_compile_die();
+			}
+		compile_node(c, node->u.call.args[0]);
+		for (i = 1; i < n; i++) push_const(c, lab[i - 1]);
+		c->has_emit = 1;
+		emit_call(c, "emit", n);
+	}
+}
+
+/*
+ * for v in ("a", "b", ...) { body }, for v in charsets("group") { body }:
+ * the body is compiled once per name with v bound to it (section 19.1).
+ */
+static void compile_forin(compile_ctx *c, hx_node *node)
+{
+	hx_node *in = node->u.forloop.in;
+	const char *v = node->u.forloop.varname;
+	const char *const *names;
+	const char *one[64];
+	int i, n = 0;
+
+	if (loop_value(c, v)) {
+		fprintf(stderr, "hx:%d: loop variable '%s' is already in use by an "
+		        "enclosing loop\n", node->line, v);
+		hx_compile_die();
+	}
+	if (c->nlv >= (int)(sizeof c->lv_name / sizeof c->lv_name[0])) {
+		fprintf(stderr, "hx:%d: loops over encodings nested too deeply\n",
+		        node->line);
+		hx_compile_die();
+	}
+	if (in->u.call.name[0] == '\0') {
+		if (in->u.call.nargs > (int)(sizeof one / sizeof one[0]) - 1) {
+			fprintf(stderr, "hx:%d: for %s in (...): too many names; use "
+			        "charsets()\n", node->line, v);
+			hx_compile_die();
+		}
+		for (i = 0; i < in->u.call.nargs; i++) {
+			hx_node *a = in->u.call.args[i];
+			if (a->type != HX_LITERAL ||
+			    memchr(a->u.literal.str, '\0', a->u.literal.len)) {
+				fprintf(stderr, "hx:%d: for %s in (...): item %d must be a "
+				        "string literal\n", node->line, v, i + 1);
+				hx_compile_die();
+			}
+			if (!hx_conv_lookup(a->u.literal.str)) {
+				fprintf(stderr, "hx:%d: for %s in (...): unknown encoding "
+				        "'%s'\n", node->line, v, a->u.literal.str);
+				hx_compile_die();
+			}
+			one[n++] = a->u.literal.str;
+		}
+		one[n] = NULL;
+		names = one;
+	} else {
+		const hx_node *g;
+		if (strcmp(in->u.call.name, "charsets") != 0) {
+			fprintf(stderr, "hx:%d: for %s in %s(): only a list of names or "
+			        "charsets(group) can follow 'in'\n", node->line, v,
+			        in->u.call.name);
+			hx_compile_die();
+		}
+		g = in->u.call.nargs == 1 ? in->u.call.args[0] : NULL;
+		if (!g || g->type != HX_LITERAL) {
+			fprintf(stderr, "hx:%d: charsets() takes one group name, a string "
+			        "literal\n", node->line);
+			hx_compile_die();
+		}
+		if (!(names = hx_charsets(g->u.literal.str))) {
+			fprintf(stderr, "hx:%d: charsets(): unknown group '%s' (all, "
+			        "windows, oem, iso8859, mac, ebcdic, cjk, unicode)\n",
+			        node->line, g->u.literal.str);
+			hx_compile_die();
+		}
+		c->uses_groups = 1;
+	}
+	c->text_loop = 1;
+	c->lv_name[c->nlv] = v;
+	c->nlv++;
+	for (i = 0; names[i]; i++) {
+		c->lv_val[c->nlv - 1] = names[i];
+		compile_body(c, node->u.forloop.body);
+	}
+	c->nlv--;
+}
+
+/*
+ * convert(x, "from", "to", "token", ...) -- hx-functions.md section 18.2.
+ * Every argument after the first is a string literal and is consumed here at
+ * compile time; only x is pushed.  Anything malformed is a compile error with
+ * the line and the offending token.
+ */
+static void compile_convert(compile_ctx *c, hx_node *node)
+{
+	char *lit[16], err[256];
+	hx_inst inst;
+	int i, n = node->u.call.nargs;
+
+	if (n < 3) {
+		fprintf(stderr, "hx:%d: convert() takes a value, a source encoding "
+		        "and a target encoding\n", node->line);
+		hx_compile_die();
+	}
+	if (n - 1 > (int)(sizeof lit / sizeof lit[0])) {
+		fprintf(stderr, "hx:%d: convert(): too many tokens\n", node->line);
+		hx_compile_die();
+	}
+	for (i = 1; i < n; i++) {
+		hx_node *a = node->u.call.args[i];
+		const char *lv;
+		/* from and to may be a loop variable (section 19.1); tokens may not */
+		if (i <= 2 && a->type == HX_VARIABLE &&
+		    (lv = loop_value(c, a->u.varname)) != NULL) {
+			lit[i - 1] = strdup(lv);
+			continue;
+		}
+		if (a->type == HX_VARIABLE && loop_value(c, a->u.varname))
+			loop_misuse(c, a->u.varname, node->line);
+		if (a->type != HX_LITERAL ||
+		    memchr(a->u.literal.str, '\0', a->u.literal.len)) {
+			fprintf(stderr, "hx:%d: convert(): argument %d must be a string "
+			        "literal\n", node->line, i + 1);
+			hx_compile_die();
+		}
+		lit[i - 1] = strndup(a->u.literal.str, a->u.literal.len);
+	}
+	if (hx_convert_build(lit[0], lit[1], (const char *const *)lit + 2, n - 3,
+	                     &inst, err, sizeof err) < 0) {
+		fprintf(stderr, "hx:%d: %s\n", node->line, err);
+		hx_compile_die();
+	}
+	for (i = 0; i < n - 1; i++) free(lit[i]);
+	compile_node(c, node->u.call.args[0]);
+	emit(c, inst);       /* one value in, one out: depth unchanged */
+}
+
+/*
+ * A legacy conversion function called with one argument and no output-role
+ * suffix compiles to the OP_CONVERT its alias row names (section 18.6); any
+ * other form stays the OP_CALL it always was.  Returns 1 and fills *inst.
+ */
+static int alias_convert(const char *name, int nargs, uint8_t role,
+                         hx_inst *inst)
+{
+	if (nargs != 1 || role != ROLE_DEFAULT) return 0;
+	return hx_convert_alias_inst(name, inst);
+}
+
 static void compile_node(compile_ctx *c, hx_node *node)
 {
 	hx_inst inst;
@@ -354,6 +659,8 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		break;
 
 	case HX_VARIABLE:
+		if (loop_value(c, node->u.varname))
+			loop_misuse(c, node->u.varname, node->line);
 		inst.op = OP_PUSH_VAR;
 		inst.u.slot = resolve_var(c, node->u.varname);
 		emit(c, inst);
@@ -369,17 +676,44 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		break;
 
 	case HX_FUNCALL:
+		if (strcmp(node->u.call.name, "convert") == 0) {
+			compile_convert(c, node);
+			break;
+		}
+		if (strcmp(node->u.call.name, "valid") == 0 ||
+		    strcmp(node->u.call.name, "roundtrip") == 0 ||
+		    (strcmp(node->u.call.name, "emit") == 0 && node->u.call.nargs > 1)) {
+			compile_text_call(c, node);
+			break;
+		}
+		if (strcmp(node->u.call.name, "charsets") == 0) {
+			fprintf(stderr, "hx:%d: charsets() can only follow 'in' in a for "
+			        "loop\n", node->line);
+			hx_compile_die();
+		}
+
 		/* push args left to right */
 		for (i = 0; i < node->u.call.nargs; i++)
 			compile_node(c, node->u.call.args[i]);
 
 		fe = resolve_func(node->u.call.name, &role);
 		if (!fe) {
+			/* an alias with no registry entry: cp1252_to_utf8 ... */
+			if (alias_convert(node->u.call.name, node->u.call.nargs,
+			                  ROLE_DEFAULT, &inst)) {
+				emit(c, inst);
+				break;
+			}
 			fprintf(stderr, "hx:%d: unknown function '%s'\n",
 			        node->line, node->u.call.name);
-			exit(1);
+			hx_compile_die();
 		}
 		validate_role(fe, role, node->u.call.name, node->line);
+
+		if (alias_convert(fe->name, node->u.call.nargs, role, &inst)) {
+			emit(c, inst);
+			break;
+		}
 
 		/* detect emit() calls */
 		if (strcmp(node->u.call.name, "emit") == 0)
@@ -395,17 +729,69 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		break;
 
 	case HX_ITER:
+		if (strcmp(node->u.iter.name, "convert") == 0 ||
+		    strcmp(node->u.iter.name, "valid") == 0 ||
+		    strcmp(node->u.iter.name, "roundtrip") == 0 ||
+		    strcmp(node->u.iter.name, "charsets") == 0) {
+			fprintf(stderr, "hx:%d: %s() cannot be repeated with ^; "
+			        "nest the calls\n", node->line, node->u.iter.name);
+			hx_compile_die();
+		}
 		/* func^N(args) — push args, emit CALL in a loop */
 		for (i = 0; i < node->u.iter.nargs; i++)
 			compile_node(c, node->u.iter.args[i]);
 
 		fe = resolve_func(node->u.iter.name, &role);
-		if (!fe) {
-			fprintf(stderr, "hx:%d: unknown function '%s'\n",
-			        node->line, node->u.iter.name);
-			exit(1);
+		{
+			hx_inst conv;
+			int is_conv = alias_convert(fe ? fe->name : node->u.iter.name,
+			                            node->u.iter.nargs,
+			                            fe ? role : ROLE_DEFAULT, &conv);
+			if (!fe && !is_conv) {
+				fprintf(stderr, "hx:%d: unknown function '%s'\n",
+				        node->line, node->u.iter.name);
+				hx_compile_die();
+			}
+			if (fe)
+				validate_role(fe, role, node->u.iter.name, node->line);
+			if (is_conv) {
+				/* the same loop shape, with the conversion in
+				 * place of both calls (all aliases take one
+				 * argument, so the loop's call is the same) */
+				int iter_slot, limit = node->u.iter.count;
+				char tmpname[32];
+				snprintf(tmpname, sizeof(tmpname), "__iter_%d",
+				         c->ncode);
+				iter_slot = resolve_var(c, tmpname);
+				emit(c, conv);
+				if (limit > 1) {
+					inst.op = OP_PUSH_INT;
+					inst.u.ival = 1;
+					emit(c, inst);
+					inst.op = OP_STORE;
+					inst.u.slot = iter_slot;
+					emit(c, inst);
+					addr_loop = c->ncode;
+					emit(c, conv);
+					inst.op = OP_INC;
+					inst.u.slot = iter_slot;
+					emit(c, inst);
+					inst.op = OP_PUSH_VAR;
+					inst.u.slot = iter_slot;
+					emit(c, inst);
+					push(c);
+					inst.op = OP_PUSH_INT;
+					inst.u.ival = limit - 1;
+					emit(c, inst);
+					push(c);
+					inst.op = OP_JUMP_LE;
+					inst.u.addr = addr_loop;
+					emit(c, inst);
+					pop(c, 2);
+				}
+				break;
+			}
 		}
-		validate_role(fe, role, node->u.iter.name, node->line);
 
 		/*
 		 * For iter, we need a hidden loop counter.
@@ -475,6 +861,8 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		break;
 
 	case HX_ASSIGN:
+		if (loop_value(c, node->u.assign.varname))
+			loop_misuse(c, node->u.assign.varname, node->line);
 		compile_node(c, node->u.assign.expr);
 		slot = resolve_var(c, node->u.assign.varname);
 		/* DUP so the value remains as the statement's value */
@@ -500,6 +888,12 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		 * surfaced as SIGFPE/SIGSEGV in OpenSSL's atexit cleanup
 		 * (`ossl_ht_free`), since libcrypto's heap state was clobbered.
 		 */
+		if (node->u.forloop.in) {
+			compile_forin(c, node);
+			break;
+		}
+		if (loop_value(c, node->u.forloop.varname))
+			loop_misuse(c, node->u.forloop.varname, node->line);
 		slot = resolve_var(c, node->u.forloop.varname);
 
 		/* var = from */
@@ -555,7 +949,7 @@ static void compile_node(compile_ctx *c, hx_node *node)
 			default:
 				fprintf(stderr, "hx:%d: unsupported condition op\n",
 				        node->line);
-				exit(1);
+				hx_compile_die();
 			}
 
 			/* placeholder jump — addr filled in after then-body */
@@ -616,7 +1010,7 @@ static void compile_node(compile_ctx *c, hx_node *node)
 		/* should not appear standalone — handled by HX_IF */
 		fprintf(stderr, "hx:%d: unexpected binop outside condition\n",
 		        node->line);
-		exit(1);
+		hx_compile_die();
 	}
 }
 
@@ -661,6 +1055,8 @@ hx_program *hx_compile(hx_node *ast)
 	prog->nvars     = ctx.nvars;
 	prog->max_stack = ctx.max_depth + 8;  /* some headroom */
 	prog->has_emit  = ctx.has_emit;
+	prog->text_loop = ctx.text_loop;
+	prog->uses_groups = ctx.uses_groups;
 
 	return prog;
 }
@@ -680,15 +1076,11 @@ void hx_program_free(hx_program *prog)
 	free(prog);
 }
 
+static void dump_code(hx_program *prog, hx_inst *code, int ncode);
+
 void hx_program_dump(hx_program *prog)
 {
 	int i;
-	static const char *opnames[] = {
-		"PUSH_VAR", "PUSH_STR", "PUSH_INT", "STORE",
-		"CALL", "CONCAT", "HALT", "JUMP",
-		"INC", "JUMP_LE", "JUMP_EQ", "JUMP_NE",
-		"DUP", "POP"
-	};
 
 	fprintf(stderr, "--- hx bytecode: %d instructions, %d vars, "
 	        "%d strings ---\n", prog->ncode, prog->nvars, prog->nstrings);
@@ -700,10 +1092,38 @@ void hx_program_dump(hx_program *prog)
 		fprintf(stderr, "  str[%d] = \"%s\" (len=%d)\n",
 		        i, prog->strings[i], prog->strlens[i]);
 
-	for (i = 0; i < prog->ncode; i++) {
-		hx_inst *ip = &prog->code[i];
+	dump_code(prog, prog->code, prog->ncode);
+
+	/* what the VM runs, when fusion (hx-functions.md 18.7) changes it */
+	if (prog->ncode > 0) {
+		hx_inst *c = malloc(prog->ncode * sizeof *c);
+		int n;
+		if (!c) return;
+		memcpy(c, prog->code, prog->ncode * sizeof *c);
+		n = hx_convert_fuse(c, NULL, prog->ncode);
+		if (n < prog->ncode) {
+			fprintf(stderr, "--- fused for execution: %d instructions ---\n", n);
+			dump_code(prog, c, n);
+		}
+		free(c);
+	}
+}
+
+static void dump_code(hx_program *prog, hx_inst *code, int ncode)
+{
+	int i;
+	static const char *opnames[] = {
+		"PUSH_VAR", "PUSH_STR", "PUSH_INT", "STORE",
+		"CALL", "CONCAT", "HALT", "JUMP",
+		"INC", "JUMP_LE", "JUMP_LT", "JUMP_GT", "JUMP_GE",
+		"JUMP_EQ", "JUMP_NE", "DUP", "POP", "CONVERT"
+	};
+
+	for (i = 0; i < ncode; i++) {
+		hx_inst *ip = &code[i];
 		fprintf(stderr, "  %3d  %-10s", i,
-		        ip->op < 14 ? opnames[ip->op] : "???");
+		        ip->op < sizeof opnames / sizeof opnames[0]
+		        ? opnames[ip->op] : "???");
 		switch (ip->op) {
 		case OP_PUSH_VAR:
 		case OP_STORE:
@@ -721,17 +1141,26 @@ void hx_program_dump(hx_program *prog)
 			break;
 		case OP_CALL: {
 			static const char *role_short[] = {
-				"", " [bin]", " [hex]", " [b64]", " [mcf]"
+				"", " [bin]", " [hex]", " [b64]", " [mcf]", " [uc]"
 			};
 			uint8_t r = ip->u.call.role;
 			fprintf(stderr, " %s nargs=%d%s",
 			        ip->u.call.entry->name,
 			        ip->u.call.nargs,
-			        r < 5 ? role_short[r] : " [?role]");
+			        r < 6 ? role_short[r] : " [?role]");
+			break;
+		}
+		case OP_CONVERT: {
+			char d[128];
+			hx_convert_describe(ip, d, sizeof d);
+			fprintf(stderr, " convert %s", d);
 			break;
 		}
 		case OP_JUMP:
 		case OP_JUMP_LE:
+		case OP_JUMP_LT:
+		case OP_JUMP_GT:
+		case OP_JUMP_GE:
 		case OP_JUMP_EQ:
 		case OP_JUMP_NE:
 			fprintf(stderr, " → %d", ip->u.addr);

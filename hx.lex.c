@@ -1957,3 +1957,7 @@ void yyfree (void * ptr )
 #line 98 "hx.l"
 
 
+/* Reset between programs: a parse that failed inside { } must not leave
+ * the next program lexed as if it were inside braces. */
+void hx_lex_reset(void) { brace_depth = 0; }
+

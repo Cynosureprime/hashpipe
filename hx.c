@@ -13,6 +13,12 @@
 
 /*
  * $Log: hx.c,v $
+ * Revision 1.8  2026/11/26 19:50:22  dlr
+ * A compile or parse error no longer ends the process from inside the compiler when the caller can handle it. Every one of the compiler error exits now goes through hx_compile_die(), which returns to a trapped caller and exits 1 otherwise; hx_compile_expr_trapped() compiles with that trap set, and the lexer brace depth is reset at every compile so a parse that failed inside braces cannot affect the next one. The userdef loader compiles with the trap, so a broken stanza reaches its existing report naming the stanza, file and line, the rest of the file is still read, and every broken stanza is reported in one pass before the run is refused, as that design states; before, the first unknown function or syntax error exited at once with a bare hx:1 message and hid the rest. The standalone hx and every catalog compile behave exactly as before. Verified: a file with two broken stanzas reports both by name in mdxfind and hashpipe; hx error output unchanged; hashpipe -T 1064 passed, 0 failed; 25 stable ids identical; 4,295,447 phase-4a conformance checks pass, including 28 compile-error rows; mdindex selftest passes.
+ *
+ * Revision 1.7  2026/11/26 17:44:44  dlr
+ * hx convert phase 3. The arena grows by chaining blocks instead of realloc(), so a value already returned stays valid for the whole run: past the 256 KB first block realloc() moved the buffer under live values, and md5(hex^5(pass)) on a 10,000-byte password gave a wrong digest. New premaps lower_full and upper_full (SpecialCasing 18.0.0 unconditional mappings with Final_Sigma, case-ignorable characters skipped before the cased test, as ICU and CPython do), nfc, nfd, nfkc and nfkd (UAX 15, Unicode 18.0.0), nfd_hfs (the HFS+ decomposition, measured on an HFS+ volume: Unicode 3.2 BMP decomposition only, U+FFFE and U+FFFF stored as %EF%BF%BE and %EF%BF%BF); the lowbyte16 target and utf16_lowbyte(); lm_cpNNN for the 16 OEM pages, the LM DES step over the Windows LM preparation, null when a character has no OEM form. Adjacent conversions fuse when exact, in execution and in the dedup comparator only; the stable id hashes the unfused program. The old implementations of the 16 aliased functions are removed and their names bound to one conversion entry point; hx_func_register refuses an alias name, so no bridge can take one over. hx -V prints the Unicode version and table sources; hx -b labels the uc role. hx_func_count is correct again, restoring murmur3, siphash and pbkdf1_sha1, which 1.11 had made unknown. Verified: golden corpus identical; 25 stable ids unchanged; dedup verdicts, GPU eligibility (705 of 969), the 565 cores and the C mirror unchanged; all 20,171 NormalizationTest 18.0.0 lines pass; nfd_hfs equals the HFS+ filesystem over 271,857 strings; lm_cpNNN equals an independent DES over the Windows dumps for 41,686 passwords; fused and unfused programs agree over 55.4M comparisons; every one of 92 registry names compiles in hashpipe; hashpipe -T 1064 passed, 0 failed.
+ *
  * Revision 1.6  2026/09/25 16:27:35  dlr
  * Refuse an oversized $TESTVEC[] rather than shortening it. hx_expand_testvec clamped to HX_MAX_TESTVEC, which returns a well-formed digest for a password that was never presented and gives the caller no way to notice. It now names the requested size and the limit and exits 1. Pairs with hashpipe.c, where -X does the same and the bound is now the same number on both, so the 2 MB stated in hx.1 holds wherever a vector is read. The verify path in hashpipe keeps clamping on purpose, since a bulk ledger run should skip one oversized record rather than abort.
  *
@@ -57,12 +63,24 @@ extern void yy_delete_buffer(YY_BUFFER_STATE buf);
  * deliberately does NOT consult it, so catalog behaviour is unchanged. */
 int hx_diag_count = 0;
 
+#include <setjmp.h>
+
+void hx_lex_reset(void);
+static jmp_buf *hx_compile_trap;
+
+void hx_compile_die(void)
+{
+	if (hx_compile_trap) longjmp(*hx_compile_trap, 1);
+	exit(1);
+}
+
 hx_program *hx_compile_expr(const char *expr, const char *script_file)
 {
 	hx_node *ast;
 	hx_program *prog;
 
 	hx_line = 1;
+	hx_lex_reset();
 
 	if (script_file) {
 		yyin = fopen(script_file, "r");
@@ -98,6 +116,22 @@ hx_program *hx_compile_expr(const char *expr, const char *script_file)
 	return prog;
 }
 
+hx_program *hx_compile_expr_trapped(const char *expr)
+{
+	jmp_buf jb;
+	jmp_buf *saved = hx_compile_trap;
+	hx_program *volatile p = NULL;
+
+	hx_compile_trap = &jb;
+	if (setjmp(jb) == 0)
+		p = hx_compile_expr(expr, NULL);
+	else
+		p = NULL;
+	hx_compile_trap = saved;
+	hx_lex_reset();
+	return p;
+}
+
 #if defined(HX_STANDALONE) && !defined(HX_NO_MAIN)
 
 static void usage(void)
@@ -116,6 +150,7 @@ static void usage(void)
 	    "  -P pepper   pepper value\n"
 	    "  -d          dump AST (debug)\n"
 	    "  -b          dump bytecode (debug)\n"
+	    "  -V          print build facts: the Unicode version and table sources\n"
 	    "  -f file     read script from file\n"
 	    "\n"
 	    "Expression examples:\n"
@@ -136,6 +171,7 @@ static void usage(void)
 static hx_node *do_parse(const char *expr, const char *script_file)
 {
 	hx_line = 1;
+	hx_lex_reset();
 
 	if (script_file) {
 		yyin = fopen(script_file, "r");
@@ -156,14 +192,15 @@ static hx_node *do_parse(const char *expr, const char *script_file)
 		free(buf);
 		if (yyparse() != 0) {
 			fprintf(stderr, "hx: parse failed\n");
-			exit(1);
+			yy_delete_buffer(bs);
+			hx_compile_die();
 		}
 		yy_delete_buffer(bs);
 	}
 
 	if (!hx_parse_result) {
 		fprintf(stderr, "hx: empty program\n");
-		exit(1);
+		hx_compile_die();
 	}
 	return hx_parse_result;
 }
@@ -266,8 +303,11 @@ int main(int argc, char **argv)
 	hx_program *prog;
 	hx_vm vm;
 
-	while ((opt = getopt(argc, argv, "dbf:p:s:S:P:u:h")) != -1) {
+	while ((opt = getopt(argc, argv, "dbf:p:s:S:P:u:hV")) != -1) {
 		switch (opt) {
+		case 'V':
+			printf("hx (v0.1)\n%s", hx_build_facts());
+			return 0;
 		case 'd':
 			dump_ast = 1;
 			break;

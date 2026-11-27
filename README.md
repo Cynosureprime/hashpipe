@@ -375,14 +375,72 @@ All hashpipe hash types are automatically available as hx functions (lowercase n
 - **Kerberos**: `rc4_hmac_md5()`, `aes128_cts_hmac_sha1()`, `aes256_cts_hmac_sha1()`
 - **Ciphers**: `des()`, `des_block()`, `des3()`, `aes_ecb_encrypt()`, `aes_cbc_encrypt/decrypt()`, `aes_unwrap()`
 - **String transforms**: `hex()`, `upper()`, `lower()`, `rev()`, `bswap32()`, `rotate()`, `cut()`, `pad()`, `trunc()`, `cap()`, `rot13()`
-- **Encoding**: `base64()`, `frombase64()`, `fromhex()`, `utf16le/be()`, `utf7()`, `zext16()`, `ebcdic()`, `from_cp1252/1251()`
+- **Transfer encodings**: `hex()`, `base64()`, `frombase64()`, `fromhex()`, `ebcdic()`
+- **Character sets**: `convert(x, from, to, token, ...)` between any two of more than 100 charsets, and named forms of it: `utf16le/be()`, `utf7()`, `zext16()`, `from_cp1252/1251()`, `cpNNN_to_utf8()`, `utf8_to_cpNNN()`, `utf8_to_cpNNN_bestfit()`, `latin1_to_utf8()`, `koi8r_to_utf8()`, `from_utf16le()` and others
+- **Characters**: `ulength()`, `ucut()`, `utrunc()`, `urev()`; case mapping `ulower()`/`uupper()` (Unicode simple), `ulower_full()`/`uupper_full()` (full), `ulower_win()`/`uupper_win()` (Windows' table); normalization `nfc()`, `nfd()`, `nfkc()`, `nfkd()`, `nfd_hfs()`
+- **LM**: `lm_cp437()` ... `lm_cp869()`, the LM hash a Windows machine with that OEM code page stores
 - **Non-crypto hashes**: `siphash()`, `murmur3()`
 - **Bitwise/arithmetic**: `xor()`, `and()`, `or()`, `wperm()`, `add()`, `sub()`, `mul()`, `mod()`, `length()`
-- **Control flow**: `for`/`to` loops, `if`/`else` conditionals, `emit()` for multi-value output
+- **Control flow**: `for`/`to` loops, `for cs in charsets("group")` loops over encodings, `if`/`else` conditionals, `valid()` and `roundtrip()`, `emit()` for multi-value and labelled output
+
+### Text and Encodings
+
+A hash function reads bytes, not characters.  An ASCII password has the same bytes in
+UTF-8 and in nearly every code page, but `é` is `c3a9` in UTF-8, `e9` in CP1252, `82`
+in CP437 and `e900` in UTF-16LE, and each gives a different digest.  To verify a
+password, hx must hash the bytes the site hashed, so it can state the site's encoding
+exactly:
+
+```bash
+# MD5 of the CP1252 bytes of a UTF-8 password; both lines are the same instruction
+echo café | hashpipe -X 'md5(convert(pass, "utf8", "cp1252"))'
+961f50f6282239d09e48f812c1ca7276
+echo café | hashpipe -X 'md5(utf8_to_cp1252(pass))'
+961f50f6282239d09e48f812c1ca7276
+```
+
+The charsets are the Unicode forms (UTF-8, UTF-16, UTF-32, CESU-8, UTF-7), 78 Windows
+code pages measured exhaustively on Windows 11 (lenient and strict decoding, best fit,
+the DBCS rules and the OEM glyphs), the published single-byte tables (ISO-8859, KOI8,
+Apple, Adobe and others), the CJK charsets (Shift_JIS, EUC-JP, ISO-2022-JP, EUC-KR,
+GB2312, GB 18030) with the WHATWG Encoding Standard's readings beside them, GSM 03.38
+and T.61.  Every table is built into hx, so no result depends on the platform or its C
+library.  Tokens select what happens to input the decoder cannot read (`keep`, `null`,
+`latin1`, `fffd`), to characters the target cannot write (`default`, `fail`), and
+whether Windows' best fit applies (`strict`, `bestfit`).
+
+A conversion that cannot be carried out gives an empty result, never an error.
+Conversion is not repair: it changes how characters are written, not which characters
+they are, and it cannot restore bytes that were truncated or replaced with `?`.
+
+A loop over encodings tries a password in each of them.  This undoes one round of
+mojibake, keeping the readings that come back as valid UTF-8:
+
+```bash
+echo '$HEX[c383c2a9]' | hashpipe -X 'for a in charsets("windows") {
+    t = convert(pass, "utf8", a, "fail"); if valid(t, "utf8") { emit(t, a) } }'
+cp1252	$HEX[c3a9]
+cp1254	$HEX[c3a9]
+```
+
+With an empty label, `emit(x, "")` writes the value alone, as `$HEX[...]` when it is not
+printable, one line for each input line.  So `-X` converts a whole list, and stages
+chain through a pipe.  A failed conversion is an empty line and never a marker, which
+keeps every output line opposite its input line:
+
+```bash
+printf '%s\n' abc '$HEX[c3a9]' '$HEX[d0b0]' |
+    hashpipe -X 'emit(convert(pass, "utf8", "cp1252", "fail"), "")'
+abc
+$HEX[e9]
+
+```
+
+The third line is empty: CP1252 has no Cyrillic `а`, so that conversion fails.
 
 ### hx Language Specification
 
-The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all mdxfind types to their hx expressions.
+The full hx language specification is available at [www.mdxfind.com/hx.pdf](https://www.mdxfind.com/hx.pdf), covering the complete grammar, type system, evaluation model, and a reference table mapping all mdxfind types to their hx expressions.  Its "Text and Encodings" chapter defines the character model, `convert()` and every charset, token and Windows rule, and Appendix C lists every encoding name, token and `charsets()` group.
 
 ## Identifying a hash: bertillon
 

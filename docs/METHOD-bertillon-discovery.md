@@ -284,14 +284,14 @@ a superset of the one above it:
 
 | type | conversions offered |
 |---|---|
-| `MD4UTF16` | iconv UTF-8 -> UTF-16LE only |
+| `MD4UTF16` | UTF-8 -> UTF-16LE only; ill-formed UTF-8 gives no hash |
 | `NTLMH` | that, PLUS a UTF-16LE zero-extend (hashcat's method) |
 | `NTLM` | that, PLUS CP1251 and CP1252 variants |
 
 hashcat mode 1000 maps to NTLMH, not to NTLM.
 
 **INFERENCE AVAILABLE:** all three coincide only on ASCII input — a UTF-8 `é`
-(`0xC3 0xA9`) is one UTF-16LE unit under iconv and two under zero-extend. So
+(`0xC3 0xA9`) is one UTF-16LE unit decoded as UTF-8 and two under zero-extend. So
 all three labels agreeing on a pair means **the plaintext is pure ASCII**.
 
 Which label to record is a judgement about where the list came from. Nothing in

@@ -2,8 +2,22 @@
 .\" NOTE: this is the man page for the hx COMMAND.  The hx LANGUAGE
 .\" specification is a separate mm-macro document of the same stem, kept in
 .\" a different directory.  Neither is derived from the other.
-.\" $Revision: 1.6 $
+.\" $Revision: 1.9 $
 .\" $Log: hx.1,v $
+.\" Revision 1.9  2026/11/27 06:45:05  dlr
+.\" BUILDING: hx no longer needs libiconv; the recipe drops libiconv.a and
+.\" adds ruleproc32.c and classify_utf8.c, as the Makefile's hx target does.
+.\" Published single-byte tables (ISO-8859, KOI8, Apple, Adobe and others);
+.\" more than 100 charsets, every name in the reference document's Appendix
+.\" C; emit() with an empty label writes the value alone. TH date to
+.\" 2026-11-26.
+.\"
+.\" Revision 1.8  2026/11/27 02:44:39  dlr
+.\" The reference document's Text and Encodings chapter: name the text programs and the full set of charsets.
+.\"
+.\" Revision 1.7  2026/11/26 18:03:15  dlr
+.\" Point to the Text and Encodings chapter of the hx specification from EXPRESSION LANGUAGE, and document -V, which prints the version, the Unicode version the character functions are frozen at and the conversion table sources.
+.\"
 .\" Revision 1.6  2026/09/25 16:23:16  dlr
 .\" Document how a candidate is presented. The page named the bound variables but never said what pass is bound TO, so the one thing a caller must know to use hx as an oracle was absent: that a candidate may arrive wrapped and that the wrapper is decoded. New subsection under EXPRESSION LANGUAGE covers $HEX[] and $TESTVEC[], states that both are read on -p and on stdin and mean the same to hashpipe under -X and in verify mode, gives the vector grammar, notes the 2 MB bound on a decoded vector, records that a string which does not parse as either is taken literally rather than rejected, and points at fromhex() for hex that is not wrapped. Written after hx.c 1.5 made $TESTVEC[] work in this command at all -- it had been hex-decoding the pattern and dropping the repeat count -- and hashpipe.c 1.208 made both wrappers native on -X, so the page now describes behaviour that is actually uniform across the channels it claims.
 .\"
@@ -22,7 +36,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hx(1) man page for the hx COMMAND. All 8 options plus the $HEX[] and $TESTVEC[] input decoding. Defers the language itself to the mm-macro hx specification, which stays authoritative.
 .\"
-.TH HX 1 "2026-08-29" "hx" "Password Recovery"
+.TH HX 1 "2026-11-26" "hx" "Password Recovery"
 .SH NAME
 hx \- evaluate hash expressions
 .SH SYNOPSIS
@@ -143,6 +157,10 @@ Dump the abstract syntax tree and exit without compiling further.
 .B \-b
 Dump the compiled bytecode and exit without running.
 .TP
+.B \-V
+Print the version, the Unicode version the character functions are frozen
+at (18.0.0), and the sources of the conversion tables, then exit.
+.TP
 .B \-h
 Print the usage summary and exit.
 .SH BUILDING
@@ -166,19 +184,21 @@ hand, or outside the tree:
 .nf
 cc \-DHX_STANDALONE \-O3 \-I. \-I$PREFIX/include \e
    \-o hx hx.c hx_ast.c hx_compile.c hx_vm.c hx_func.c \e
-         hx.tab.c hx.lex.c myprogress.c \e
-   \-L$PREFIX/lib \-lssl \-lcrypto $PREFIX/lib/libiconv.a
+         hx.tab.c hx.lex.c myprogress.c ruleproc32.c classify_utf8.c \e
+   \-L$PREFIX/lib \-lssl \-lcrypto
 .fi
 .RE
 .PP
 .I $PREFIX
-is wherever OpenSSL and libiconv are installed \(em
+is wherever OpenSSL is installed \(em
 .BR /usr ,
 .BR /usr/local ,
 .B /opt/local
 and
 .B /opt/homebrew
-are the usual candidates, and the two need not share a prefix.
+are the usual candidates.
+No iconv library is needed: every character conversion uses tables
+built into hx, so no result depends on the platform's C library.
 .PP
 Three things go wrong if you deviate:
 .TP 3
@@ -297,6 +317,50 @@ The full language \(em every function, encoding, control construct and the
 catalogued expression for each of the supported hash types \(em is
 specified in the mm-macro hx reference document, which is the authority.
 This page covers the command only.
+.PP
+Text is described in that document's \(lqText and Encodings\(rq chapter:
+the character model behind
+.BR ulength (),
+.BR ucut ()
+and
+.BR ulower (),
+the
+.BR convert ()
+function and its registry of charsets and transfer encodings, the
+text programs that try a password across many charsets
+.RB ( "for cs in charsets(\(dqall\(dq) { ... }" ,
+.BR valid (),
+.BR roundtrip (),
+labelled
+.BR emit ()),
+the named
+conversions such as
+.BR cp1252_to_utf8 ()
+and
+.BR utf8_to_cp437_bestfit (),
+Unicode 18.0.0 case mapping and normalization, and
+.BR lm_cp437 ()
+and the other per-OEM-page LM functions.
+The charsets are the Unicode forms (UTF-8, UTF-16, UTF-32, CESU-8,
+UTF-7), 78 Windows code pages with Windows' lenient, strict, best-fit,
+DBCS and glyph rules, the published single-byte tables (ISO-8859,
+KOI8, Apple, Adobe and others), the CJK standards (Shift_JIS, EUC-JP, ISO-2022-JP,
+EUC-KR, GB2312, GB 18030) with the Encoding Standard's readings of each
+beside them, GSM 03.38 and T.61.
+More than 100 charsets are registered; the reference document's Appendix C
+lists every name, token and
+.BR charsets ()
+group.
+A conversion that cannot be carried out yields an empty result, never an
+error.
+.BR emit ()
+with an empty label,
+.BR "emit(\fIx\fP, \(dq\(dq)" ,
+writes the value alone, as
+.B $HEX[...]
+when it is not printable, and nothing else.
+.B "hx \-V"
+prints the Unicode version and the sources of the conversion tables.
 .SH "EXIT STATUS"
 0 on success, 1 on a usage error, a compile failure, or an allocation
 failure.

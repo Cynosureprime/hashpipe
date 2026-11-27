@@ -84,6 +84,13 @@ hx_node *hx_for(const char *var, hx_node *from, hx_node *to,
 	return n;
 }
 
+hx_node *hx_forin(const char *var, hx_node *in, hx_node *body, int line)
+{
+	hx_node *n = hx_for(var, NULL, NULL, body, line);
+	n->u.forloop.in = in;
+	return n;
+}
+
 hx_node *hx_if(hx_node *cond, hx_node *then_b, hx_node *else_b, int line)
 {
 	hx_node *n = node_new(HX_IF, line);
@@ -148,6 +155,7 @@ void hx_free(hx_node *node)
 		free(node->u.forloop.varname);
 		hx_free(node->u.forloop.from);
 		hx_free(node->u.forloop.to);
+		hx_free(node->u.forloop.in);
 		hx_free(node->u.forloop.body);
 		break;
 	case HX_IF:
@@ -227,6 +235,15 @@ void hx_dump(hx_node *node, int depth)
 		break;
 	case HX_FOR:
 		fprintf(stderr, "FOR %s\n", node->u.forloop.varname);
+		if (node->u.forloop.in) {
+			for (i = 0; i < depth + 1; i++) fprintf(stderr, "  ");
+			fprintf(stderr, "in:\n");
+			hx_dump(node->u.forloop.in, depth + 2);
+			for (i = 0; i < depth + 1; i++) fprintf(stderr, "  ");
+			fprintf(stderr, "body:\n");
+			hx_dump(node->u.forloop.body, depth + 2);
+			break;
+		}
 		for (i = 0; i < depth + 1; i++) fprintf(stderr, "  ");
 		fprintf(stderr, "from:\n");
 		hx_dump(node->u.forloop.from, depth + 2);

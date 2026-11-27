@@ -1,6 +1,16 @@
 .\" hashpipe(1) -- man-macro reference page
-.\" $Revision: 1.18 $
+.\" $Revision: 1.20 $
 .\" $Log: hashpipe.1,v $
+.\" Revision 1.20  2026/11/27 06:45:05  dlr
+.\" -X: emit(x, label) writes the label, a tab and the value, as $HEX[...]
+.\" when not printable; an empty label writes the value alone, one line per
+.\" input line, so -X converts a whole list and stages chain through a pipe.
+.\" A failed conversion is an empty line, never a marker. TH to hashpipe
+.\" 1.249.
+.\"
+.\" Revision 1.19  2026/11/26 20:57:20  dlr
+.\" State the user-type label rule as it is: with no stored form the label carries the iteration depth, USER_<name>xNN, where x02 is the expression applied again to the hex of the x01 result with the same salt; a type with emit() is compared at x01 only; a type with a stored form is labelled without a suffix, as a built-in stored form is.
+.\"
 .\" Revision 1.18  2026/11/09 21:45:23  dlr
 .\" TH version to hashpipe 1.230; it still named 1.219.
 .\"
@@ -78,7 +88,7 @@
 .\" Revision 1.1  2026/08/29 16:30:16  dlr
 .\" Initial revision: hashpipe(1) man page. Covers all 24 getopt options including the 11 absent from the built-in usage text (-L -G -X -F -p -S -P -u -D -Y -J). Documents the -L silent-decline hazard on expensive types, the -J exact-match output mode selector and HASHPIPE_OUTPUT, and the hx expression mode where -F is a script file rather than a hash file.
 .\"
-.TH HASHPIPE 1 "2026-11-09" "hashpipe 1.230" "Password Recovery"
+.TH HASHPIPE 1 "2026-11-26" "hashpipe 1.249" "Password Recovery"
 .SH NAME
 hashpipe \- verify and identify hash/password pairs
 .SH SYNOPSIS
@@ -455,6 +465,34 @@ computes and prints; it reads no hash file and performs no comparison.
 Evaluate
 .I expression
 against each password.
+.IP
+.BI emit( x ,\  label )
+writes the label, a tab and the value, and writes a value that is not
+printable ASCII as
+.BR $HEX[...] ,
+the form every tool in the suite reads back.
+An empty label writes nothing, not even its tab, so
+.B emit(\fIx\fP, \(dq\(dq)
+gives exactly one output line per input line holding the value alone.
+That makes
+.B \-X
+a converter for a whole list, and stages chain through a pipe:
+.PP
+.RS
+.nf
+$ printf '%s\en' abc '$HEX[c3a9]' '$HEX[d0b0]' |
+    hashpipe \-X 'emit(convert(pass, "utf8", "cp1252", "fail"), "")'
+abc
+$HEX[e9]
+
+.fi
+.RE
+.IP
+A conversion that fails gives an empty line, never a marker, so each
+output line stays opposite its input line; the third line above is
+empty because CP1252 has no Cyrillic a.
+The conversions, charsets and tokens are those of the hx reference
+document's \(lqText and Encodings\(rq chapter.
 .TP
 .BI \-F " file"
 Read the hx program from
@@ -536,22 +574,24 @@ on output: a stanza headed
 .B [BWTDT]
 emits
 .BR USER_BWTDT .
-It evaluates its expression once and has no iteration ladder, so no
-.BI x NN
-suffix is written \(em the label is
-.B USER_BWTDT
-and never
-.BR USER_BWTDTx01 .
-That matches
+A user type with no stored form is verified at each depth up to
+.B \-i
+and labelled with the depth found,
+.BI USER_ name x NN\fR:
+x02 is the expression applied again to the hex of the x01 result, with the
+same salt.  A type whose expression uses
+.B emit()
+is compared at x01 only.  A type that declares a stored form, as
+.B [BWTDT]
+does, is labelled without a suffix, as a built-in stored form is.  Under
+.BR \-c ,
+a depth in the label must be the depth found, and a label without one is
+verified at any depth.  The labels match
 .BR mdxfind (1)
-exactly, which matters because
+exactly, and
 .BR mdsplit (1)
-files by the emitted label: before 1.195 the two tools disagreed and the same
-recovered hash landed in two different ledger files depending on which tool
-produced the line.  The
-.BI x NN
-form is still accepted on input, so files written by an older build still
-read back.
+files by the emitted label, so output from either tool lands in the same
+ledger file.
 .TP
 .B \-h
 Print the usage summary followed by the full type table \(em internal

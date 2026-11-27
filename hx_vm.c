@@ -13,11 +13,18 @@
 
 /* ---- arena ---- */
 
+struct hx_arena_blk {
+	hx_arena_blk *next;
+	char         *buf;
+};
+
 void hx_arena_init(hx_arena *a, int cap)
 {
 	a->buf  = malloc(cap);
 	a->used = 0;
 	a->cap  = cap;
+	a->old  = NULL;
+	a->emits = NULL;
 	if (!a->buf) {
 		fprintf(stderr, "hx: arena alloc failed (%d bytes)\n", cap);
 		exit(1);
@@ -32,27 +39,48 @@ char *hx_arena_alloc(hx_arena *a, int size)
 	size = (size + 7) & ~7;
 
 	if (a->used + size > a->cap) {
-		/* double the arena */
-		while (a->used + size > a->cap)
-			a->cap *= 2;
-		a->buf = realloc(a->buf, a->cap);
-		if (!a->buf) {
-			fprintf(stderr, "hx: arena realloc failed\n");
+		/* start a block of double the size (or more), keeping the full
+		 * one: values already handed out live in it */
+		hx_arena_blk *b = malloc(sizeof *b);
+		int cap = a->cap > 0 ? a->cap : HX_ARENA_SIZE;
+		while (size > cap)
+			cap *= 2;
+		cap *= 2;
+		if (!b || !(p = malloc(cap))) {
+			fprintf(stderr, "hx: arena alloc failed (%d bytes)\n", cap);
 			exit(1);
 		}
+		b->buf  = a->buf;
+		b->next = a->old;
+		a->old  = b;
+		a->buf  = p;
+		a->cap  = cap;
+		a->used = 0;
 	}
 	p = a->buf + a->used;
 	a->used += size;
 	return p;
 }
 
+static void hx_arena_free_old(hx_arena *a)
+{
+	while (a->old) {
+		hx_arena_blk *b = a->old;
+		a->old = b->next;
+		free(b->buf);
+		free(b);
+	}
+}
+
 void hx_arena_reset(hx_arena *a)
 {
+	hx_arena_free_old(a);
 	a->used = 0;
 }
 
 void hx_arena_free(hx_arena *a)
 {
+	hx_arena_free_old(a);
 	free(a->buf);
 	a->buf  = NULL;
 	a->used = 0;
@@ -61,14 +89,30 @@ void hx_arena_free(hx_arena *a)
 
 /* ---- VM ---- */
 
+int hx_vm_fuse = 1;
+
 void hx_vm_init(hx_vm *vm, hx_program *prog)
 {
+	int i;
 	memset(vm, 0, sizeof(*vm));
 	vm->prog      = prog;
 	hx_arena_init(&vm->arena, HX_ARENA_SIZE);
 	vm->stack_cap = prog->max_stack;
 	vm->stack     = calloc(vm->stack_cap, sizeof(hx_val));
 	vm->vars      = calloc(prog->nvars, sizeof(hx_val));
+	vm->code      = prog->code;
+	/* run the fused program (hx-functions.md 18.7) when fusion changes it */
+	for (i = 0; hx_vm_fuse && i + 1 < prog->ncode; i++)
+		if (prog->code[i].op == OP_CONVERT && prog->code[i + 1].op == OP_CONVERT) {
+			hx_inst *c = malloc(prog->ncode * sizeof(hx_inst));
+			if (!c) { fprintf(stderr, "hx: out of memory\n"); exit(1); }
+			memcpy(c, prog->code, prog->ncode * sizeof(hx_inst));
+			if (hx_convert_fuse(c, NULL, prog->ncode) < prog->ncode)
+				vm->code = vm->owncode = c;
+			else
+				free(c);
+			break;
+		}
 }
 
 void hx_vm_free(hx_vm *vm)
@@ -76,6 +120,10 @@ void hx_vm_free(hx_vm *vm)
 	hx_arena_free(&vm->arena);
 	free(vm->stack);
 	free(vm->vars);
+	free(vm->owncode);
+	vm->owncode = vm->code = NULL;
+	free(vm->emits.v);
+	memset(&vm->emits, 0, sizeof vm->emits);
 }
 
 /*
@@ -136,7 +184,7 @@ hx_val hx_vm_run(hx_vm *vm, const char *pass, int passlen,
                   const char *pepper, int pepperlen,
                   const char *user, int userlen)
 {
-	hx_inst *code = vm->prog->code;
+	hx_inst *code = vm->code ? vm->code : vm->prog->code;
 	hx_val  *stack = vm->stack;
 	hx_val  *vars  = vm->vars;
 	int      sp = 0;        /* stack pointer (next free slot) */
@@ -144,6 +192,9 @@ hx_val hx_vm_run(hx_vm *vm, const char *pass, int passlen,
 	hx_val   result;
 
 	hx_arena_reset(&vm->arena);
+	/* set at every run, not at init: hashpipe moves its hx_vm array */
+	vm->arena.emits = vm->capture ? &vm->emits : NULL;
+	vm->emits.n = 0;
 
 	/* reset all variables */
 	memset(vars, 0, vm->prog->nvars * sizeof(hx_val));
@@ -215,6 +266,13 @@ hx_val hx_vm_run(hx_vm *vm, const char *pass, int passlen,
 			    args, nargs, &res, &vm->arena, role);
 			sp -= nargs;
 			stack[sp++] = res;
+			break;
+		}
+
+		case OP_CONVERT: {
+			hx_val res;
+			hx_convert_run(ip, &stack[sp - 1], &res, &vm->arena);
+			stack[sp - 1] = res;
 			break;
 		}
 

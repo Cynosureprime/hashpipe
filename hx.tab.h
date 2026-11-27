@@ -45,7 +45,7 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 24 "hx.y"
+#line 29 "hx.y"
 
 #include "hx_ast.h"
 
@@ -91,7 +91,7 @@ typedef struct {
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 66 "hx.y"
+#line 71 "hx.y"
 
 	char    *str;
 	int64_t  num;

@@ -1,8 +1,20 @@
 /*
  * userdef.c - user-defined hash type loader for mdxfind (Milestone 1)
  *
- * $Revision: 1.13 $
+ * $Revision: 1.17 $
  * $Log: userdef.c,v $
+ * Revision 1.17  2026/11/26 20:57:20  dlr
+ * Refuse charsets() in a user type, naming the stanza, file and line. A charsets() group gains members as encodings are added, so a user type built on one would change meaning; a user type names its encodings in an explicit list, which still works. Verified: a stanza using charsets("windows") is reported and the run refused, the same loop over an explicit list loads; 25 stable ids identical; hashpipe -T 1064 passed, 0 failed; userdef round trip PASS.
+ *
+ * Revision 1.16  2026/11/26 19:50:22  dlr
+ * A compile or parse error no longer ends the process from inside the compiler when the caller can handle it. Every one of the compiler error exits now goes through hx_compile_die(), which returns to a trapped caller and exits 1 otherwise; hx_compile_expr_trapped() compiles with that trap set, and the lexer brace depth is reset at every compile so a parse that failed inside braces cannot affect the next one. The userdef loader compiles with the trap, so a broken stanza reaches its existing report naming the stanza, file and line, the rest of the file is still read, and every broken stanza is reported in one pass before the run is refused, as that design states; before, the first unknown function or syntax error exited at once with a bare hx:1 message and hid the rest. The standalone hx and every catalog compile behave exactly as before. Verified: a file with two broken stanzas reports both by name in mdxfind and hashpipe; hx error output unchanged; hashpipe -T 1064 passed, 0 failed; 25 stable ids identical; 4,295,447 phase-4a conformance checks pass, including 28 compile-error rows; mdindex selftest passes.
+ *
+ * Revision 1.15  2026/11/26 19:41:27  dlr
+ * hx text programs (phase 4a). for v in ("cp1252", ...) { } and for v in charsets("group") { } are unrolled at compile time over registry names; inside the body the variable may only be a convert() source or target, an encoding of valid() or roundtrip(), or an emit() label, so every conversion keeps static operands and identity, fusion, dedup and the stable id are unchanged. charsets() groups come from one table (all, windows, oem, iso8859, mac, ebcdic, cjk, unicode). if t is true when t is not empty, compiling exactly as t != "". valid(x, cs) and roundtrip(x, a, b) return "1" or "". emit(x, label, ...) writes the labels and the value separated by tabs, each field as $HEX[...] unless it is printable ASCII and does not begin with $HEX[; one-argument emit(x) is unchanged. The VM gains a capture mode in which emit() collects its values; in mdxfind and hashpipe user types every emitted value is one candidate digest for the password, compared at x01. Text programs are CPU-only, with the planner naming why. Verified: golden corpus, 25 stable ids, dedup verdicts, GPU eligibility (705 of 969), the 565 cores and the C mirror unchanged; hashpipe -T 1064 passed, 0 failed; 4,295,447 conformance checks pass; five test user types with emit() crack 53 of 53 in mdxfind and verify 53 of 53 in hashpipe.
+ *
+ * Revision 1.14  2026/11/26 16:17:57  dlr
+ * hx convert phase 1: add OP_CONVERT (from, to, policy, premap) and the convert() function, with a registry of charsets (utf8, utf16le, utf16be, utf7, latin1, cp1252, cp1251) and transfer encodings (raw, hex, base64, base64url, base32, crypt64, crypt64be, bcrypt64), string-literal arguments only, and compile errors for unknown names, repeated token groups, inapplicable tokens and charset/transfer mixing. utf16le, utf16be, utf7, zext16, from_cp1252, from_cp1251, hex, base64, phpass_encode and cisco4_encode now compile to OP_CONVERT; new aliases cp1252_to_utf8, cp1251_to_utf8, latin1_to_utf8, utf8_to_latin1. ebcdic, fromhex and frombase64 stay ordinary calls: their outputs differ from every convert parameter choice. Verified: a 69,932-input golden corpus through 26 legacy expressions is byte-identical before and after; all 25 userdef stable shared ids unchanged; dedup verdicts identical over 1,015 expressions; GPU plan eligibility unchanged (705 of 969 catalog rows) and the 565 generated cores byte-identical; hashpipe -T 1064 passed, 0 failed.
+ *
  * Revision 1.13  2026/11/20 05:22:13  dlr
  * Generic hx walker stage 1c: user-defined types run on the GPU through the generated walker. A user type is served when it takes no salt or user, declares no stored form, and its result is the hex of its final digest; rounds past x01 re-run the whole program on the previous round's hex text, keeping its case, as the userdef CPU arm does. The selected user type's status line says whether it runs on the GPU, or why not, in place of the former not-yet-enabled line. Verified: the C mirror agrees for 529 of 529 cores, including 10 user cores whose later rounds are checked against the hx VM re-running the program, and a planted case defect is caught in exactly the 8 case-sensitive ones; the 519 catalog cores are byte-identical; on dev3 (M2 Max, Metal) and gp1 (Tahiti, OpenCL) 10 user types match -G none at x01 and x02 and deeper with rules, a -n mask and a mixed run with a catalog type, except one type whose kernel the Tahiti compiler crashes on, which is FATAL there as for any such kernel.
  *
@@ -351,8 +363,16 @@ static int probe_diglen_hex(hx_program *prog)
 	static const char probe[] = "abc";
 
 	hx_vm_init(&vm, prog);
+	vm.capture = 1;   /* emit() collects candidates; it never writes stdout */
 	r = hx_vm_run(&vm, probe, (int)sizeof(probe) - 1,
 	              "", 0, "", 0, "", 0, "", 0);
+	/* hx-functions.md 19, decision 2: each emitted value is one candidate
+	 * digest for the password, so a program with emit() has the width of
+	 * its first emitted value */
+	if (prog->has_emit) {
+		memset(&r, 0, sizeof r);
+		if (vm.emits.n > 0) r = vm.emits.v[0];
+	}
 	n = (r.data && r.len > 0) ? r.len : 0;
 	hx_vm_free(&vm);
 	return n;
@@ -399,6 +419,28 @@ static void content_hash_hex(hx_program *prog, char *out, size_t outlen)
 	for (i = 0; i < prog->ncode; i++) {
 		const hx_inst *ip = &prog->code[i];
 		uint8_t op = ip->op;
+		if (op == OP_CONVERT) {
+			/* An OP_CONVERT that IS a legacy function (utf16le, zext16,
+			 * from_cp1252, hex, ...) hashes exactly as that function's
+			 * OP_CALL did -- nargs 1, role 0, its name -- so no stable id
+			 * moves (hx-functions.md 18.7).  Any other hashes as its
+			 * canonical spelling, names rather than registry numbers. */
+			const char *legacy = hx_convert_legacy_name(ip);
+			if (legacy) {
+				uint8_t cop = OP_CALL, role = 0;
+				int32_t na = 1;
+				fnv1a_mix(&h, &cop, 1);
+				fnv1a_mix(&h, &na, sizeof(na));
+				fnv1a_mix(&h, &role, 1);
+				fnv1a_mix(&h, legacy, strlen(legacy));
+			} else {
+				char d[128];
+				hx_convert_describe(ip, d, sizeof d);
+				fnv1a_mix(&h, &op, 1);
+				fnv1a_mix(&h, d, strlen(d));
+			}
+			continue;
+		}
 		fnv1a_mix(&h, &op, 1);
 		switch (op) {
 		case OP_PUSH_VAR:
@@ -760,7 +802,7 @@ static void finalize_stanza(const char *name, const char *idstr,
 	 * failed stanza -- otherwise a typo becomes a wrong hash type rather
 	 * than an error. */
 	hx_diag_count = 0;
-	prog = hx_compile_expr(hx, NULL);
+	prog = hx_compile_expr_trapped(hx);
 	if (prog && hx_diag_count > 0) {
 		userdef_errors++;
 		UD_ERR( "userdef: %s: stanza [%s] (near line %d): hx "
@@ -775,6 +817,19 @@ static void finalize_stanza(const char *name, const char *idstr,
 		        "expression failed to compile: %s\n",
 		        path, name, lineno, hx);
 		record_skip(idstr, "hx expression failed to compile (parse error)");
+		return;
+	}
+	/* A hash definition must not change meaning, and a charsets() group
+	 * gains members as encodings are added (hx-functions.md 19.4b): a user
+	 * type names its encodings in an explicit list. */
+	if (prog->uses_groups) {
+		userdef_errors++;
+		UD_ERR( "userdef: %s: stanza [%s] (near line %d): charsets() "
+		        "groups grow as encodings are added, so a user type names "
+		        "its encodings in an explicit list: %s\n",
+		        path, name, lineno, hx);
+		record_skip(idstr, "charsets() in a user type");
+		hx_program_free(prog);
 		return;
 	}
 

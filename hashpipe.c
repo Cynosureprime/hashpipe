@@ -14,10 +14,28 @@
  * rather than skipping it and verifying against fewer types than the file
  * declares. See userdef.c.
  */
-static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.243 2026/11/20 15:45:11 dlr Exp dlr $";
+static char *Version = "$Header: /Users/dlr/src/mdfind/RCS/hashpipe.c,v 1.249 2026/11/27 06:11:24 dlr Exp dlr $";
 
 /*
  * $Log: hashpipe.c,v $
+ * Revision 1.249  2026/11/27 06:11:24  dlr
+ * Built with the hx engine's full charset registry: 141 charsets, among them 78 Windows code pages with Windows' lenient and strict decodes and the OEM glyph readings, the standard single-byte tables (ISO-8859, Apple, Adobe, JIS X 0201, KZ-1048, VISCII, HP-Roman8, DEC-MCS, ATASCII, PETSCII), the CJK standards (Shift_JIS, EUC-JP, ISO-2022-JP, EUC-KR, GB2312, GB 18030-2022) with the WHATWG readings beside them and the C1 readings of EUC-JP and EUC-KR, UTF-32, UTF-16 with a BOM, CESU-8, UTF-7 decoding, GSM 03.38 and T.61. emit(x, "") writes the value alone, wrapped in $HEX[] when it is not printable. The fail token is accepted exactly where a pair can meet something unmappable. No source change in this file; the revision marks the engine it is built with. Verified: hashpipe -T 1064 passed, 0 failed; the full hx proof (golden corpus, 25 stable ids, dedup verdicts, GPU plans, patterns, cores, C mirror) identical; userdef round trip PASS.
+ *
+ * Revision 1.248  2026/11/26 20:57:19  dlr
+ * Verify user-defined types at every depth and label them as mdxfind does. A user type with no stored form iterates in mdxfind: x(n+1) is the expression run again with the hex of x(n) as the password and the same salt, and the line is labelled USER_<name>xNN. hashpipe evaluated the expression once and printed the bare label, so an x02 or deeper line did not verify, and an x01 line was filed under a different name from mdxfind's. hashpipe now walks the same chain up to -i, labels the line with the depth found, and under -c requires a labelled depth to be the depth found; a label with no depth verifies at any depth. A type with a declared stored form is still labelled bare, as mdxfind and the built-in stored forms label it, and a type with emit() is compared at x01 only. The iteration hex lives in the WS hexiter slot. Also refuses charsets() in a userdef stanza: groups gain members as encodings are added, and a hash definition must not change meaning, so a user type names its encodings in an explicit list. Verified: three test types (unsalted, salted, stored form) at -i 3 give byte-identical labels from mdxfind, hashpipe identification and hashpipe -c; every wrong-depth relabelling is rejected; 42 lines from the 21 installed user types verify identically; hashpipe -T 1064 passed, 0 failed; userdef round trip PASS.
+ *
+ * Revision 1.247  2026/11/26 19:41:27  dlr
+ * hx text programs (phase 4a). for v in ("cp1252", ...) { } and for v in charsets("group") { } are unrolled at compile time over registry names; inside the body the variable may only be a convert() source or target, an encoding of valid() or roundtrip(), or an emit() label, so every conversion keeps static operands and identity, fusion, dedup and the stable id are unchanged. charsets() groups come from one table (all, windows, oem, iso8859, mac, ebcdic, cjk, unicode). if t is true when t is not empty, compiling exactly as t != "". valid(x, cs) and roundtrip(x, a, b) return "1" or "". emit(x, label, ...) writes the labels and the value separated by tabs, each field as $HEX[...] unless it is printable ASCII and does not begin with $HEX[; one-argument emit(x) is unchanged. The VM gains a capture mode in which emit() collects its values; in mdxfind and hashpipe user types every emitted value is one candidate digest for the password, compared at x01. Text programs are CPU-only, with the planner naming why. Verified: golden corpus, 25 stable ids, dedup verdicts, GPU eligibility (705 of 969), the 565 cores and the C mirror unchanged; hashpipe -T 1064 passed, 0 failed; 4,295,447 conformance checks pass; five test user types with emit() crack 53 of 53 in mdxfind and verify 53 of 53 in hashpipe.
+ *
+ * Revision 1.246  2026/11/26 18:40:04  dlr
+ * AS400-DES verifies a 9- or 10-character password: a second DES key from characters 9-10 padded with 0x2a, the hash being the XOR of the two encryptions, as John the Ripper computes; a password over 10 characters is refused. The 9- and 10-character userid fold was already the bit-spreading one. Verified: John vectors 15 of 15 (12 before); 300 of 300 hashes over userid and password lengths 1 to 10 that John cracks; self-test 1064 passed, 0 failed.
+ *
+ * Revision 1.245  2026/11/21 15:27:52  dlr
+ * Add e1065 MD5-3xMD5UC in parity with mdxfind.c. Types[] appended at the end so the index is 1065 on both sides. compute_md5_3xmd5uc builds the 96-byte message in a WS slot beside compute_md5_2xmd5uc, no stack buffer; later rounds are md5 of the previous round lowercase hex. HT vector password123 -> e0c87daa1c6ad1b25d01d8c4a93b0105, from an independent python composition. Self-test 1064 passed, 0 failed, up from 1063. Every line mdxfind -z prints for the type at x01 to x03 verifies at its round, unlabelled and under -m e1065.
+ *
+ * Revision 1.244  2026/11/21 09:36:36  dlr
+ * Add e1064 MD5LMCOLONNTLMUC, md5(upper(lm(pass)) . ":" . upper(md4(utf16le(pass)))), in parity with mdxfind.c. Types[] appended at the end so the index is 1064 on both sides. compute_md5lmcolonntlmuc builds the 65-byte message in WS slots, no stack buffer, beside compute_md5_lmntlm; later rounds are md5 of the previous round lowercase hex. HT vector from mdxfind -z, password123 -> f0bf17628eb534fd29d8c3eef58da98e. Self-test 1063 passed, 0 failed, up from 1062. Every line mdxfind -z prints for the type at x01 to x03 verifies at its round, unlabelled; a wrong-case password does not verify. bench_rates.h has no rate for the type yet.
+ *
  * Revision 1.243  2026/11/20 15:45:11  dlr
  * Generic hx walker stages 3b and 4a. New walker bodies: MySQL 3 OLD_PASSWORD as a byte-wise accumulator in the dialect, BLAKE2b-512 and -256 and BLAKE2s-256 over the common b2b and b2s compress functions, and SHA3 and Keccak at 224, 256, 384 and 512 bits over keccakf1600; a final digest shorter than 16 bytes is compared as four words with the upper ones zero. User-defined types may now name mdxfind own hash functions: sha224, sha384, rmd128, rmd160, tiger, wrl, md2, gost, sne128, sne256, the fifteen HAVAL forms, mysql3, blake2b512, blake2b256, blake2s256, sha3_224 to sha3_512 and keccak224 to keccak512, each the call its catalog type makes. hashpipe registers its BLAKE2 digests as hx functions, which the verify registration had hidden. The drift check reads a NAME-prefixed hex digest and the bare digest as one value. 11 more catalog types run on the GPU: e410 e416 e449 e474 e478 e548 e711 e842 e843 e846 e847. Verified: each new user function agrees with its catalog type at x01 to x03 on the CPU and with hashpipe -X; the C mirror agrees for 567 of 567 cores and every earlier core changed only by the added dialect text; on dev3 (M2 Max, Metal) all new catalog types and 42 user types match -G none, and on gp1 (Tahiti, OpenCL) all do except the md2 user type, whose kernel the Tahiti compiler crashes on, which is FATAL there as for any such kernel.
  *
@@ -2512,6 +2530,8 @@ char *Types[] = {
     "MD5CRYPTMD5",
     "SHA256BASE64",
     "SHA1PASSUSERPASSUSER",
+    "MD5LMCOLONNTLMUC",
+    "MD5-3xMD5UC",
 
 NULL
 
@@ -9303,6 +9323,22 @@ static void compute_md5_lmntlm(const unsigned char *pass, int passlen, const uns
     rhash_msg(RHASH_MD5, (unsigned char *)hx, 64, dest);
 }
 
+/* MD5LMCOLONNTLMUC (e1064) -- md5(upper(hex(LM(pass))) . ":" . upper(hex(NTLM(pass)))) */
+static void compute_md5lmcolonntlmuc(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    /* NOTE: compute_lm uses ctx1,ctx2; compute_ntlm uses u16a -- use ctx3,ctx4 */
+    unsigned char *lm = (unsigned char *)WS->ctx3;
+    unsigned char *ntlm = (unsigned char *)WS->ctx4;
+    char *hx = (char *)WS->gp1;
+    (void)salt; (void)saltlen;
+    compute_lm(pass, passlen, NULL, 0, lm);
+    compute_ntlm(pass, passlen, NULL, 0, ntlm);
+    prmd5UC(lm, hx, 32);
+    hx[32] = ':';
+    prmd5UC(ntlm, hx + 33, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)hx, 65, dest);
+}
+
 /* MD5LM — rhash_msg(RHASH_MD5, hex(LM(pass))) */
 static void compute_md5lm(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
 {
@@ -9613,6 +9649,17 @@ static void compute_md5_2xmd5uc(const unsigned char *pass, int passlen, const un
     rhash_msg(RHASH_MD5, pass, passlen, h);
     prmd5UC(h, buf, 32); prmd5UC(h, buf + 32, 32);
     rhash_msg(RHASH_MD5, (unsigned char *)buf, 64, dest);
+}
+
+/* MD5-3xMD5UC (e1065): h = upper(hex(md5(pass))); md5(h . h . h) */
+static void compute_md5_3xmd5uc(const unsigned char *pass, int passlen, const unsigned char *salt, int saltlen, unsigned char *dest)
+{
+    unsigned char *h = (unsigned char *)WS->ctx1;
+    char *buf = (char *)WS->gp1;
+    (void)salt; (void)saltlen;
+    rhash_msg(RHASH_MD5, pass, passlen, h);
+    prmd5UC(h, buf, 32); prmd5UC(h, buf + 32, 32); prmd5UC(h, buf + 64, 32);
+    rhash_msg(RHASH_MD5, (unsigned char *)buf, 96, dest);
 }
 
 /* MD5-NxSHA1MD5 = SHA1MD5(hex(MD5-NxMD5(pass))) — wait, names are complex */
@@ -18287,7 +18334,9 @@ static int verify_as400des(const char *hashstr, int hashlen,
     if (hlen != 16) return 0;
     if (hex2bin(p2, 16, expected) != 8) return 0;
 
-    /* Password → EBCDIC_PC, pad to 8 with 0x2a */
+    /* Password → EBCDIC_PC, pad to 8 with 0x2a.  A password is at most 10
+     * characters; characters 9-10 make a second key (below). */
+    if (passlen > 10) return 0;
     int pwlen = passlen > 8 ? 8 : passlen;
     for (i = 0; i < 8; i++)
         deskey[i] = (i < pwlen) ? a2e_pc[pass[i]] : 0x2a;
@@ -18322,6 +18371,17 @@ static int verify_as400des(const char *hashstr, int hashlen,
     }
 
     DES_ecb_encrypt((const_DES_cblock *)euser, (DES_cblock *)ciphertext, ks, DES_ENCRYPT);
+    /* A 9- or 10-character password: key 2 is characters 9-10 padded with
+     * 0x2a, and the hash is the XOR of the two encryptions (John's
+     * as400-des).  ciphertext + 8 lies in the same WS slot. */
+    if (passlen > 8) {
+        unsigned char *ct2 = ciphertext + 8;
+        for (i = 0; i < 8; i++)
+            deskey[i] = (8 + i < passlen) ? a2e_pc[pass[8 + i]] : 0x2a;
+        DES_set_key_unchecked((DES_cblock *)deskey, ks);
+        DES_ecb_encrypt((const_DES_cblock *)euser, (DES_cblock *)ct2, ks, DES_ENCRYPT);
+        for (i = 0; i < 8; i++) ciphertext[i] ^= ct2[i];
+    }
     return memcmp(ciphertext, expected, 8) == 0;
 }
 
@@ -27234,6 +27294,8 @@ static void init_hashtypes(void)
 
     /* --- MD5-LMNTLM and MD5LM --- */
     HT("MD5-LMNTLM",  16, HTF_COMPOSED, compute_md5_lmntlm, "a2e7c092491a70fa7e0a943591c271ab:password123");
+    HT("MD5LMCOLONNTLMUC", 16, HTF_COMPOSED, compute_md5lmcolonntlmuc, "f0bf17628eb534fd29d8c3eef58da98e:password123");
+    HT("MD5-3xMD5UC",           16, 0, compute_md5_3xmd5uc, "e0c87daa1c6ad1b25d01d8c4a93b0105:password123");
     HT("MD5LM",       16, HTF_COMPOSED, compute_md5lm, "af9292d80b8d3673b7bd66a04d3d7cdb:PASSWORD123");
     HTC("MD5LMUC",     16, HTF_COMPOSED, chain_md5_lmuc, "f762f0da0424f3c16520548989b5a960:PASSWORD123");
 
@@ -28504,6 +28566,8 @@ static void init_hashtypes(void)
         { "MD5-MD5USERSHA1MD5PASS", (hashfn_t)compute_md5 },
         { "MD5SHA1u32SALT", (hashfn_t)compute_md5 },
         { "MD5-LMNTLM", (hashfn_t)compute_md5 },
+        { "MD5LMCOLONNTLMUC", (hashfn_t)compute_md5 },
+        { "MD5-3xMD5UC", (hashfn_t)compute_md5 },
         { "MD5WRLMD5", (hashfn_t)compute_md5 },
         { "MD5AM", (hashfn_t)compute_md5 },
         { "MD5AM2", (hashfn_t)compute_md5 },
@@ -34550,6 +34614,7 @@ static int emit_user_matches(struct workitem *item, int *outpos)
     const char *ucut_tail;      /* raw tail after a re-cut field, for output  */
     int ucut_taillen;
     int matched = 0;
+    int uiter = 1;           /* depth at which a user type matched */
     int u;
     int uu;
     int ulimit;
@@ -34582,9 +34647,12 @@ static int emit_user_matches(struct workitem *item, int *outpos)
         UserVMs = nv;
         for (u = UserVMs_count; u < nuser; u++) {
             struct userdef_type *ut = userdef_get_by_index(u);
-            if (ut && ut->prog)
+            if (ut && ut->prog) {
                 hx_vm_init(&UserVMs[u], ut->prog);
-            else
+                /* emit() collects each candidate digest rather than writing
+                 * stdout (hx-functions.md 19, decision 2) */
+                UserVMs[u].capture = 1;
+            } else
                 memset(&UserVMs[u], 0, sizeof(hx_vm));
         }
         UserVMs_count = nuser;
@@ -34748,16 +34816,42 @@ static int emit_user_matches(struct workitem *item, int *outpos)
                              vcandlen = rest_l - vsaltlen - 1; }
         }
 
-        r = hx_vm_run(&UserVMs[u], (const char *)vcand, vcandlen,
-                      vsalt, vsaltlen, "", 0, "", 0, "", 0);
-        if (!r.data || r.len != fdiglen) continue;
-
         /* The hx VM emits lowercase hex (ROLE_HEX); the input may be upper-
-         * case, so compare case-insensitively over the hex digest length. */
-        eq = 1;
-        for (j = 0; j < fdiglen; j++) {
-            if (tolower((unsigned char)r.data[j]) !=
-                tolower((unsigned char)fdig[j])) { eq = 0; break; }
+         * case, so compare case-insensitively over the hex digest length.
+         * A program with emit() has no one result: each emitted value is a
+         * candidate digest for the password (hx-functions.md 19, decision
+         * 2), and the line verifies when any of them is the stored one.
+         *
+         * xNN, as mdxfind: x(n+1) is the expression run again with the hex
+         * of x(n) as the password and the same salt. A program with emit()
+         * is compared at x01 only. Under -c a labelled depth must be the
+         * depth found. */
+        eq = 0;
+        { const char *ip = (const char *)vcand;
+          int il = vcandlen, want = CheckLabel ? item->hint_iter : 0;
+          int maxx = ut->prog->has_emit ? 1 : Maxiter;
+          for (uiter = 1; uiter <= maxx && !eq; uiter++) {
+            int ne, ei;
+            r = hx_vm_run(&UserVMs[u], ip, il,
+                          vsalt, vsaltlen, "", 0, "", 0, "", 0);
+            ne = ut->prog->has_emit ? UserVMs[u].emits.n : 1;
+            if (!want || want == uiter) {
+              for (ei = 0; ei < ne && !eq; ei++) {
+                hx_val rv = ut->prog->has_emit ? UserVMs[u].emits.v[ei] : r;
+                if (!rv.data || rv.len != fdiglen) continue;
+                eq = 1;
+                for (j = 0; j < fdiglen; j++) {
+                    if (tolower((unsigned char)rv.data[j]) !=
+                        tolower((unsigned char)fdig[j])) { eq = 0; break; }
+                }
+              }
+            }
+            if (eq) break;
+            if (want && uiter >= want) break;
+            if (!r.data || r.len <= 0 || r.len > MAX_INPUT_HASH * 2) break;
+            memcpy(WS->hexiter, r.data, r.len);
+            ip = (const char *)WS->hexiter; il = r.len;
+          }
         }
         if (!eq) continue;
 
@@ -34777,14 +34871,10 @@ static int emit_user_matches(struct workitem *item, int *outpos)
             memset(&synth, 0, sizeof(synth));
             synth.name  = ut->dispname;     /* "USER_<name>" */
             item->match_type = &synth;
-            /* 0, not 1: a user type is ONE hx evaluation with no iteration
-             * ladder, and format_output suppresses the suffix at 0 exactly as
-             * mdxfind's emit does at x == 0. Stamping 1 printed USER_<name>x01
-             * where mdxfind printed USER_<name>, so the same recovered hash
-             * filed into two different mdsplit ledger files depending on which
-             * tool produced the line. Per Waffle 2026-09-09: with no iteration
-             * the x01 is suppressed. */
-            item->match_iter = 0;
+            /* The label carries the depth, as mdxfind's does: USER_<name>xNN.
+             * A declared stored form is reported bare, as mdxfind reports it
+             * and as built-in stored forms are. */
+            item->match_iter = ut->form.npieces ? 0 : uiter;
             if (fsalt) {
                 /*
                  * A stored form put the salt INSIDE the hash field, which is

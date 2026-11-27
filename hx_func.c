@@ -1926,11 +1926,86 @@ static void fn_argon2(hx_func_entry *self, hx_val *args, int nargs,
  * Returns the value unchanged (passthrough).
  * When a program contains emit() calls, the automatic
  * final-value output is suppressed.
+ *
+ * emit(x, label, ...) — hx-functions.md 19.3: the labels, then the value,
+ * separated by tabs, one line.  Each field is written as is when it is
+ * non-empty, every byte is 0x20-0x7e and it does not begin "$HEX[";
+ * otherwise as $HEX[lowercase hex] -- mdxfind's convention (fmt_saltfield),
+ * so a tab or newline in a value never breaks the line.  An empty field is
+ * written empty, as mdxfind writes an empty plaintext.  The compiler allows
+ * only string literals and loop variables as labels.
+ *
+ * Under hx_vm.capture (mdxfind and hashpipe user types) nothing is written:
+ * the value is collected, labels ignored, in the text the one-argument form
+ * prints (hx_vm.h).
  */
+static int emit_printable(const unsigned char *d, int n)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		if (d[i] < 0x20 || d[i] > 0x7e) return 0;
+	return 1;
+}
+
+static void emit_field(const hx_val *v)
+{
+	const unsigned char *d = (const unsigned char *)v->data;
+	int i, n = v->data ? v->len : 0;
+	if (emit_printable(d, n) && !(n >= 5 && memcmp(d, "$HEX[", 5) == 0)) {
+		fwrite(d, 1, n, stdout);
+		return;
+	}
+	fputs("$HEX[", stdout);
+	for (i = 0; i < n; i++) printf("%02x", d[i]);
+	putchar(']');
+}
+
 static void fn_emit(hx_func_entry *self, hx_val *args, int nargs,
                     hx_val *result, hx_arena *arena, uint8_t role)
 {
-	(void)self; (void)nargs; (void)role;
+	(void)self; (void)role;
+
+	if (arena->emits) {
+		hx_emits *e = arena->emits;
+		hx_val t = args[0];
+		if (!t.data) t.len = 0;
+		if (t.len > 0 &&
+		    !emit_printable((const unsigned char *)t.data, t.len)) {
+			char *hex = hx_arena_alloc(arena, t.len * 2 + 1);
+			to_hex((unsigned char *)t.data, t.len, hex);
+			t.data = hex;
+			t.len *= 2;
+		}
+		if (e->n == e->cap) {
+			int cap = e->cap ? e->cap * 2 : 16;
+			hx_val *nv = realloc(e->v, cap * sizeof *nv);
+			if (!nv) {
+				fprintf(stderr, "hx: %s:%d: emit(): out of memory\n",
+				        __FILE__, __LINE__);
+				exit(1);
+			}
+			e->v = nv;
+			e->cap = cap;
+		}
+		e->v[e->n++] = t;
+		*result = args[0];
+		return;
+	}
+
+	if (nargs > 1) {
+		int i;
+		/* an empty label writes nothing, not even its tab: emit(x, "") is
+		 * the value alone, with the $HEX[] rule of the labelled form */
+		for (i = 1; i < nargs; i++) {
+			if (!args[i].data || args[i].len == 0) continue;
+			emit_field(&args[i]);
+			putchar('\t');
+		}
+		emit_field(&args[0]);
+		putchar('\n');
+		*result = args[0];
+		return;
+	}
 
 	if (args[0].data && args[0].len > 0) {
 		/*
@@ -1961,54 +2036,8 @@ static void fn_emit(hx_func_entry *self, hx_val *args, int nargs,
  * String transform functions (always available)
  * ================================================================ */
 
-/*
- * hex(x) — encode raw bytes to lowercase hex.  This is hx's only
- * encoding function whose default IS hex (other functions like upper(),
- * lower() have no canonical encoding).
- *
- * `hex_bin(x)` is defined as the identity function (per spec hx.1
- * §2.4): it returns x unchanged.  This is the inverse of `hex_bin`'s
- * normal "hex of raw bytes" semantics: when applied to already-binary
- * data, returning the input unchanged means the chain `hex(x)` is
- * the canonical encoding step and `hex_bin(x)` is the no-op
- * passthrough that documents intent.
- *
- * supported_roles = ROLE_CAP_BIN, default_role = ROLE_HEX.
- */
-static void fn_hex(hx_func_entry *self, hx_val *args, int nargs,
-                   hx_val *result, hx_arena *arena, uint8_t role)
-{
-	(void)self; (void)nargs;
-	if (role == ROLE_BIN) { *result = args[0]; return; }
-	/* ROLE_DEFAULT or ROLE_HEX: encode bytes to hex */
-	result->data = hx_arena_alloc(arena, args[0].len * 2 + 1);
-	to_hex((unsigned char *)args[0].data, args[0].len, result->data);
-	result->len = args[0].len * 2;
-}
 
-static void fn_upper(hx_func_entry *self, hx_val *args, int nargs,
-                     hx_val *result, hx_arena *arena, uint8_t role)
-{
-	int i;
-	(void)self; (void)nargs; (void)role;
-	result->data = hx_arena_alloc(arena, args[0].len + 1);
-	for (i = 0; i < args[0].len; i++)
-		result->data[i] = toupper((unsigned char)args[0].data[i]);
-	result->data[args[0].len] = '\0';
-	result->len = args[0].len;
-}
 
-static void fn_lower(hx_func_entry *self, hx_val *args, int nargs,
-                     hx_val *result, hx_arena *arena, uint8_t role)
-{
-	int i;
-	(void)self; (void)nargs; (void)role;
-	result->data = hx_arena_alloc(arena, args[0].len + 1);
-	for (i = 0; i < args[0].len; i++)
-		result->data[i] = tolower((unsigned char)args[0].data[i]);
-	result->data[args[0].len] = '\0';
-	result->len = args[0].len;
-}
 
 static void fn_cut(hx_func_entry *self, hx_val *args, int nargs,
                    hx_val *result, hx_arena *arena, uint8_t role)
@@ -2068,18 +2097,6 @@ static void fn_trunc(hx_func_entry *self, hx_val *args, int nargs,
 	fn_cut(self, cut_args, 3, result, arena, role);
 }
 
-static void fn_rev(hx_func_entry *self, hx_val *args, int nargs,
-                   hx_val *result, hx_arena *arena, uint8_t role)
-{
-	int i, len;
-	(void)self; (void)nargs; (void)role;
-	len = args[0].len;
-	result->data = hx_arena_alloc(arena, len + 1);
-	for (i = 0; i < len; i++)
-		result->data[i] = args[0].data[len - 1 - i];
-	result->data[len] = '\0';
-	result->len = len;
-}
 
 /* ---- bswap32(x) — reverse byte order within each 4-byte group ---- */
 
@@ -2183,63 +2200,25 @@ static void fn_cap(hx_func_entry *self, hx_val *args, int nargs,
 	}
 }
 
-/* ---- rot13 ---- */
 
-static void fn_rot13(hx_func_entry *self, hx_val *args, int nargs,
-                     hx_val *result, hx_arena *arena, uint8_t role)
-{
-	int i, len;
-	(void)self; (void)nargs; (void)role;
-	len = args[0].len;
-	result->data = hx_arena_alloc(arena, len + 1);
-	for (i = 0; i < len; i++) {
-		unsigned char c = (unsigned char)args[0].data[i];
-		if (c >= 'A' && c <= 'Z')
-			c = 'A' + (c - 'A' + 13) % 26;
-		else if (c >= 'a' && c <= 'z')
-			c = 'a' + (c - 'a' + 13) % 26;
-		result->data[i] = c;
-	}
-	result->data[len] = '\0';
-	result->len = len;
-}
-
-/* ---- base64 (standard, RFC 4648) ---- */
-
-static const char b64_std[] =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void fn_base64(hx_func_entry *self, hx_val *args, int nargs,
-                      hx_val *result, hx_arena *arena, uint8_t role)
-{
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len;
-	int outlen = ((inlen + 2) / 3) * 4;
-	char *out;
-	int i, o;
-	(void)self; (void)nargs; (void)role;
-
-	out = hx_arena_alloc(arena, outlen + 1);
-	o = 0;
-	for (i = 0; i < inlen; i += 3) {
-		unsigned int a = in[i];
-		unsigned int b = (i + 1 < inlen) ? in[i + 1] : 0;
-		unsigned int c = (i + 2 < inlen) ? in[i + 2] : 0;
-		unsigned int triple = (a << 16) | (b << 8) | c;
-		out[o++] = b64_std[(triple >> 18) & 0x3f];
-		out[o++] = b64_std[(triple >> 12) & 0x3f];
-		out[o++] = (i + 1 < inlen) ? b64_std[(triple >> 6) & 0x3f] : '=';
-		out[o++] = (i + 2 < inlen) ? b64_std[triple & 0x3f] : '=';
-	}
-	out[o] = '\0';
-	result->data = out;
-	result->len  = o;
-}
 
 /* ---- frombase64 (base64 decode, RFC 4648) ---- */
 
-static void fn_frombase64(hx_func_entry *self, hx_val *args, int nargs,
-                           hx_val *result, hx_arena *arena, uint8_t role)
+/*
+ * The "lenient" base64 decoder: frombase64() and convert(x, "base64", "raw",
+ * "lenient") are both this function, so they cannot drift apart.  It never
+ * gives null.  In groups of up to four characters a b c d, from the start:
+ *   - the loop runs while at least two characters remain; a single final
+ *     character is ignored;
+ *   - a and b are always consumed; c is consumed unless it is '=' or the end,
+ *     and so is d; a consumed character outside the alphabet reads as -1;
+ *   - if a or b is outside the alphabet, decoding stops (bytes so far kept);
+ *   - otherwise a<<2 | b>>4 is written; then, if c >= 0, (b&15)<<4 | c>>2;
+ *     then, if d >= 0, (c&3)<<6 | d -- with c = -1 that is 0xC0 | d;
+ *   - an '=' is never consumed, so the next group starts on it and stops.
+ * Writes at most inlen bytes into out and returns the count.
+ */
+static int hx_frombase64_lenient(const unsigned char *in, int inlen, unsigned char *out)
 {
 	static const signed char d64[256] = {
 		[0 ... 255] = -1,
@@ -2261,14 +2240,8 @@ static void fn_frombase64(hx_func_entry *self, hx_val *args, int nargs,
 		['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59,
 		['8'] = 60, ['9'] = 61, ['+'] = 62, ['/'] = 63,
 	};
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len;
-	int outmax = (inlen / 4) * 3 + 3;
-	char *out;
 	int i, o = 0;
-	(void)self; (void)nargs; (void)role;
 
-	out = hx_arena_alloc(arena, outmax);
 	for (i = 0; i + 1 < inlen; ) {
 		int a = d64[in[i++]];
 		int b = (i < inlen) ? d64[in[i++]] : 0;
@@ -2279,24 +2252,22 @@ static void fn_frombase64(hx_func_entry *self, hx_val *args, int nargs,
 		if (c >= 0) out[o++] = ((b & 0xf) << 4) | (c >> 2);
 		if (d >= 0) out[o++] = ((c & 0x3) << 6) | d;
 	}
-	out[o] = '\0';
-	result->data = out;
-	result->len  = o;
+	return o;
 }
+
 
 /* ---- fromhex (hex decode) ---- */
 
-static void fn_fromhex(hx_func_entry *self, hx_val *args, int nargs,
-                        hx_val *result, hx_arena *arena, uint8_t role)
+/*
+ * The "lenient" hex decoder: fromhex() and convert(x, "hex", "raw",
+ * "lenient") are both this function.  It never gives null: byte i is
+ * nib(in[2i]) << 4 | nib(in[2i+1]), where nib is the value of 0-9, a-f, A-F
+ * and 0 for any other byte, and a final odd character is ignored.  Writes
+ * inlen / 2 bytes into out and returns that count.
+ */
+static int hx_fromhex_lenient(const unsigned char *in, int inlen, unsigned char *out)
 {
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len;
-	int outlen = inlen / 2;
-	char *out;
-	int i;
-	(void)self; (void)nargs; (void)role;
-
-	out = hx_arena_alloc(arena, outlen + 1);
+	int outlen = inlen / 2, i;
 	for (i = 0; i < outlen; i++) {
 		int hi, lo;
 		unsigned char c;
@@ -2310,10 +2281,9 @@ static void fn_fromhex(hx_func_entry *self, hx_val *args, int nargs,
 		     (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 0;
 		out[i] = (hi << 4) | lo;
 	}
-	out[outlen] = '\0';
-	result->data = out;
-	result->len  = outlen;
+	return outlen;
 }
+
 
 /* ---- basic math (return integers with string representation) ---- */
 
@@ -2409,39 +2379,6 @@ static void fn_mod(hx_func_entry *self, hx_val *args, int nargs,
 	fn_math_result(result, arena, val_to_int(&args[0]) % b);
 }
 
-/* ---- phpass_encode (PHPBB3 / WordPress / phpass) ---- */
-
-static const char itoa64[] =
-	"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-static void fn_phpass_encode(hx_func_entry *self, hx_val *args, int nargs,
-                             hx_val *result, hx_arena *arena, uint8_t role)
-{
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len;
-	int outmax = ((inlen + 2) / 3) * 4 + 1;
-	char *out;
-	int i, o;
-	unsigned int v;
-	(void)self; (void)nargs; (void)role;
-
-	out = hx_arena_alloc(arena, outmax);
-	o = 0; i = 0;
-	while (i < inlen) {
-		v = in[i++];
-		out[o++] = itoa64[v & 0x3f];
-		if (i < inlen) v |= (unsigned int)in[i] << 8;
-		out[o++] = itoa64[(v >> 6) & 0x3f];
-		if (i++ >= inlen) break;
-		if (i < inlen) v |= (unsigned int)in[i] << 16;
-		out[o++] = itoa64[(v >> 12) & 0x3f];
-		if (i++ >= inlen) break;
-		out[o++] = itoa64[(v >> 18) & 0x3f];
-	}
-	out[o] = '\0';
-	result->data = out;
-	result->len  = o;
-}
 
 /* ---- des(key, plaintext) — single-DES ECB encrypt ----
  * key:       1..8 bytes (longer truncated, shorter zero-padded)
@@ -2506,12 +2443,13 @@ static void fn_des3(hx_func_entry *self, hx_val *args, int nargs,
  * plaintext: 8 bytes
  * returns:   8 bytes; default rendering is 16-char lowercase hex
  */
+static void hx_des7(const unsigned char *raw7, const unsigned char *ptblk,
+                    unsigned char *out);
+
 static void fn_des_block(hx_func_entry *self, hx_val *args, int nargs,
                          hx_val *result, hx_arena *arena, uint8_t role)
 {
-	unsigned char raw7[7], ptblk[8];
-	DES_cblock key, ct;
-	DES_key_schedule ks;
+	unsigned char raw7[7], ptblk[8], ct[8];
 	int klen = args[0].len, plen = args[1].len;
 	(void)self; (void)nargs;
 
@@ -2519,6 +2457,17 @@ static void fn_des_block(hx_func_entry *self, hx_val *args, int nargs,
 	memset(ptblk, 0, 8);
 	memcpy(raw7,  args[0].data, klen < 7 ? klen : 7);
 	memcpy(ptblk, args[1].data, plen < 8 ? plen : 8);
+	hx_des7(raw7, ptblk, ct);
+	emit_digest((unsigned char *)ct, 8, result, arena, role);
+}
+
+/* DES-encrypt one block under a 7-byte key expanded to 8 (the LM and NTLMv1
+ * key schedule): des_block() and lm_cpNNN(). */
+static void hx_des7(const unsigned char *raw7, const unsigned char *ptblk,
+                    unsigned char *out)
+{
+	DES_cblock key, ct;
+	DES_key_schedule ks;
 
 	/* 7→8 byte DES key expansion with parity */
 	key[0] = (raw7[0] >> 1);
@@ -2533,8 +2482,7 @@ static void fn_des_block(hx_func_entry *self, hx_val *args, int nargs,
 
 	DES_set_key_unchecked((const_DES_cblock *)&key, &ks);
 	DES_ecb_encrypt((const_DES_cblock *)ptblk, &ct, &ks, DES_ENCRYPT);
-
-	emit_digest((unsigned char *)ct, 8, result, arena, role);
+	memcpy(out, ct, 8);
 }
 
 /* ---- juniper_encode (Juniper NetScreen / ScreenOS 30-char format) ----
@@ -2930,41 +2878,74 @@ static void fn_sap_bcode(hx_func_entry *self, hx_val *args, int nargs,
 }
 
 /* ---- as400_des(pass, user) — IBM AS/400 DES password hash ----
- * Mirrors mdxfind.c:33246-33293.
- *   pass → ebcdic_pc (pad to 8 with 0x2a) → DES key
- *   user → upper, ebcdic (pad to 8 with 0x40 ASCII space). If user > 8 chars,
- *          fold remaining bytes via XOR back into bytes 0..(user.len-9).
- *   ciphertext = DES_ECB(plaintext, key)
- * Returns 8 bytes; default rendering is 16-char hex.
- */
+ * The algorithm John the Ripper's as400-des format computes, which is the
+ * one AS/400 password level 0/1 stores:
+ *   user  → upper, EBCDIC, padded to 8 with 0x40.  A 9- or 10-character
+ *           userid is folded into 8 bytes by spreading the bits of
+ *           characters 9 and 10 over all eight (character 10 is 0x40 when
+ *           there are only 9): byte k ^= the k-th pair of bits.
+ *   pass  → characters 1-8 through hx_a2e_pc, padded with 0x2a, as DES key 1.
+ *   hash  = DES_ECB(user, key 1).  A 9- or 10-character password also
+ *           makes key 2 from characters 9-10, padded with 0x2a, and the
+ *           hash is DES(user, key 1) XOR DES(user, key 2).
+ * A userid or password over 10 characters cannot occur and gives a null
+ * result.  Returns 8 bytes; default rendering is 16-char hex. */
+static unsigned char as400_up_e(unsigned char c)
+{
+	if (c >= 'a' && c <= 'z') c -= 32;
+	return hx_a2e[c];
+}
+
 static void fn_as400_des(hx_func_entry *self, hx_val *args, int nargs,
                          hx_val *result, hx_arena *arena, uint8_t role)
 {
-	unsigned char deskey[8], plain[8], ctblk[8];
+	unsigned char deskey[8], plain[8], ctblk[8], ct2[8];
 	DES_key_schedule ks;
 	int plen = args[0].len, ulen = args[1].len;
+	const unsigned char *pw = (const unsigned char *)args[0].data;
+	const unsigned char *us = (const unsigned char *)args[1].data;
 	int x;
 	(void)self; (void)nargs;
 
-	if (plen > 8) plen = 8;
-	for (x = 0; x < 8; x++)
-		deskey[x] = (x < plen)
-		    ? hx_a2e_pc[(unsigned char)args[0].data[x]]
-		    : 0x2a;
-	DES_set_key_unchecked((const_DES_cblock *)deskey, &ks);
+	/* An AS/400 userid and password are each at most 10 characters:
+	 * mdxfind skips longer ones, hashpipe refuses them, and John cannot
+	 * represent them. */
+	if (ulen > 10 || plen > 10) {
+		result->data = hx_arena_alloc(arena, 1);
+		result->data[0] = '\0';
+		result->len = 0;
+		return;
+	}
 
-	for (x = 0; x < 8; x++) {
-		unsigned char c = (x < ulen) ? (unsigned char)args[1].data[x] : ' ';
-		if (c >= 'a' && c <= 'z') c -= 32;
-		plain[x] = hx_a2e[c];
+	for (x = 0; x < 8; x++)
+		plain[x] = (x < ulen) ? as400_up_e(us[x]) : 0x40;
+	if (ulen > 8) {
+		unsigned char e8 = as400_up_e(us[8]);
+		unsigned char e9 = (ulen > 9) ? as400_up_e(us[9]) : 0x40;
+		plain[0] ^= e8 & 0xC0;
+		plain[1] ^= (unsigned char)((e8 & 0x30) << 2);
+		plain[2] ^= (unsigned char)((e8 & 0x0C) << 4);
+		plain[3] ^= (unsigned char)((e8 & 0x03) << 6);
+		plain[4] ^= e9 & 0xC0;
+		plain[5] ^= (unsigned char)((e9 & 0x30) << 2);
+		plain[6] ^= (unsigned char)((e9 & 0x0C) << 4);
+		plain[7] ^= (unsigned char)((e9 & 0x03) << 6);
 	}
-	for (x = 8; x < ulen; x++) {
-		unsigned char c = (unsigned char)args[1].data[x];
-		if (c >= 'a' && c <= 'z') c -= 32;
-		plain[x - 8] ^= hx_a2e[c];
-	}
+
+	for (x = 0; x < 8; x++)
+		deskey[x] = (x < plen) ? hx_a2e_pc[pw[x]] : 0x2a;
+	DES_set_key_unchecked((const_DES_cblock *)deskey, &ks);
 	DES_ecb_encrypt((const_DES_cblock *)plain, (DES_cblock *)ctblk,
 	                &ks, DES_ENCRYPT);
+
+	if (plen > 8) {
+		for (x = 0; x < 8; x++)
+			deskey[x] = (8 + x < plen) ? hx_a2e_pc[pw[8 + x]] : 0x2a;
+		DES_set_key_unchecked((const_DES_cblock *)deskey, &ks);
+		DES_ecb_encrypt((const_DES_cblock *)plain, (DES_cblock *)ct2,
+		                &ks, DES_ENCRYPT);
+		for (x = 0; x < 8; x++) ctblk[x] ^= ct2[x];
+	}
 
 	emit_digest(ctblk, 8, result, arena, role);
 }
@@ -3608,36 +3589,6 @@ static void fn_cisco_pix_encode(hx_func_entry *self, hx_val *args, int nargs,
 	result->len  = 16;
 }
 
-/* ---- cisco4_encode (Cisco IOS type 4) ----
- * Base64 bit order (each 3 bytes, most significant first, to 4 characters)
- * in the alphabet ./0-9A-Za-z, with no padding: a final 1 or 2 bytes give
- * 2 or 3 characters. SHA-256's 32 bytes give the 43 characters of a type 4
- * hash, as mdxfind's CISCO4 writes them. */
-static void fn_cisco4_encode(hx_func_entry *self, hx_val *args, int nargs,
-                             hx_val *result, hx_arena *arena, uint8_t role)
-{
-	static const char itoa64[] =
-	    "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len, i, o = 0;
-	char *out;
-	(void)self; (void)nargs; (void)role;
-
-	out = hx_arena_alloc(arena, ((inlen + 2) / 3) * 4 + 1);
-	for (i = 0; i < inlen; i += 3) {
-		int n = inlen - i < 3 ? inlen - i : 3;
-		unsigned int v = (unsigned int)in[i] << 16;
-		if (n > 1) v |= (unsigned int)in[i + 1] << 8;
-		if (n > 2) v |= in[i + 2];
-		out[o++] = itoa64[(v >> 18) & 0x3f];
-		out[o++] = itoa64[(v >> 12) & 0x3f];
-		if (n > 1) out[o++] = itoa64[(v >> 6) & 0x3f];
-		if (n > 2) out[o++] = itoa64[v & 0x3f];
-	}
-	out[o] = '\0';
-	result->data = out;
-	result->len  = o;
-}
 
 /* ---- progress_encode (Progress OpenEdge ENCODE) ---- */
 
@@ -3782,142 +3733,2173 @@ static void fn_bcrypt_encode(hx_func_entry *self, hx_val *args,
 #include "ruleproc32.h"
 
 /*
- * These used to call iconv -- an iconv_open per invocation -- with //IGNORE, and
- * that was wrong in two measurable ways.
- *
- * //IGNORE silently DROPPED anything unconvertible, so utf16le() returned the
- * SAME bytes for "ab" and for a candidate containing a lone 0x81: 61006200 for
- * both.  And the UTF-7 flush passed a NULL output buffer, which resets iconv's
- * shift state without emitting anything, so a base64 run lost its final group
- * AND its terminator: utf7() gave "caf+AO" where the correct encoding, and what
- * mdxfind's SHA1UTF7 has always hashed, is "caf+AOk-".
- *
- * They now use the conversions in ruleproc32.c -- the same ones the C
- * implementations use, built on the utf8_to_utf32 that already defines
- * well-formed UTF-8 for the -8 rule engine.  An hx expression and the type it
- * documents therefore agree, which matters because tools/hx_dedup_check
- * compares compiled hx bytecode against the catalog: a conversion that drops
- * where the implementation refuses makes the gate disagree with the thing it is
- * checking.
- *
- * Ill-formed input yields an EMPTY result.  hx has no way for a function to
- * signal failure, and the alternative -- returning a silently shortened string
- * -- is the behaviour being removed, because it is indistinguishable from a
- * valid conversion of some other input.
+ * The conversion functions (utf16le, utf16be, utf7, zext16, from_cp1252,
+ * from_cp1251, hex, base64, phpass_encode, cisco4_encode, fromhex,
+ * frombase64, upper, lower, rev, rot13) are compiler aliases of OP_CONVERT
+ * (hx-functions.md 18.6); their own implementations were retired (18.9)
+ * once every bytecode consumer handled OP_CONVERT and the golden corpus
+ * (hx-support/phase1/) gave identical output through the engine.  Each name
+ * stays in the registry, bound to fn_conv_call below, so that it stays
+ * reserved -- a bridge registers a name only when hx_func_lookup does not
+ * know it -- and so that the call forms the aliases do not cover still work
+ * the same way: hex_bin(x), the identity, and a call with extra arguments,
+ * which these functions always ignored.  ruleproc32.c supplies
+ * utf8_to_utf32 and utf8_to_utf7 to the engine.
  */
-static void hx_u16_convert(hx_val *args, hx_val *result, hx_arena *arena, int be)
+
+/* ================================================================
+ * OP_CONVERT: the registry, convert() argument checking, the compiler
+ * aliases, and the decode -> premap -> encode engine.  hx-functions.md
+ * section 18.
+ *
+ * A name the registry knows but cannot yet decode or encode, and a premap
+ * token not yet implemented, is a compile error naming it ("not yet
+ * implemented"), never a silent fallback.
+ *
+ * UTF-8 is read by utf8_to_utf32 (the definition of well-formed UTF-8 for all
+ * of mdxfind) and UTF-7 written by utf8_to_utf7.  Every cpNNN, KOI8 and case
+ * table comes from hx_conv_tables.h, which hx-support/gen/gen_hx_tables.py
+ * generates at build time from the Windows 11 dumps, the unicode.org KOI8
+ * tables and Unicode 18.0.0 UnicodeData.txt (section 18.8).  The golden corpus
+ * (hx-support/phase1/) shows every aliased function byte-identical to the
+ * function it replaces; hx-support/phase2/ proves the tables against the
+ * dumps exhaustively.
+ * ================================================================ */
+
+#include "hx_conv_tables.h"
+
+enum { CV_NO = 0, CV_YES = 1, CV_LATER = 2 };   /* direction available? */
+
+#define CS HXE_KIND_CHARSET
+#define TX HXE_KIND_TRANSFER
+#define CPE(n) [HXE_CP##n] = { "cp" #n, CS, CV_YES, CV_YES, n, 1, 0 }
+#define SBE(id, nm) [HXE_SB_##id] = { nm, CS, CV_YES, CV_YES, 0, 1, 1 }
+#define MBE(id, nm) [HXE_##id] = { nm, CS, CV_YES, CV_YES, 0, 1, 0, 1 }
+
+/* unmap: the encoder has code points it cannot write (section 18.4) */
+static const struct {
+	const char *name;
+	uint8_t     kind;
+	uint8_t     dec, enc;
+	uint16_t    cp;         /* a Windows code page (cpNNN): its number */
+	uint8_t     unmap;
+	uint8_t     sb;         /* a standard single-byte table (hxt_sb_*) */
+	uint8_t     mb;         /* a multi-byte table (hxt_mb_*) or ISO-2022-JP */
+} hxe_reg[HXE_COUNT] = {
+	[HXE_UTF8]      = { "utf8",      CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF16LE]   = { "utf16le",   CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF16BE]   = { "utf16be",   CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF7]      = { "utf7",      CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_LOWBYTE16] = { "lowbyte16", CS, CV_NO,  CV_YES, 0, 0 },
+	[HXE_LATIN1]    = { "latin1",    CS, CV_YES, CV_YES, 0, 1 },
+	[HXE_KOI8R]     = { "koi8r",     CS, CV_YES, CV_YES, 0, 1 },
+	[HXE_KOI8U]     = { "koi8u",     CS, CV_YES, CV_YES, 0, 1 },
+	CPE(1252), CPE(1251), CPE(37),
+	CPE(874), CPE(932), CPE(936), CPE(949), CPE(950),
+	CPE(1250), CPE(1253), CPE(1254), CPE(1255), CPE(1256),
+	CPE(1257), CPE(1258), CPE(1361),
+	CPE(437), CPE(737), CPE(775), CPE(850), CPE(852), CPE(855),
+	CPE(857), CPE(858), CPE(860), CPE(861), CPE(862), CPE(863),
+	CPE(864), CPE(865), CPE(866), CPE(869),
+	CPE(20866), CPE(21866), CPE(28591),
+	CPE(1047), CPE(1140), CPE(1148), CPE(10000),
+	CPE(500), CPE(708), CPE(720), CPE(875), CPE(1026), CPE(1141), CPE(1142),
+	CPE(1143), CPE(1144), CPE(1145), CPE(1146), CPE(1147), CPE(1149),
+	CPE(10001), CPE(10002), CPE(10003), CPE(10004), CPE(10005), CPE(10006),
+	CPE(10007), CPE(10008), CPE(10010), CPE(10017), CPE(10021), CPE(10029),
+	CPE(10079), CPE(10081), CPE(10082), CPE(20127), CPE(28592), CPE(28593),
+	CPE(28594), CPE(28595), CPE(28596), CPE(28597), CPE(28598), CPE(28599),
+	CPE(28603), CPE(28605),
+	SBE(ISO8859_2, "iso8859_2"),
+	SBE(ISO8859_3, "iso8859_3"),
+	SBE(ISO8859_4, "iso8859_4"),
+	SBE(ISO8859_5, "iso8859_5"),
+	SBE(ISO8859_6, "iso8859_6"),
+	SBE(ISO8859_7, "iso8859_7"),
+	SBE(ISO8859_8, "iso8859_8"),
+	SBE(ISO8859_9, "iso8859_9"),
+	SBE(ISO8859_10, "iso8859_10"),
+	SBE(ISO8859_11, "iso8859_11"),
+	SBE(ISO8859_13, "iso8859_13"),
+	SBE(ISO8859_14, "iso8859_14"),
+	SBE(ISO8859_15, "iso8859_15"),
+	SBE(ISO8859_16, "iso8859_16"),
+	SBE(MAC_ROMAN, "mac_roman"),
+	SBE(MAC_CYRILLIC, "mac_cyrillic"),
+	SBE(MAC_GREEK, "mac_greek"),
+	SBE(MAC_TURKISH, "mac_turkish"),
+	SBE(MAC_CENTEURO, "mac_centeuro"),
+	SBE(MAC_ICELANDIC, "mac_icelandic"),
+	SBE(MAC_CROATIAN, "mac_croatian"),
+	SBE(MAC_ROMANIAN, "mac_romanian"),
+	SBE(MAC_ARABIC, "mac_arabic"),
+	SBE(MAC_HEBREW, "mac_hebrew"),
+	SBE(MAC_THAI, "mac_thai"),
+	SBE(ADOBE_SYMBOL, "adobe_symbol"),
+	SBE(ADOBE_STANDARD, "adobe_standard"),
+	SBE(JIS_X0201, "jis_x0201"),
+	SBE(KZ1048, "kz1048"),
+	SBE(VISCII, "viscii"),
+	SBE(HP_ROMAN8, "hp_roman8"),
+	SBE(DEC_MCS, "dec_mcs"),
+	SBE(ATASCII, "atascii"),
+	SBE(PETSCII, "petscii"),
+	SBE(PETSCII_SHIFTED, "petscii_shifted"),
+	SBE(ASCII, "ascii"),
+	SBE(CP864_IBMGRAPH, "cp864_ibmgraph"),
+	MBE(MB_SHIFT_JIS, "shift_jis"), MBE(MB_EUC_JP, "euc_jp"), MBE(MB_EUC_KR, "euc_kr"),
+	MBE(MB_GB2312, "gb2312"), MBE(MB_GB18030, "gb18030"),
+	MBE(MB_SHIFT_JIS_WEB, "shift_jis_web"), MBE(MB_EUC_JP_WEB, "euc_jp_web"),
+	MBE(MB_EUC_KR_WEB, "euc_kr_web"), MBE(MB_BIG5_WEB, "big5_web"),
+	MBE(MB_GB18030_WEB, "gb18030_web"), MBE(MB_GBK_WEB, "gbk_web"),
+	MBE(MB_GSM0338, "gsm0338"), MBE(MB_T61, "t61"),
+	MBE(MB_EUC_JP_C1, "euc_jp_c1"), MBE(MB_EUC_KR_C1, "euc_kr_c1"),
+	MBE(ISO2022JP, "iso2022jp"), MBE(ISO2022JP_WEB, "iso2022jp_web"),
+	[HXE_UTF32LE]   = { "utf32le",   CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF32BE]   = { "utf32be",   CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF32]     = { "utf32",     CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_UTF16]     = { "utf16",     CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_CESU8]     = { "cesu8",     CS, CV_YES, CV_YES, 0, 0 },
+	[HXE_RAW]       = { "raw",       TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_HEX]       = { "hex",       TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_BASE64]    = { "base64",    TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_BASE64URL] = { "base64url", TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_BASE32]    = { "base32",    TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_CRYPT64]   = { "crypt64",   TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_CRYPT64BE] = { "crypt64be", TX, CV_YES, CV_YES, 0, 0 },
+	[HXE_BCRYPT64]  = { "bcrypt64",  TX, CV_YES, CV_YES, 0, 0 },
+};
+#undef CPE
+#undef SBE
+#undef MBE
+
+/* Encodings that never pad: the instruction always carries NOPAD for them, so
+ * convert(x, "raw", "crypt64be") and the same with "nopad" are one program. */
+#define CV_NEVER_PADS(id) ((id) == HXE_CRYPT64 || (id) == HXE_CRYPT64BE || \
+                           (id) == HXE_BCRYPT64)
+#define CV_IS_U16(id) ((id) == HXE_UTF16LE || (id) == HXE_UTF16BE || (id) == HXE_UTF16)
+#define CV_IS_U32(id) ((id) == HXE_UTF32LE || (id) == HXE_UTF32BE || (id) == HXE_UTF32)
+/* a target that cannot write a lone surrogate kept under "cesu" */
+#define CV_SUR_UNMAP(id) ((id) == HXE_UTF7 || CV_IS_U32(id))
+/* A source that can meet a byte it has no character for, and under "keep"
+ * passes it on as itself (CV_RAWBYTE): UTF-8 and the standard single-byte
+ * tables.  A cpNNN decodes every byte Windows does; its "null" is Windows'
+ * strict decode (MB_ERR_INVALID_CHARS), decision D1. */
+/* A source that defines every byte can never be ill-formed: latin1, the KOI8
+ * tables, and a standard single-byte table with all 256 bytes assigned.  It
+ * accepts the ill-formed-source tokens, which do nothing and are dropped, so
+ * the instruction is the same with them as without. */
+static int cv_never_ill(int id)
 {
-	int inlen = (int)args[0].len;
-	int cap   = inlen * 2 + 4;
-	char *out = hx_arena_alloc(arena, cap);
-	uint32_t *scr = (uint32_t *)hx_arena_alloc(arena, (inlen + 2) * sizeof(uint32_t));
-	int n = utf8_to_utf16((const unsigned char *)args[0].data, inlen,
-	                      (unsigned char *)out, cap, scr, inlen + 2, be);
-	result->data = out;
-	result->len  = n < 0 ? 0 : n;
+	int b;
+	if (id == HXE_LATIN1 || id == HXE_KOI8R || id == HXE_KOI8U) return 1;
+	if (!hxe_reg[id].sb) return 0;
+	for (b = 0; b < 256; b++)
+		if (!hxt_sb_dec[id - HXE_SB_FIRST][b]) return 0;
+	return 1;
+}
+#define CV_RAWSRC(id) ((id) == HXE_UTF8 || (hxe_reg[id].sb && !cv_never_ill(id)) || \
+                       hxe_reg[id].mb || CV_IS_U32(id) || (id) == HXE_CESU8 || (id) == HXE_UTF7)
+
+int hx_conv_lookup(const char *name)
+{
+	int i;
+	if (!name) return HXE_NONE;
+	/* GBK and Big5 have no standard of their own: they are Windows' (D6) */
+	if (strcmp(name, "gbk") == 0) return HXE_CP936;
+	if (strcmp(name, "big5") == 0) return HXE_CP950;
+	/* "ebcdic" is not a charset: ebcdic() is not CP37 (section 18.3) */
+	for (i = 1; i < HXE_COUNT; i++)
+		if (hxe_reg[i].name && strcmp(hxe_reg[i].name, name) == 0) return i;
+	return HXE_NONE;
 }
 
-/* CP125x -> UTF-8, by way of UTF-16.  Note this now converts the six positions
- * Windows defines but Unicode.org leaves undefined -- CP1252 0x81 0x8d 0x8f
- * 0x90 0x9d and CP1251 0x98 -- where iconv dropped them. */
-static void hx_from_cp_convert(hx_val *args, hx_val *result, hx_arena *arena,
-                               int codepage)
+const char *hx_conv_name(int id)
 {
-	int inlen  = (int)args[0].len;
-	int u16cap = inlen * 2 + 2;
-	int cap    = inlen * 3 + 4;
-	unsigned char *u16 = (unsigned char *)hx_arena_alloc(arena, u16cap);
-	char *out = hx_arena_alloc(arena, cap);
-	uint32_t *scr = (uint32_t *)hx_arena_alloc(arena, (inlen + 2) * sizeof(uint32_t));
-	int n16 = cp_to_utf16((const unsigned char *)args[0].data, inlen,
-	                      u16, u16cap, codepage, UTF16_LE);
-	int n = (n16 < 0) ? -1
-	      : utf16_to_utf8(u16, n16, (unsigned char *)out, cap,
-	                      scr, inlen + 2, UTF16_LE);
-	result->data = out;
-	result->len  = n < 0 ? 0 : n;
+	return (id > 0 && id < HXE_COUNT && hxe_reg[id].name) ? hxe_reg[id].name : "?";
 }
 
-/*
- * utf16le(x) — UTF-8 to UTF-16LE.  Ill-formed input yields an empty result;
- * it is NOT dropped and converted around, which is what the old //IGNORE did
- * and what made this disagree with the C implementations.
- */
-static void fn_utf16le(hx_func_entry *self, hx_val *args, int nargs,
-                       hx_val *result, hx_arena *arena, uint8_t role)
+int hx_conv_kind(int id)
+{
+	return (id > 0 && id < HXE_COUNT) ? hxe_reg[id].kind : 0;
+}
+
+/* The generated table of a cpNNN registry entry, or -1. */
+static int cv_page(int id)
+{
+	int i;
+	for (i = 0; i < HXT_NCP; i++)
+		if (hxt_cpinfo[i].cp == hxe_reg[id].cp) return i;
+	return -1;
+}
+
+/* The upper_oem table of an OEM code page, or -1. */
+static int cv_oem(int cp)
+{
+	int i;
+	for (i = 0; i < HXT_NOEM; i++)
+		if (hxt_oem_cp[i] == cp) return i;
+	return -1;
+}
+
+/* The glyph table of an OEM code page, or -1. */
+static int cv_gly(int cp)
+{
+	int i;
+	for (i = 0; i < HXT_NGLY; i++)
+		if (hxt_gly_cp[i] == cp) return i;
+	return -1;
+}
+
+/* ---- tokens ---- */
+
+enum { TG_ILL = 1, TG_SUR, TG_ENC, TG_UNMAP, TG_UC, TG_PAD, TG_LENIENT, TG_GLYPH, TG_PREMAP };
+
+static const char *const tg_name[] = {
+	"", "ill-formed-source", "lone-surrogate", "encode", "unmappable",
+	"hex-case", "padding", "decode", "glyph", "premap"
+};
+
+
+static const struct { const char *name; uint8_t group; uint16_t bits; } cv_tok[] = {
+	{ "keep",   TG_ILL,   HXCV_ILL_KEEP },
+	{ "null",   TG_ILL,   HXCV_ILL_NULL },
+	{ "latin1", TG_ILL,   HXCV_ILL_LATIN1 },
+	{ "fffd",   TG_ILL,   HXCV_ILL_FFFD },    /* TG_SUR for a utf16 source */
+	{ "q",      TG_SUR,   HXCV_SUR_Q },
+	{ "cesu",   TG_SUR,   HXCV_SUR_CESU },
+	{ "strict", TG_ENC,   0 },
+	{ "bestfit",TG_ENC,   HXCV_BESTFIT },
+	{ "default",TG_UNMAP, 0 },
+	{ "fail",   TG_UNMAP, HXCV_FAIL },
+	{ "uc",     TG_UC,    HXCV_UC },
+	{ "nopad",  TG_PAD,   HXCV_NOPAD },
+	{ "lenient",TG_LENIENT, HXCV_LENIENT },
+	{ "glyphs", TG_GLYPH, HXCV_GLYPHS },
+	/* premaps: bits holds the HXPM_* id */
+	{ "lower",     TG_PREMAP, HXPM_LOWER },
+	{ "upper",     TG_PREMAP, HXPM_UPPER },
+	{ "rev",       TG_PREMAP, HXPM_REV },
+	{ "rot13",     TG_PREMAP, HXPM_ROT13 },
+	{ "lower_win", TG_PREMAP, HXPM_LOWER_WIN },
+	{ "upper_win", TG_PREMAP, HXPM_UPPER_WIN },
+	{ "upper_oem", TG_PREMAP, HXPM_UPPER_OEM },
+	{ "lower_full", TG_PREMAP, HXPM_LOWER_FULL },
+	{ "upper_full", TG_PREMAP, HXPM_UPPER_FULL },
+	{ "nfc",       TG_PREMAP, HXPM_NFC },
+	{ "nfd",       TG_PREMAP, HXPM_NFD },
+	{ "nfkc",      TG_PREMAP, HXPM_NFKC },
+	{ "nfkd",      TG_PREMAP, HXPM_NFKD },
+	{ "nfd_hfs",   TG_PREMAP, HXPM_NFD_HFS },
+	{ NULL, 0, 0 }
+};
+
+static const char *const pm_name[] = {
+	"none", "lower", "upper", "rev", "rot13", "lower_win", "upper_win", "upper_oem",
+	"lower_full", "upper_full", "nfc", "nfd", "nfkc", "nfkd", "nfd_hfs"
+};
+
+int hx_convert_build(const char *from, const char *to,
+                     const char *const *tokens, int ntokens,
+                     hx_inst *ip, char *err, int errcap)
+{
+	int f = hx_conv_lookup(from), t = hx_conv_lookup(to), i, k;
+	const char *seen[TG_PREMAP + 1] = { 0 };
+	uint16_t policy = 0;
+	uint8_t premap = HXPM_NONE;
+	int unmap_possible;
+
+	memset(ip, 0, sizeof *ip);
+	if (!f) { snprintf(err, errcap, "convert(): unknown encoding '%s'", from); return -1; }
+	if (!t) { snprintf(err, errcap, "convert(): unknown encoding '%s'", to); return -1; }
+	if (hxe_reg[f].kind != hxe_reg[t].kind) {
+		snprintf(err, errcap, "convert(): '%s' is a %s and '%s' a %s; nest two "
+		         "convert() calls instead of mixing them", from,
+		         hxe_reg[f].kind == HXE_KIND_CHARSET ? "charset" : "transfer encoding",
+		         to, hxe_reg[t].kind == HXE_KIND_CHARSET ? "charset" : "transfer encoding");
+		return -1;
+	}
+	if (hxe_reg[f].dec == CV_NO) {
+		snprintf(err, errcap, "convert(): '%s' is encode-only and cannot be a source", from);
+		return -1;
+	}
+	if (hxe_reg[f].dec == CV_LATER) {
+		snprintf(err, errcap, "convert(): not yet implemented: decoding from '%s'", from);
+		return -1;
+	}
+	if (hxe_reg[t].enc == CV_LATER) {
+		snprintf(err, errcap, "convert(): not yet implemented: encoding to '%s'", to);
+		return -1;
+	}
+	if ((hxe_reg[f].cp && cv_page(f) < 0) || (hxe_reg[t].cp && cv_page(t) < 0)) {
+		snprintf(err, errcap, "convert(): no table for '%s'",
+		         hxe_reg[f].cp && cv_page(f) < 0 ? from : to);
+		return -1;
+	}
+	for (i = 0; i < ntokens; i++) {
+		const char *tok = tokens[i];
+		int g, ok;
+		for (k = 0; cv_tok[k].name; k++)
+			if (strcmp(cv_tok[k].name, tok) == 0) break;
+		if (!cv_tok[k].name) {
+			snprintf(err, errcap, "convert(): unknown token '%s'", tok);
+			return -1;
+		}
+		g = cv_tok[k].group;
+		if (g == TG_ILL && strcmp(tok, "fffd") == 0 && CV_IS_U16(f))
+			g = TG_SUR;
+		if (seen[g]) {
+			snprintf(err, errcap, "convert(): '%s' and '%s' are both %s tokens",
+			         seen[g], tok, tg_name[g]);
+			return -1;
+		}
+		seen[g] = tok;
+		switch (g) {
+		case TG_ILL:     ok = CV_RAWSRC(f) || cv_never_ill(f) ||
+		                      (hxe_reg[f].cp && (cv_tok[k].bits == HXCV_ILL_KEEP ||
+		                                         cv_tok[k].bits == HXCV_ILL_NULL)); break;
+		case TG_SUR:     ok = CV_IS_U16(f); break;
+		case TG_ENC:     ok = hxe_reg[t].cp != 0; break;
+		/* fail applies where the pair can meet something unmappable: a
+		 * target with unmappable code points; a kept ill-formed unit
+		 * (CV_RAWSRC) in any target but utf8, which writes it unchanged; a
+		 * lone surrogate kept under "cesu" in utf7 or utf32, which cannot
+		 * hold one.  Elsewhere it is an error.  A pair that can meet one,
+		 * but not under the other tokens given ("null", or the default
+		 * "fffd" for the surrogate), accepts it and drops it below. */
+		case TG_UNMAP:   ok = hxe_reg[t].unmap || (CV_RAWSRC(f) && t != HXE_UTF8) ||
+		                      (CV_IS_U16(f) && CV_SUR_UNMAP(t)); break;
+		case TG_UC:      ok = t == HXE_HEX; break;
+		case TG_PAD:     ok = t == HXE_BASE64 || t == HXE_BASE64URL ||
+		                      t == HXE_BASE32 || CV_NEVER_PADS(t); break;
+		case TG_LENIENT: ok = f == HXE_HEX || f == HXE_BASE64; break;
+		case TG_GLYPH:   ok = hxe_reg[f].cp && cv_gly(hxe_reg[f].cp) >= 0; break;
+		case TG_PREMAP:
+			if (hxe_reg[f].kind == HXE_KIND_TRANSFER)
+				ok = cv_tok[k].bits == HXPM_LOWER || cv_tok[k].bits == HXPM_UPPER ||
+				     cv_tok[k].bits == HXPM_REV || cv_tok[k].bits == HXPM_ROT13;
+			else if (cv_tok[k].bits == HXPM_UPPER_OEM)
+				ok = hxe_reg[t].cp && cv_oem(hxe_reg[t].cp) >= 0;
+			else
+				ok = 1;
+			break;
+		default:         ok = 0; break;
+		}
+		if (!ok) {
+			snprintf(err, errcap, "convert(): token '%s' does not apply to "
+			         "%s -> %s", tok, from, to);
+			return -1;
+		}
+		if (g == TG_PREMAP)
+			premap = (uint8_t)cv_tok[k].bits;
+		else if (g == TG_SUR) {
+			if (strcmp(tok, "fffd") != 0) policy |= cv_tok[k].bits;
+		} else
+			policy |= cv_tok[k].bits;
+	}
+	if (premap == HXPM_UPPER_OEM && !(policy & HXCV_BESTFIT)) {
+		snprintf(err, errcap, "convert(): premap 'upper_oem' is Windows' best-fit "
+		         "OEM conversion; give \"bestfit\" with it");
+		return -1;
+	}
+	if (CV_NEVER_PADS(t)) policy |= HXCV_NOPAD;
+	if (cv_never_ill(f)) policy &= ~HXCV_ILL_MASK;   /* nothing for them to do */
+	/* A code point is unmappable only in latin1, koi8 and cpNNN, an ill-formed
+	 * byte kept under "keep" only outside UTF-8, and a lone surrogate kept
+	 * under "cesu" only in UTF-7.  Where none can occur "fail" changes
+	 * nothing, so it is dropped: then convert(x, "utf8", "utf16le", "null",
+	 * "fail") is utf16le(x). */
+	unmap_possible = hxe_reg[t].unmap ||
+	    (CV_RAWSRC(f) && (policy & HXCV_ILL_MASK) == HXCV_ILL_KEEP && t != HXE_UTF8) ||
+	    (CV_IS_U16(f) && (policy & HXCV_SUR_MASK) == HXCV_SUR_CESU && CV_SUR_UNMAP(t));
+	if (!unmap_possible) policy &= ~HXCV_FAIL;
+	ip->op = OP_CONVERT;
+	ip->u.conv.from = (uint8_t)f;
+	ip->u.conv.to = (uint8_t)t;
+	ip->u.conv.premap = premap;
+	ip->u.conv.policy = policy;
+	return 0;
+}
+
+/* ---- aliases: sections 18.3a, 18.5a and 18.6 ----
+ * legacy = 1: the instruction stands for an existing function, whose OP_CALL
+ * identity the stable shared id keeps.  The first legacy row matching an
+ * instruction names it, so cp1252_to_utf8 hashes as from_cp1252.
+ * cpNNN_to_utf8, utf8_to_cpNNN and utf8_to_cpNNN_bestfit are recognised by
+ * pattern in hx_convert_alias_inst, for every cpNNN in the registry.
+ *
+ * NOT aliased:
+ *   ebcdic      its table is not CP37: 99 of 256 bytes differ from Windows
+ *               CP37 (0x5B 0x5D 0x5E among them) and 0x7E and 0xE5 both give
+ *               0xA1, so it is not a code page at all;
+ *   hex_bin     the identity, not an encoding.
+ * fromhex and frombase64 are the "lenient" decoders: exactly the decoding they
+ * always did, which the strict hex and base64 decoders (null on anything an
+ * encoder cannot produce) are not. */
+static const struct {
+	const char *name; uint8_t from, to; uint16_t policy; uint8_t premap, legacy;
+} cv_alias[] = {
+	{ "utf16le",        HXE_UTF8,   HXE_UTF16LE,   HXCV_ILL_NULL, 0, 1 },
+	{ "utf16be",        HXE_UTF8,   HXE_UTF16BE,   HXCV_ILL_NULL, 0, 1 },
+	{ "utf7",           HXE_UTF8,   HXE_UTF7,      HXCV_ILL_NULL, 0, 1 },
+	{ "zext16",         HXE_LATIN1, HXE_UTF16LE,   0,             0, 1 },
+	{ "from_cp1252",    HXE_CP1252, HXE_UTF8,      0,             0, 1 },
+	{ "cp1252_to_utf8", HXE_CP1252, HXE_UTF8,      0,             0, 0 },
+	{ "from_cp1251",    HXE_CP1251, HXE_UTF8,      0,             0, 1 },
+	{ "cp1251_to_utf8", HXE_CP1251, HXE_UTF8,      0,             0, 0 },
+	{ "latin1_to_utf8", HXE_LATIN1, HXE_UTF8,      0,             0, 0 },
+	{ "utf8_to_latin1", HXE_UTF8,   HXE_LATIN1,    0,             0, 0 },
+	{ "hex",            HXE_RAW,    HXE_HEX,       0,             0, 1 },
+	{ "base64",         HXE_RAW,    HXE_BASE64,    0,             0, 1 },
+	{ "phpass_encode",  HXE_RAW,    HXE_CRYPT64,   HXCV_NOPAD,    0, 1 },
+	{ "cisco4_encode",  HXE_RAW,    HXE_CRYPT64BE, HXCV_NOPAD,    0, 1 },
+	{ "fromhex",        HXE_HEX,    HXE_RAW,       HXCV_LENIENT,  0, 1 },
+	{ "frombase64",     HXE_BASE64, HXE_RAW,       HXCV_LENIENT,  0, 1 },
+	{ "upper",          HXE_RAW,    HXE_RAW,       0, HXPM_UPPER,    1 },
+	{ "lower",          HXE_RAW,    HXE_RAW,       0, HXPM_LOWER,    1 },
+	{ "rev",            HXE_RAW,    HXE_RAW,       0, HXPM_REV,      1 },
+	{ "rot13",          HXE_RAW,    HXE_RAW,       0, HXPM_ROT13,    1 },
+	{ "koi8r_to_utf8",  HXE_KOI8R,  HXE_UTF8,      0,             0, 0 },
+	{ "utf8_to_koi8r",  HXE_UTF8,   HXE_KOI8R,     0,             0, 0 },
+	{ "koi8u_to_utf8",  HXE_KOI8U,  HXE_UTF8,      0,             0, 0 },
+	{ "utf8_to_koi8u",  HXE_UTF8,   HXE_KOI8U,     0,             0, 0 },
+	{ "from_utf16le",      HXE_UTF16LE, HXE_UTF8,  0,             0, 0 },
+	{ "from_utf16be",      HXE_UTF16BE, HXE_UTF8,  0,             0, 0 },
+	{ "from_utf16le_q",    HXE_UTF16LE, HXE_UTF8,  HXCV_SUR_Q,    0, 0 },
+	{ "from_utf16be_q",    HXE_UTF16BE, HXE_UTF8,  HXCV_SUR_Q,    0, 0 },
+	{ "from_utf16le_cesu", HXE_UTF16LE, HXE_UTF8,  HXCV_SUR_CESU, 0, 0 },
+	{ "from_utf16be_cesu", HXE_UTF16BE, HXE_UTF8,  HXCV_SUR_CESU, 0, 0 },
+	{ "ulower",         HXE_UTF8,   HXE_UTF8,      0, HXPM_LOWER,     0 },
+	{ "uupper",         HXE_UTF8,   HXE_UTF8,      0, HXPM_UPPER,     0 },
+	{ "ulower_win",     HXE_UTF8,   HXE_UTF8,      0, HXPM_LOWER_WIN, 0 },
+	{ "uupper_win",     HXE_UTF8,   HXE_UTF8,      0, HXPM_UPPER_WIN, 0 },
+	{ "urev",           HXE_UTF8,   HXE_UTF8,      0, HXPM_REV,       0 },
+	{ "ulower_full",    HXE_UTF8,   HXE_UTF8,      0, HXPM_LOWER_FULL, 0 },
+	{ "uupper_full",    HXE_UTF8,   HXE_UTF8,      0, HXPM_UPPER_FULL, 0 },
+	{ "nfc",            HXE_UTF8,   HXE_UTF8,      0, HXPM_NFC,       0 },
+	{ "nfd",            HXE_UTF8,   HXE_UTF8,      0, HXPM_NFD,       0 },
+	{ "nfkc",           HXE_UTF8,   HXE_UTF8,      0, HXPM_NFKC,      0 },
+	{ "nfkd",           HXE_UTF8,   HXE_UTF8,      0, HXPM_NFKD,      0 },
+	{ "nfd_hfs",        HXE_UTF8,   HXE_UTF8,      0, HXPM_NFD_HFS,   0 },
+	{ "utf16_lowbyte",  HXE_UTF8,   HXE_LOWBYTE16, 0,             0, 0 },
+	{ NULL, 0, 0, 0, 0, 0 }
+};
+
+static void cv_set(hx_inst *ip, int from, int to, uint16_t policy, int premap)
+{
+	memset(ip, 0, sizeof *ip);
+	ip->op = OP_CONVERT;
+	ip->u.conv.from = (uint8_t)from;
+	ip->u.conv.to = (uint8_t)to;
+	ip->u.conv.policy = policy;
+	ip->u.conv.premap = (uint8_t)premap;
+}
+
+int hx_convert_alias_inst(const char *name, hx_inst *ip)
+{
+	char cs[16], back[48];
+	unsigned n;
+	int i, id;
+	for (i = 0; cv_alias[i].name; i++)
+		if (strcmp(cv_alias[i].name, name) == 0) {
+			cv_set(ip, cv_alias[i].from, cv_alias[i].to, cv_alias[i].policy,
+			       cv_alias[i].premap);
+			return 1;
+		}
+	/* cpNNN_to_utf8, utf8_to_cpNNN, utf8_to_cpNNN_bestfit: the name must be
+	 * exactly what the pattern prints back, so cp01252_to_utf8 is not one */
+	if (sscanf(name, "cp%u_to_utf8", &n) == 1) {
+		snprintf(back, sizeof back, "cp%u_to_utf8", n);
+		snprintf(cs, sizeof cs, "cp%u", n);
+		if (strcmp(back, name) == 0 && (id = hx_conv_lookup(cs)) && hxe_reg[id].cp) {
+			cv_set(ip, id, HXE_UTF8, 0, HXPM_NONE);
+			return 1;
+		}
+	}
+	if (sscanf(name, "utf8_to_cp%u", &n) == 1) {
+		snprintf(cs, sizeof cs, "cp%u", n);
+		if (!(id = hx_conv_lookup(cs)) || !hxe_reg[id].cp) return 0;
+		snprintf(back, sizeof back, "utf8_to_cp%u", n);
+		if (strcmp(back, name) == 0) { cv_set(ip, HXE_UTF8, id, 0, HXPM_NONE); return 1; }
+		snprintf(back, sizeof back, "utf8_to_cp%u_bestfit", n);
+		if (strcmp(back, name) == 0) { cv_set(ip, HXE_UTF8, id, HXCV_BESTFIT, HXPM_NONE); return 1; }
+	}
+	return 0;
+}
+
+const char *hx_convert_legacy_name(const hx_inst *ip)
+{
+	int i;
+	if (ip->op != OP_CONVERT) return NULL;
+	for (i = 0; cv_alias[i].name; i++)
+		if (cv_alias[i].legacy && cv_alias[i].from == ip->u.conv.from &&
+		    cv_alias[i].to == ip->u.conv.to &&
+		    cv_alias[i].policy == ip->u.conv.policy &&
+		    cv_alias[i].premap == ip->u.conv.premap)
+			return cv_alias[i].name;
+	return NULL;
+}
+
+/* ---- fusion (section 18.7) ----
+ * A -> B then B -> C is one A -> C exactly when the first instruction's
+ * output is always the code-point sequence (or byte string) the second one
+ * decodes, unchanged, and at most one of them has a premap:
+ *   charsets: B is utf8, utf16le or utf16be, and the first cannot leave an
+ *     ill-formed byte (a utf8 source under "keep") or a lone surrogate (a
+ *     utf16 source under "cesu") in its output; it has no "fail" (nothing in
+ *     it can be unmappable, so build dropped any); the second has no
+ *     lone-surrogate token ("cesu" also changes how it writes NUL).  Then
+ *     the second's ill-formed and surrogate policies never apply, and the
+ *     fused instruction takes the first's source policy and the second's
+ *     encode and unmappable policy.
+ *   transfer encodings: B is raw (identity both ways), or hex (the strict
+ *     and lenient hex decoders both read every hex encoder output exactly),
+ *     and the result takes the first's decode policy and the second's
+ *     encode policy; or the first ends in hex and the second is a byte
+ *     upper/lower on raw, which is the "uc" form or the plain one (18.5a).
+ * An encode followed by a decode (utf8 -> cpNNN -> utf8) never qualifies. */
+static int cv_canon(hx_inst *ip)
+{
+	int f = ip->u.conv.from, t = ip->u.conv.to;
+	uint16_t *p = &ip->u.conv.policy;
+	if (CV_NEVER_PADS(t)) *p |= HXCV_NOPAD;
+	if (t != HXE_BASE64 && t != HXE_BASE64URL && t != HXE_BASE32 && !CV_NEVER_PADS(t))
+		*p &= ~HXCV_NOPAD;
+	if (t != HXE_HEX) *p &= ~HXCV_UC;
+	if (cv_never_ill(f)) *p &= ~HXCV_ILL_MASK;
+	if (!(hxe_reg[t].unmap ||
+	      (CV_RAWSRC(f) && (*p & HXCV_ILL_MASK) == HXCV_ILL_KEEP && t != HXE_UTF8) ||
+	      (CV_IS_U16(f) && (*p & HXCV_SUR_MASK) == HXCV_SUR_CESU && CV_SUR_UNMAP(t))))
+		*p &= ~HXCV_FAIL;
+	return 1;
+}
+
+static int cv_fuse2(const hx_inst *a, const hx_inst *b, hx_inst *o)
+{
+	int af = a->u.conv.from, at = a->u.conv.to, bf = b->u.conv.from, bt = b->u.conv.to;
+	int pa = a->u.conv.premap, pb = b->u.conv.premap;
+	uint16_t qa = a->u.conv.policy, qb = b->u.conv.policy;
+
+	if (hxe_reg[af].kind == HXE_KIND_TRANSFER) {
+		if (hxe_reg[bf].kind != HXE_KIND_TRANSFER) return 0;
+		if (at == HXE_HEX && bf == HXE_RAW && bt == HXE_RAW && qb == 0 &&
+		    (pb == HXPM_UPPER || pb == HXPM_LOWER)) {
+			*o = *a;
+			o->u.conv.policy = pb == HXPM_UPPER ? qa | HXCV_UC : qa & ~HXCV_UC;
+			return 1;
+		}
+		if (pa && pb) return 0;
+		if (!((at == HXE_RAW && bf == HXE_RAW) || (at == HXE_HEX && bf == HXE_HEX)))
+			return 0;
+		cv_set(o, af, bt, (qa & HXCV_LENIENT) | (qb & (HXCV_UC | HXCV_NOPAD)), pa ? pa : pb);
+		return cv_canon(o);
+	}
+	if (pa && pb) return 0;
+	if (bf != at || !(at == HXE_UTF8 || CV_IS_U16(at))) return 0;
+	if (CV_RAWSRC(af) && (qa & HXCV_ILL_MASK) == HXCV_ILL_KEEP) return 0;
+	if (CV_IS_U16(af) && (qa & HXCV_SUR_MASK) == HXCV_SUR_CESU) return 0;
+	if ((qa & HXCV_FAIL) || (qb & HXCV_SUR_MASK)) return 0;
+	cv_set(o, af, bt, (qa & (HXCV_ILL_MASK | HXCV_SUR_MASK | HXCV_GLYPHS)) |
+	       (qb & (HXCV_BESTFIT | HXCV_FAIL)),
+	       pa ? pa : pb);
+	return cv_canon(o);
+}
+
+static int cv_is_jump(int op)
+{
+	return op == OP_JUMP || op == OP_JUMP_LE || op == OP_JUMP_LT || op == OP_JUMP_GT ||
+	       op == OP_JUMP_GE || op == OP_JUMP_EQ || op == OP_JUMP_NE;
+}
+
+int hx_convert_fuse(hx_inst *code, const char **names, int n)
+{
+	int i, k;
+	for (i = 0; i + 1 < n; ) {
+		hx_inst f;
+		int target = 0;
+		if (code[i].op != OP_CONVERT || code[i + 1].op != OP_CONVERT ||
+		    !cv_fuse2(&code[i], &code[i + 1], &f)) { i++; continue; }
+		for (k = 0; k < n; k++)
+			if (cv_is_jump(code[k].op) && code[k].u.addr == i + 1) target = 1;
+		if (target) { i++; continue; }
+		code[i] = f;
+		memmove(code + i + 1, code + i + 2, (n - i - 2) * sizeof *code);
+		if (names) memmove(names + i + 1, names + i + 2, (n - i - 2) * sizeof *names);
+		n--;
+		for (k = 0; k < n; k++)
+			if (cv_is_jump(code[k].op) && code[k].u.addr > i + 1) code[k].u.addr--;
+		/* stay on i: the fused instruction may fuse with the next */
+	}
+	return n;
+}
+
+void hx_convert_describe(const hx_inst *ip, char *buf, int cap)
+{
+	static const char *ill[] = { NULL, "null", "latin1", "fffd" };
+	static const char *sur[] = { NULL, "q", "cesu", NULL };
+	const char *tok[8];
+	int n = 0, i, o;
+	uint16_t p = ip->u.conv.policy;
+	uint8_t pm = ip->u.conv.premap;
+
+	if (ill[p & HXCV_ILL_MASK]) tok[n++] = ill[p & HXCV_ILL_MASK];
+	if (sur[(p & HXCV_SUR_MASK) >> 2]) tok[n++] = sur[(p & HXCV_SUR_MASK) >> 2];
+	if (p & HXCV_BESTFIT) tok[n++] = "bestfit";
+	if (p & HXCV_FAIL)    tok[n++] = "fail";
+	if (p & HXCV_UC)      tok[n++] = "uc";
+	if (p & HXCV_NOPAD)   tok[n++] = "nopad";
+	if (p & HXCV_LENIENT) tok[n++] = "lenient";
+	if (p & HXCV_GLYPHS)  tok[n++] = "glyphs";
+	o = snprintf(buf, cap, "%s->%s [", hx_conv_name(ip->u.conv.from),
+	             hx_conv_name(ip->u.conv.to));
+	for (i = 0; i < n && o < cap; i++)
+		o += snprintf(buf + o, cap - o, "%s%s", i ? "," : "", tok[i]);
+	if (o < cap)
+		snprintf(buf + o, cap - o, "] premap=%s",
+		         pm < sizeof pm_name / sizeof pm_name[0] ? pm_name[pm] : "?");
+}
+
+/* ---- the engine ---- */
+
+#define CV_RAWBYTE 0x80000000u   /* an ill-formed byte kept as itself */
+
+static void cv_null(hx_val *out, hx_arena *arena)
+{
+	out->data = hx_arena_alloc(arena, 1);
+	out->data[0] = '\0';
+	out->len = 0;
+}
+
+/* Section 3: the length of the well-formed UTF-8 sequence at in[i], storing
+ * its code point, or 0 when the byte there is a character on its own.
+ * Whether a sequence is well-formed is utf8_to_utf32's decision. */
+static int cv_utf8_at(const unsigned char *in, int i, int len, uint32_t *cp)
+{
+	unsigned char c = in[i];
+	int sl = c < 0x80 ? 1 : (c >= 0xc2 && c <= 0xdf) ? 2 :
+	         (c >= 0xe0 && c <= 0xef) ? 3 :
+	         (c >= 0xf0 && c <= 0xf4) ? 4 : 0;
+	if (sl == 1) { *cp = c; return 1; }
+	if (sl && i + sl <= len && utf8_to_utf32(in + i, sl, cp, 1) == 1) return sl;
+	return 0;
+}
+
+/* One code point as UTF-8, surrogates included (only "cesu" produces them). */
+static int cv_put_utf8(uint32_t c, unsigned char *b)
+{
+	if (c < 0x80) { b[0] = (unsigned char)c; return 1; }
+	if (c < 0x800) { b[0] = 0xc0 | (c >> 6); b[1] = 0x80 | (c & 0x3f); return 2; }
+	if (c < 0x10000) { b[0] = 0xe0 | (c >> 12); b[1] = 0x80 | ((c >> 6) & 0x3f);
+	                   b[2] = 0x80 | (c & 0x3f); return 3; }
+	b[0] = 0xf0 | (c >> 18); b[1] = 0x80 | ((c >> 12) & 0x3f);
+	b[2] = 0x80 | ((c >> 6) & 0x3f); b[3] = 0x80 | (c & 0x3f);
+	return 4;
+}
+
+/* ---- multi-byte charsets (phase 4b step 3) ----
+ * Tables from hx_conv_tables.h: a byte is a character (hxt_mb_d1), the lead
+ * of a pair (hxt_mb_lead -> a row of hxt_mb_rows), or, for euc_jp's 0x8F, the
+ * first of three (hxt_mb_lead3 on the second byte).  GB18030's four-byte
+ * codes are the WHATWG algorithm (encoding.bs "index gb18030 ranges"), with
+ * the 2022 edition's 18 four-byte PUA codes for "gb18030".
+ *
+ * An error follows the Encoding Standard: a lead whose next byte is not
+ * ASCII and makes no character consumes both bytes; when the next byte is
+ * ASCII, the lead alone is the error and the next byte is read again.  One
+ * error is one ill-formed unit under the source tokens: under "keep" each of
+ * its bytes is kept, under "latin1" each byte is its U+00xx, under "fffd" the
+ * error is one U+FFFD. */
+#define CV_MB_GB(m)  ((m) == HXE_MB_GB18030 - HXE_MB_FIRST ? 1 : \
+                      ((m) == HXE_MB_GB18030_WEB - HXE_MB_FIRST || \
+                       (m) == HXE_MB_GBK_WEB - HXE_MB_FIRST) ? 2 : 0)
+
+static int64_t cv_gb4_cp(uint32_t p, int std)
+{
+	int lo = 0, hi = HXT_NGBR - 1, k;
+	if ((p > 39419 && p < 189000) || p > 1237575) return -1;
+	if (p >= 189000) return 0x10000 + p - 189000;
+	if (p == 7457) return 0xe7c7;
+	if (std)
+		for (k = 0; k < 18; k++)
+			if (hxt_gb4_std[k][0] == p) return hxt_gb4_std[k][1];
+	while (lo < hi) {                 /* last range pointer <= p */
+		int m = (lo + hi + 1) / 2;
+		if (hxt_gb_ranges[m][0] <= p) lo = m; else hi = m - 1;
+	}
+	return hxt_gb_ranges[lo][1] + p - hxt_gb_ranges[lo][0];
+}
+
+static int64_t cv_gb4_ptr(uint32_t c, int std)
+{
+	int lo = 0, hi = HXT_NGBR - 1, k;
+	if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return -1;
+	if (c >= 0x10000) return 189000 + c - 0x10000;
+	if (c == 0xe7c7) return 7457;
+	if (std)
+		for (k = 0; k < 18; k++)
+			if (hxt_gb4_std[k][1] == c) return hxt_gb4_std[k][0];
+	while (lo < hi) {                 /* last range code point <= c */
+		int m = (lo + hi + 1) / 2;
+		if (hxt_gb_ranges[m][1] <= c) lo = m; else hi = m - 1;
+	}
+	return hxt_gb_ranges[lo][0] + c - hxt_gb_ranges[lo][1];
+}
+
+/* One error of k bytes at in[i]; returns the new n, or -1 for a null result. */
+static int cv_mb_err(uint16_t policy, const unsigned char *in, int i, int k,
+                     uint32_t *cp, int n)
+{
+	int j;
+	switch (policy & HXCV_ILL_MASK) {
+	case HXCV_ILL_NULL:   return -1;
+	case HXCV_ILL_FFFD:   cp[n++] = 0xfffd; return n;
+	case HXCV_ILL_LATIN1: for (j = 0; j < k; j++) cp[n++] = in[i + j]; return n;
+	default:              for (j = 0; j < k; j++) cp[n++] = CV_RAWBYTE | in[i + j]; return n;
+	}
+}
+
+static int cv_mb_put(uint32_t v, uint32_t *cp, int n)
+{
+	if ((v & 0xffff0000u) == 0xffff0000u) {
+		cp[n++] = hxt_mb_pairs[v & 0xffff][0];
+		cp[n++] = hxt_mb_pairs[v & 0xffff][1];
+	} else
+		cp[n++] = v;
+	return n;
+}
+
+static int cv_mb_dec(int m, uint16_t policy, const unsigned char *in, int len, uint32_t *cp)
+{
+	int i = 0, n = 0, gb = CV_MB_GB(m), p3 = hxt_mb_p3[m], k;
+	uint32_t v;
+	/* a plain block, not do { } while (0): its continue is the loop's */
+#define MBERR(nb) { k = (nb); if ((n = cv_mb_err(policy, in, i, k, cp, n)) < 0) return -1; \
+                    i += k; continue; }
+	while (i < len) {
+		unsigned b = in[i];
+		int row;
+		if (gb && b >= 0x81 && b <= 0xfe && i + 1 < len && in[i + 1] >= 0x30 && in[i + 1] <= 0x39) {
+			if (i + 3 < len && in[i + 2] >= 0x81 && in[i + 2] <= 0xfe &&
+			    in[i + 3] >= 0x30 && in[i + 3] <= 0x39) {
+				uint32_t p = (((b - 0x81) * 10 + in[i + 1] - 0x30) * 126 + in[i + 2] - 0x81) * 10 +
+				             in[i + 3] - 0x30;
+				int64_t c = cv_gb4_cp(p, gb == 1);
+				if (c >= 0) { cp[n++] = (uint32_t)c; i += 4; continue; }
+				MBERR(4);
+			}
+			/* the input ends inside the four-byte code: one error for the
+			 * rest; otherwise the bytes after the lead are read again */
+			if (i + 2 >= len || (i + 3 >= len && in[i + 2] >= 0x81 && in[i + 2] <= 0xfe))
+				MBERR(len - i);
+			MBERR(1);
+		}
+		if (p3 && b == (unsigned)p3) {
+			row = i + 1 < len ? hxt_mb_lead3[m][in[i + 1]] : -1;
+			if (row >= 0) {
+				if (i + 2 < len && (v = hxt_mb_rows[row][in[i + 2]]) != HXT_MB_NONE) {
+					n = cv_mb_put(v, cp, n);
+					i += 3;
+					continue;
+				}
+				MBERR(i + 2 < len && in[i + 2] >= 0x80 ? 3 : 2);
+			}
+			MBERR(i + 1 < len && in[i + 1] >= 0x80 ? 2 : 1);
+		}
+		if ((row = hxt_mb_lead[m][b]) >= 0) {
+			if (i + 1 < len && (v = hxt_mb_rows[row][in[i + 1]]) != HXT_MB_NONE) {
+				n = cv_mb_put(v, cp, n);
+				i += 2;
+				continue;
+			}
+			MBERR(i + 1 < len && in[i + 1] >= 0x80 ? 2 : 1);
+		}
+		if ((v = hxt_mb_d1[m][b]) != HXT_MB_NONE) { n = cv_mb_put(v, cp, n); i++; continue; }
+		MBERR(1);
+	}
+#undef MBERR
+	return n;
+}
+
+/* The bytes of one code point in multi-byte table m, or 0 when it has none. */
+static int cv_mb_enc1(int m, uint32_t c, unsigned char *b)
+{
+	int lo = hxt_mb_start[m], hi = hxt_mb_start[m + 1] - 1, gb = CV_MB_GB(m), k;
+	if (c & CV_RAWBYTE) return 0;
+	while (lo <= hi) {
+		int mid = (lo + hi) / 2;
+		if (hxt_mb_enc[mid].c == c) {
+			for (k = 0; k < hxt_mb_enc[mid].n; k++)
+				b[k] = (unsigned char)(hxt_mb_enc[mid].code >> (8 * (hxt_mb_enc[mid].n - 1 - k)));
+			return hxt_mb_enc[mid].n;
+		}
+		if (hxt_mb_enc[mid].c < c) lo = mid + 1; else hi = mid - 1;
+	}
+	/* four-byte GB 18030; gbk has none; WHATWG never encodes U+E5E5 */
+	if (gb && m != HXE_MB_GBK_WEB - HXE_MB_FIRST && !(gb == 2 && c == 0xe5e5)) {
+		int64_t p = cv_gb4_ptr(c, gb == 1);
+		if (p < 0) return 0;
+		b[3] = (unsigned char)(0x30 + p % 10); p /= 10;
+		b[2] = (unsigned char)(0x81 + p % 126); p /= 126;
+		b[1] = (unsigned char)(0x30 + p % 10); p /= 10;
+		b[0] = (unsigned char)(0x81 + p);
+		return 4;
+	}
+	return 0;
+}
+
+/* ISO-2022-JP.  web: the Encoding Standard decoder, state for state (the
+ * katakana escape, and an escape directly after an escape is an error).
+ * Not web: RFC 1468 -- ESC ( B, ESC ( J, ESC $ @ and ESC $ B only, and the
+ * text must end in ASCII.  JIS X 0208 is the euc_jp table of the same
+ * reading.  An error is one ill-formed unit of the bytes it consumed. */
+static int cv_iso2022jp_dec(int web, uint16_t policy, const unsigned char *in, int len,
+                            uint32_t *cp)
+{
+	enum { ASC, ROMAN, KATA, LEAD, TRAIL, ESC0, ESC1 };
+	int m = (web ? HXE_MB_EUC_JP_WEB : HXE_MB_EUC_JP) - HXE_MB_FIRST;
+	int st = ASC, ost = ASC, out = 0, n = 0, i = 0, k, e0 = 0;
+	unsigned lead = 0;
+#define JERR(at, nb) do { if ((n = cv_mb_err(policy, in, (at), (nb), cp, n)) < 0) return -1; } while (0)
+	for (;;) {
+		int eoq = i >= len;
+		unsigned b = eoq ? 0 : in[i];
+		switch (st) {
+		case ASC: case ROMAN: case KATA: case LEAD:
+			if (eoq) goto end;
+			if (b == 0x1b) { e0 = i; st = ESC0; i++; continue; }
+			out = 0;
+			if (st == LEAD) {
+				if (b >= 0x21 && b <= 0x7e) { lead = b; st = TRAIL; i++; continue; }
+			} else if (st == KATA) {
+				if (b >= 0x21 && b <= 0x5f) { cp[n++] = 0xff61 - 0x21 + b; i++; continue; }
+			} else if (b <= 0x7f && b != 0x0e && b != 0x0f) {
+				cp[n++] = st == ROMAN && b == 0x5c ? 0xa5 : st == ROMAN && b == 0x7e ? 0x203e : b;
+				i++;
+				continue;
+			}
+			JERR(i, 1); i++;
+			continue;
+		case TRAIL:
+			if (eoq) { st = LEAD; JERR(i - 1, 1); goto end; }
+			if (b == 0x1b) { JERR(i - 1, 1); e0 = i; st = ESC0; i++; continue; }
+			st = LEAD;
+			if (b >= 0x21 && b <= 0x7e) {
+				int row = hxt_mb_lead[m][lead | 0x80];
+				uint32_t v = row >= 0 ? hxt_mb_rows[row][b | 0x80] : HXT_MB_NONE;
+				if (v != HXT_MB_NONE) { n = cv_mb_put(v, cp, n); i++; continue; }
+			}
+			JERR(i - 1, 2); i++;
+			continue;
+		case ESC0:
+			if (!eoq && (b == 0x24 || b == 0x28)) { lead = b; st = ESC1; i++; continue; }
+			out = 0; st = ost;
+			JERR(e0, 1);       /* the ESC; the byte after it is read again */
+			continue;
+		case ESC1: {
+			int ns = -1;
+			if (!eoq) {
+				if (lead == 0x28 && b == 0x42) ns = ASC;
+				else if (lead == 0x28 && b == 0x4a) ns = ROMAN;
+				else if (lead == 0x28 && b == 0x49 && web) ns = KATA;
+				else if (lead == 0x24 && (b == 0x40 || b == 0x42)) ns = LEAD;
+			}
+			if (ns >= 0) {
+				int was = out;
+				st = ost = ns;
+				i++;
+				if (web) { out = 1; if (was) JERR(e0, 3); }
+				continue;
+			}
+			out = 0; st = ost;
+			JERR(e0, 1);       /* the ESC; the two bytes after it are read again */
+			i = e0 + 1;
+			continue;
+		}
+		}
+	}
+end:
+	if (!web && st != ASC) {           /* RFC 1468: the text ends in ASCII */
+		if ((policy & HXCV_ILL_MASK) == HXCV_ILL_NULL) return -1;
+		if ((policy & HXCV_ILL_MASK) == HXCV_ILL_FFFD) cp[n++] = 0xfffd;
+	}
+	(void)k;
+#undef JERR
+	return n;
+}
+
+/* ---- the remaining Unicode forms (phase 4b step 4) ----
+ * An ill-formed unit (cv_mb_err) is: a UTF-32 unit that is a surrogate or
+ * past U+10FFFF, or a trailing partial unit; in CESU-8 a four-byte form, a
+ * lone surrogate, or a byte utf8_to_utf32 rejects; in UTF-7 (RFC 2152) a
+ * byte outside the direct and optional characters, or a base64 run with
+ * non-zero pad bits, a part unit, or a lone surrogate -- the whole run. */
+static int cv_utf32_dec(int f, uint16_t policy, const unsigned char *in, int len, uint32_t *cp)
+{
+	int be = f != HXE_UTF32LE, i = 0, n = 0;
+	if (f == HXE_UTF32 && len >= 4) {
+		if (in[0] == 0 && in[1] == 0 && in[2] == 0xfe && in[3] == 0xff) i = 4;
+		else if (in[0] == 0xff && in[1] == 0xfe && in[2] == 0 && in[3] == 0) { be = 0; i = 4; }
+	}
+	for (; i + 4 <= len; i += 4) {
+		uint32_t c = be ? (uint32_t)in[i] << 24 | in[i + 1] << 16 | in[i + 2] << 8 | in[i + 3]
+		                : (uint32_t)in[i + 3] << 24 | in[i + 2] << 16 | in[i + 1] << 8 | in[i];
+		if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) {
+			if ((n = cv_mb_err(policy, in, i, 4, cp, n)) < 0) return -1;
+		} else
+			cp[n++] = c;
+	}
+	if (i < len && (n = cv_mb_err(policy, in, i, len - i, cp, n)) < 0) return -1;
+	return n;
+}
+
+static int cv_cesu8_dec(uint16_t policy, const unsigned char *in, int len, uint32_t *cp)
+{
+	int i = 0, n = 0;
+	while (i < len) {
+		uint32_t c;
+		int sl;
+		if (i + 2 < len && in[i] == 0xed && in[i + 1] >= 0xa0 && in[i + 1] <= 0xbf &&
+		    (in[i + 2] & 0xc0) == 0x80) {
+			uint32_t h = 0xd000 | (in[i + 1] & 0x3f) << 6 | (in[i + 2] & 0x3f);
+			if (h <= 0xdbff && i + 5 < len && in[i + 3] == 0xed && in[i + 4] >= 0xb0 &&
+			    in[i + 4] <= 0xbf && (in[i + 5] & 0xc0) == 0x80) {
+				uint32_t l = 0xd000 | (in[i + 4] & 0x3f) << 6 | (in[i + 5] & 0x3f);
+				cp[n++] = 0x10000 + ((h - 0xd800) << 10) + (l - 0xdc00);
+				i += 6;
+				continue;
+			}
+			if ((n = cv_mb_err(policy, in, i, 3, cp, n)) < 0) return -1;
+			i += 3;
+			continue;
+		}
+		if (in[i] < 0xf0 && (sl = cv_utf8_at(in, i, len, &c)) > 0) { cp[n++] = c; i += sl; continue; }
+		if ((n = cv_mb_err(policy, in, i, 1, cp, n)) < 0) return -1;
+		i++;
+	}
+	return n;
+}
+
+static int cv_b64v(unsigned c)
+{
+	return c >= 'A' && c <= 'Z' ? (int)(c - 'A') : c >= 'a' && c <= 'z' ? (int)(c - 'a' + 26) :
+	       c >= '0' && c <= '9' ? (int)(c - '0' + 52) : c == '+' ? 62 : c == '/' ? 63 : -1;
+}
+
+/* RFC 2152 Set D, Set O, and SP TAB CR LF: written as themselves */
+static int cv_utf7_direct(unsigned c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+	       (c && strchr("'(),-./:?!\"#$%&*;<=>@[]^_`{|} \t\r\n", (int)c) != NULL);
+}
+
+static int cv_utf7_dec(uint16_t policy, const unsigned char *in, int len, uint32_t *cp)
+{
+	int i = 0, n = 0;
+	while (i < len) {
+		int s, j, bits = 0, nb = 0, bad = 0, m;
+		uint32_t acc = 0, hi = 0;
+		if (in[i] != '+') {
+			if (cv_utf7_direct(in[i])) cp[n++] = in[i];
+			else if ((n = cv_mb_err(policy, in, i, 1, cp, n)) < 0) return -1;
+			i++;
+			continue;
+		}
+		if (i + 1 < len && in[i + 1] == '-') { cp[n++] = '+'; i += 2; continue; }
+		s = i++;
+		m = n;
+		for (j = i; j < len && cv_b64v(in[j]) >= 0; j++) {
+			acc = acc << 6 | (uint32_t)cv_b64v(in[j]);
+			bits += 6;
+			if (bits >= 16) {
+				uint32_t u = (acc >> (bits - 16)) & 0xffff;
+				bits -= 16;
+				nb++;
+				if (hi) {
+					if (u >= 0xdc00 && u <= 0xdfff) cp[n++] = 0x10000 + ((hi - 0xd800) << 10) + (u - 0xdc00);
+					else bad = 1;
+					hi = 0;
+				} else if (u >= 0xd800 && u <= 0xdbff) hi = u;
+				else if (u >= 0xdc00 && u <= 0xdfff) bad = 1;
+				else cp[n++] = u;
+			}
+		}
+		/* the run ends: at least one unit, under 6 bits left over, all zero,
+		 * and no surrogate left open */
+		if (!nb || bits >= 6 || (acc & ((1u << bits) - 1)) || hi) bad = 1;
+		if (j < len && in[j] == '-') j++;     /* an explicit end is absorbed */
+		if (bad) {
+			n = m;
+			if ((n = cv_mb_err(policy, in, s, j - s, cp, n)) < 0) return -1;
+		}
+		i = j;
+	}
+	return n;
+}
+
+/* At most this many code points come from one input byte (a standard
+ * single-byte table's longest entry, hxt_sb_dec's count field). */
+#define CV_MAXSEQ 4   /* gen_hx_tables.py sb_parse refuses a longer entry */
+
+/* Decode a charset into code points.  Returns the count, or -1 for a null
+ * result.  cp has room for CV_MAXSEQ * len + 1 entries. */
+static int cv_decode(int f, uint16_t policy, const unsigned char *in, int len,
+                     uint32_t *cp)
+{
+	int i, n = 0;
+	switch (f) {
+	case HXE_UTF8:
+		if ((policy & HXCV_ILL_MASK) == HXCV_ILL_NULL) {
+			n = utf8_to_utf32(in, len, cp, len + 1);
+			return n < 0 ? -1 : n;
+		}
+		for (i = 0; i < len; ) {
+			uint32_t one;
+			int sl = cv_utf8_at(in, i, len, &one);
+			if (sl) { cp[n++] = one; i += sl; continue; }
+			switch (policy & HXCV_ILL_MASK) {
+			case HXCV_ILL_LATIN1: cp[n++] = in[i]; break;
+			case HXCV_ILL_FFFD:   cp[n++] = 0xfffd; break;
+			default:              cp[n++] = CV_RAWBYTE | in[i]; break;
+			}
+			i++;
+		}
+		return n;
+	case HXE_LATIN1:
+		for (i = 0; i < len; i++) cp[i] = in[i];
+		return len;
+	case HXE_UTF32LE: case HXE_UTF32BE: case HXE_UTF32:
+		return cv_utf32_dec(f, policy, in, len, cp);
+	case HXE_CESU8:
+		return cv_cesu8_dec(policy, in, len, cp);
+	case HXE_UTF7:
+		return cv_utf7_dec(policy, in, len, cp);
+	case HXE_UTF16LE:
+	case HXE_UTF16BE:
+	case HXE_UTF16: {
+		/* section 5: a pair is one code point; under "cesu" every unit is
+		 * kept as itself, for the encoder to write; a lone surrogate and an
+		 * odd trailing byte become U+FFFD, or "?" under "q".  utf16: a BOM
+		 * gives the byte order and is not text; with none it is big-endian */
+		int be = f != HXE_UTF16LE, sur = policy & HXCV_SUR_MASK;
+		if (f == HXE_UTF16 && len >= 2 && ((in[0] == 0xfe && in[1] == 0xff) ||
+		                                   (in[0] == 0xff && in[1] == 0xfe))) {
+			be = in[0] == 0xfe;
+			in += 2;
+			len -= 2;
+		}
+		uint32_t bad = sur == HXCV_SUR_Q ? 0x3f : 0xfffd;
+		int nu = len / 2;
+#define U16AT(k) (be ? (uint32_t)in[2*(k)] << 8 | in[2*(k)+1] \
+                     : (uint32_t)in[2*(k)+1] << 8 | in[2*(k)])
+		for (i = 0; i < nu; i++) {
+			uint32_t u = U16AT(i);
+			if (sur == HXCV_SUR_CESU || u < 0xd800 || u > 0xdfff) { cp[n++] = u; continue; }
+			if (u <= 0xdbff && i + 1 < nu) {
+				uint32_t l = U16AT(i + 1);
+				if (l >= 0xdc00 && l <= 0xdfff) {
+					cp[n++] = 0x10000 + ((u - 0xd800) << 10) + (l - 0xdc00);
+					i++;
+					continue;
+				}
+			}
+			cp[n++] = bad;
+		}
+#undef U16AT
+		if (len & 1) cp[n++] = sur == HXCV_SUR_Q ? 0x3f : 0xfffd;
+		return n;
+	}
+	case HXE_KOI8R:
+	case HXE_KOI8U: {
+		const uint16_t *t = f == HXE_KOI8R ? hxt_koi8r_dec : hxt_koi8u_dec;
+		for (i = 0; i < len; i++) cp[i] = t[in[i]];
+		return len;
+	}
+	default: {
+		/* cpNNN, Windows rules (section 10.4): a DBCS lead byte and any
+		 * non-NUL byte are one pair; a lead before NUL or at the end is the
+		 * Unicode default character on its own.  Under "null", Windows'
+		 * strict decode: any byte or pair it rejects is a null result. */
+		int pg, gl, strict = (policy & HXCV_ILL_MASK) == HXCV_ILL_NULL;
+		if (hxe_reg[f].sb) {
+			/* a standard single-byte table: an undefined byte is ill-formed,
+			 * under the same tokens as UTF-8 */
+			int sb = f - HXE_SB_FIRST;
+			for (i = 0; i < len; i++) {
+				uint32_t e = hxt_sb_dec[sb][in[i]];
+				int k;
+				if (e) {
+					for (k = 0; k < (int)(e & 7); k++) cp[n++] = hxt_sb_pool[(e >> 3) + k];
+					continue;
+				}
+				switch (policy & HXCV_ILL_MASK) {
+				case HXCV_ILL_NULL:   return -1;
+				case HXCV_ILL_LATIN1: cp[n++] = in[i]; break;
+				case HXCV_ILL_FFFD:   cp[n++] = 0xfffd; break;
+				default:              cp[n++] = CV_RAWBYTE | in[i]; break;
+				}
+			}
+			return n;
+		}
+		if (f == HXE_ISO2022JP || f == HXE_ISO2022JP_WEB)
+			return cv_iso2022jp_dec(f == HXE_ISO2022JP_WEB, policy, in, len, cp);
+		if (hxe_reg[f].mb)
+			return cv_mb_dec(f - HXE_MB_FIRST, policy, in, len, cp);
+		pg = cv_page(f);
+		if (pg < 0) return -1;   /* not reachable: hx_convert_build refuses it */
+		gl = (policy & HXCV_GLYPHS) ? cv_gly(hxe_reg[f].cp) : -1;
+		for (i = 0; i < len; i++) {
+			int row = hxt_lead[pg][in[i]];
+			if (row < 0) {
+				if (strict && !(hxt_dec1_sbit[pg][in[i] >> 3] & (1 << (in[i] & 7))))
+					return -1;
+				cp[n++] = gl >= 0 && (in[i] < 0x20 || in[i] == 0x7f)
+				        ? hxt_gly[gl][in[i] == 0x7f ? 32 : in[i]] : hxt_dec1[pg][in[i]];
+				continue;
+			}
+			if (i + 1 < len && in[i + 1] != 0) {
+				if (strict && !(hxt_dec2_sbit[row][in[i + 1] >> 3] & (1 << (in[i + 1] & 7))))
+					return -1;
+				cp[n++] = hxt_dec2[row][in[i + 1]];
+				i++;
+			} else {
+				if (strict) return -1;
+				cp[n++] = hxt_cpinfo[pg].udef;
+			}
+		}
+		return n;
+	}
+	}
+}
+
+/* Binary search of a sorted (from, to) table. */
+static uint32_t cv_map32(const uint32_t (*t)[2], int n, uint32_t c)
+{
+	int lo = 0, hi = n - 1;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (t[m][0] == c) return t[m][1];
+		if (t[m][0] < c) lo = m + 1; else hi = m - 1;
+	}
+	return c;
+}
+
+static uint32_t cv_map16(const uint16_t (*t)[2], int n, uint32_t c)
+{
+	int lo = 0, hi = n - 1;
+	if (c > 0xffff) return c;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (t[m][0] == c) return t[m][1];
+		if (t[m][0] < c) lo = m + 1; else hi = m - 1;
+	}
+	return c;
+}
+
+/* A character-domain premap, in place.  An ill-formed byte kept under "keep"
+ * is not a character and no map changes it; rev moves it as one unit. */
+static void cv_premap_chars(int pm, uint32_t *cp, int n)
+{
+	int i;
+	for (i = 0; i < n; i++) {
+		uint32_t c = cp[i];
+		if (c & CV_RAWBYTE) continue;
+		switch (pm) {
+		case HXPM_LOWER:     cp[i] = cv_map32(hxt_lower, HXT_NLOWER, c); break;
+		case HXPM_UPPER:     cp[i] = cv_map32(hxt_upper, HXT_NUPPER, c); break;
+		case HXPM_LOWER_WIN: cp[i] = cv_map16(hxt_lower_win, HXT_NLOWER_WIN, c); break;
+		case HXPM_UPPER_WIN: cp[i] = cv_map16(hxt_upper_win, HXT_NUPPER_WIN, c); break;
+		case HXPM_ROT13:
+			if (c >= 'A' && c <= 'Z') cp[i] = 'A' + (c - 'A' + 13) % 26;
+			else if (c >= 'a' && c <= 'z') cp[i] = 'a' + (c - 'a' + 13) % 26;
+			break;
+		default: break;
+		}
+	}
+	if (pm == HXPM_REV)
+		for (i = 0; i < n / 2; i++) {
+			uint32_t c = cp[i];
+			cp[i] = cp[n - 1 - i];
+			cp[n - 1 - i] = c;
+		}
+}
+
+/* ---- premaps that change the number of code points ----
+ * Full case mapping (SpecialCasing.txt, its unconditional rows plus
+ * Final_Sigma; never a language condition) and UAX #15 normalisation, all
+ * from Unicode 18.0.0.  An ill-formed byte kept under "keep" (CV_RAWBYTE) is
+ * not a character: it is never mapped, it is neither Cased nor
+ * Case_Ignorable, so it ends a Final_Sigma context, and it has combining
+ * class 0 and composes with nothing, so normalisation never crosses it
+ * (section 14). */
+
+static int cv_in_ranges(const uint32_t (*r)[2], int n, uint32_t c)
+{
+	int lo = 0, hi = n - 1;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (c < r[m][0]) hi = m - 1;
+		else if (c > r[m][1]) lo = m + 1;
+		else return 1;
+	}
+	return 0;
+}
+
+#define CV_CASED(c)   (!((c) & CV_RAWBYTE) && cv_in_ranges(hxt_cased, HXT_NCASED, c))
+#define CV_CASEIGN(c) (!((c) & CV_RAWBYTE) && cv_in_ranges(hxt_case_ign, HXT_NCASE_IGN, c))
+
+/* Unicode 3.13 Table 3-17, Final_Sigma: C is preceded by a Cased character
+ * and then zero or more Case_Ignorable ones, and is not followed by zero or
+ * more Case_Ignorable characters and then a Cased one.  Case_Ignorable
+ * characters are skipped first, so one that is both Cased and Case_Ignorable
+ * (U+02B0, U+0345, ...) counts as ignorable: that is what ICU (JavaScript)
+ * and CPython do, measured with Node 16 / ICU 74 and Python 3.9
+ * (hx-support/phase3/case/).  Java 11 decides by word boundaries instead. */
+static int cv_final_sigma(const uint32_t *cp, int n, int i)
+{
+	int j;
+	for (j = i - 1; j >= 0 && CV_CASEIGN(cp[j]); j--)
+		;
+	if (j < 0 || !CV_CASED(cp[j])) return 0;
+	for (j = i + 1; j < n && CV_CASEIGN(cp[j]); j++)
+		;
+	return j >= n || !CV_CASED(cp[j]);
+}
+
+static const uint32_t *cv_full_row(const uint32_t (*t)[4], int n, uint32_t c)
+{
+	int lo = 0, hi = n - 1;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (t[m][0] == c) return t[m];
+		if (t[m][0] < c) lo = m + 1; else hi = m - 1;
+	}
+	return NULL;
+}
+
+static uint32_t cv_ccc(uint32_t c, int hfs)
+{
+	const uint32_t (*t)[2] = hfs ? hxt_ccc_hfs : hxt_ccc;
+	int lo = 0, hi = (hfs ? HXT_NCCC_HFS : HXT_NCCC) - 1;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (t[m][0] == c) return t[m][1];
+		if (t[m][0] < c) lo = m + 1; else hi = m - 1;
+	}
+	return 0;
+}
+
+#define CV_SBASE 0xAC00
+#define CV_LBASE 0x1100
+#define CV_VBASE 0x1161
+#define CV_TBASE 0x11A7
+#define CV_SCOUNT 11172
+#define CV_NCOUNT 588
+#define CV_TCOUNT 28
+
+/* The full decomposition of c for the premap: a pointer into hxt_dpool, or
+ * into buf for a Hangul syllable.  Returns the length; 1 with *d = &c for a
+ * character that does not decompose. */
+static int cv_decomp(int pm, uint32_t c, const uint32_t **d, uint32_t *buf)
+{
+	int lo = 0, hi = HXT_NDECOMP - 1;
+	if (c >= CV_SBASE && c < CV_SBASE + CV_SCOUNT) {
+		uint32_t s = c - CV_SBASE;
+		buf[0] = CV_LBASE + s / CV_NCOUNT;
+		buf[1] = CV_VBASE + s % CV_NCOUNT / CV_TCOUNT;
+		buf[2] = CV_TBASE + s % CV_TCOUNT;
+		*d = buf;
+		return s % CV_TCOUNT ? 3 : 2;
+	}
+	while (lo <= hi) {
+		int m = (lo + hi) / 2, off, len;
+		if (hxt_decomp[m].cp < c) { lo = m + 1; continue; }
+		if (hxt_decomp[m].cp > c) { hi = m - 1; continue; }
+		if (pm == HXPM_NFKC || pm == HXPM_NFKD) { off = hxt_decomp[m].ko; len = hxt_decomp[m].kl; }
+		else if (pm == HXPM_NFD_HFS)            { off = hxt_decomp[m].ho; len = hxt_decomp[m].hl; }
+		else                                    { off = hxt_decomp[m].co; len = hxt_decomp[m].cl; }
+		if (!len) break;
+		*d = hxt_dpool + off;
+		return len;
+	}
+	buf[0] = c;
+	*d = buf;
+	return 1;
+}
+
+/* Primary composite of a + b, or 0. */
+static uint32_t cv_compose2(uint32_t a, uint32_t b)
+{
+	int lo = 0, hi = HXT_NCOMP - 1;
+	if (a >= CV_LBASE && a < CV_LBASE + 19 && b >= CV_VBASE && b < CV_VBASE + 21)
+		return CV_SBASE + ((a - CV_LBASE) * 21 + (b - CV_VBASE)) * CV_TCOUNT;
+	if (a >= CV_SBASE && a < CV_SBASE + CV_SCOUNT && (a - CV_SBASE) % CV_TCOUNT == 0 &&
+	    b > CV_TBASE && b < CV_TBASE + CV_TCOUNT)
+		return a + (b - CV_TBASE);
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (hxt_comp[m][0] == a && hxt_comp[m][1] == b) return hxt_comp[m][2];
+		if (hxt_comp[m][0] < a || (hxt_comp[m][0] == a && hxt_comp[m][1] < b)) lo = m + 1;
+		else hi = m - 1;
+	}
+	return 0;
+}
+
+static int cv_cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+	return x < y ? -1 : x > y;
+}
+
+/* Canonical ordering: each run of non-starters, stably by combining class. */
+static void cv_reorder(uint32_t *cp, int n, int hfs, hx_arena *arena)
+{
+	int i = 0, j, k;
+	while (i < n) {
+		if (!cv_ccc(cp[i], hfs)) { i++; continue; }
+		for (j = i; j < n && cv_ccc(cp[j], hfs); j++)
+			;
+		if (j - i <= 32) {                      /* insertion sort, stable */
+			for (k = i + 1; k < j; k++) {
+				uint32_t c = cp[k], cc = cv_ccc(c, hfs);
+				int m = k - 1;
+				while (m >= i && cv_ccc(cp[m], hfs) > cc) { cp[m + 1] = cp[m]; m--; }
+				cp[m + 1] = c;
+			}
+		} else {                                /* class, then position */
+			uint64_t *key = (uint64_t *)hx_arena_alloc(arena, (j - i) * 8);
+			for (k = i; k < j; k++)
+				key[k - i] = (uint64_t)cv_ccc(cp[k], hfs) << 56 | (uint64_t)(k - i) << 24 | cp[k];
+			qsort(key, j - i, 8, cv_cmp_u64);
+			for (k = i; k < j; k++) cp[k] = (uint32_t)(key[k - i] & 0xffffff);
+		}
+		i = j;
+	}
+}
+
+/* Canonical composition (UAX #15 section 9), in place; returns the new count. */
+static int cv_compose(uint32_t *cp, int n)
+{
+	int spos = 0, o = 1, i;
+	uint32_t last;
+	if (n == 0) return 0;
+	last = cv_ccc(cp[0], 0) ? 256 : 0;
+	for (i = 1; i < n; i++) {
+		uint32_t c = cp[i], cc = cv_ccc(c, 0), k;
+		if ((last < cc || last == 0) && (k = cv_compose2(cp[spos], c)) != 0) {
+			cp[spos] = k;
+			continue;
+		}
+		if (cc == 0) spos = o;
+		last = cc;
+		cp[o++] = c;
+	}
+	return o;
+}
+
+/* Apply a length-changing premap; *cpp is replaced by a new array. */
+static int cv_premap_var(int pm, uint32_t **cpp, int n, hx_arena *arena)
+{
+	const uint32_t *cp = *cpp, *d;
+	uint32_t *o, buf[3];
+	int i, k, m = 0, len;
+
+	if (pm == HXPM_LOWER_FULL || pm == HXPM_UPPER_FULL) {
+		o = (uint32_t *)hx_arena_alloc(arena, (3 * n + 1) * sizeof(uint32_t));
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			const uint32_t *r;
+			if (c & CV_RAWBYTE) { o[m++] = c; continue; }
+			if (pm == HXPM_LOWER_FULL) {
+				if (c == 0x3a3 && cv_final_sigma(cp, n, i)) { o[m++] = HXT_FINAL_SIGMA; continue; }
+				r = cv_full_row(hxt_lower_full, HXT_NLOWER_FULL, c);
+			} else
+				r = cv_full_row(hxt_upper_full, HXT_NUPPER_FULL, c);
+			if (r) {
+				for (k = 1; k < 4 && r[k]; k++) o[m++] = r[k];
+				continue;
+			}
+			o[m++] = pm == HXPM_LOWER_FULL ? cv_map32(hxt_lower, HXT_NLOWER, c)
+			                               : cv_map32(hxt_upper, HXT_NUPPER, c);
+		}
+		*cpp = o;
+		return m;
+	}
+	/* normalisation: decompose (counted first), order, then compose.  An
+	 * HFS+ volume stores U+FFFE and U+FFFF as the escaped text of their
+	 * UTF-8 bytes, "%EF%BF%BE" and "%EF%BF%BF" (hx-support/phase3/hfs/) */
+	for (i = 0, len = 0; i < n; i++)
+		len += (cp[i] & CV_RAWBYTE) ? 1 :
+		       (pm == HXPM_NFD_HFS && (cp[i] | 1) == 0xffff) ? 9 : cv_decomp(pm, cp[i], &d, buf);
+	o = (uint32_t *)hx_arena_alloc(arena, (len + 1) * sizeof(uint32_t));
+	for (i = 0; i < n; i++) {
+		if (cp[i] & CV_RAWBYTE) { o[m++] = cp[i]; continue; }
+		if (pm == HXPM_NFD_HFS && (cp[i] | 1) == 0xffff) {
+			const char *e = cp[i] == 0xfffe ? "%EF%BF%BE" : "%EF%BF%BF";
+			for (k = 0; k < 9; k++) o[m++] = (unsigned char)e[k];
+			continue;
+		}
+		k = cv_decomp(pm, cp[i], &d, buf);
+		memcpy(o + m, d, k * sizeof(uint32_t));
+		m += k;
+	}
+	cv_reorder(o, m, pm == HXPM_NFD_HFS, arena);
+	if (pm == HXPM_NFC || pm == HXPM_NFKC)
+		m = cv_compose(o, m);
+	*cpp = o;
+	return m;
+}
+
+/* The same tokens on bytes (section 18.5a): ASCII only, never the C library. */
+static void cv_premap_bytes(int pm, unsigned char *b, int n)
+{
+	int i;
+	for (i = 0; i < n; i++) {
+		unsigned char c = b[i];
+		switch (pm) {
+		case HXPM_LOWER: if (c >= 'A' && c <= 'Z') b[i] = c + 32; break;
+		case HXPM_UPPER: if (c >= 'a' && c <= 'z') b[i] = c - 32; break;
+		case HXPM_ROT13:
+			if (c >= 'A' && c <= 'Z') b[i] = 'A' + (c - 'A' + 13) % 26;
+			else if (c >= 'a' && c <= 'z') b[i] = 'a' + (c - 'a' + 13) % 26;
+			break;
+		default: break;
+		}
+	}
+	if (pm == HXPM_REV)
+		for (i = 0; i < n / 2; i++) {
+			unsigned char c = b[i];
+			b[i] = b[n - 1 - i];
+			b[n - 1 - i] = c;
+		}
+}
+
+/* One UTF-16 unit (or kept ill-formed byte, as CV_RAWBYTE) into a cpNNN, per
+ * section 10.5, or under upper_oem through Windows' upcase-to-OEM table.
+ * Writes 1 or 2 bytes and returns the count, or -1 when the unit is
+ * unmappable under "fail".  A unit is unmappable when its result is the
+ * page's default character and the unit is not the character that byte
+ * decodes to: that is what Windows reports as a used default character. */
+static int cv_cp_unit(int pg, int oem, uint16_t policy, uint32_t u, unsigned char *b)
+{
+	int dflt = hxt_cpinfo[pg].dflt;
+	unsigned v;
+	if (u & CV_RAWBYTE) {
+		v = dflt;
+	} else if (oem >= 0) {
+		v = hxt_oem_blk[hxt_oem_idx[oem][u >> 8]][u & 0xff];
+	} else {
+		int blk = hxt_enc_idx[pg][u >> 8];
+		v = hxt_enc_blk[blk][u & 0xff];
+		if (!(policy & HXCV_BESTFIT) &&
+		    !(hxt_enc_sbit[blk][(u & 0xff) >> 3] & (1 << (u & 7))))
+			v = dflt;
+	}
+	if (v == (unsigned)dflt && ((u & CV_RAWBYTE) || u != hxt_cpinfo[pg].qcp) &&
+	    (policy & HXCV_FAIL))
+		return -1;
+	if (v > 0xff) { b[0] = (unsigned char)(v >> 8); b[1] = (unsigned char)v; return 2; }
+	b[0] = (unsigned char)v;
+	return 1;
+}
+
+/* Binary search of a KOI8 encode table, or -1. */
+static int cv_koi8_enc(int t, uint32_t c)
+{
+	const uint16_t (*e)[2] = t == HXE_KOI8R ? hxt_koi8r_enc : hxt_koi8u_enc;
+	int lo = 0, hi = (t == HXE_KOI8R ? (int)(sizeof hxt_koi8r_enc / sizeof hxt_koi8r_enc[0])
+	                                 : (int)(sizeof hxt_koi8u_enc / sizeof hxt_koi8u_enc[0])) - 1;
+	if (c & CV_RAWBYTE) return -1;
+	while (lo <= hi) {
+		int m = (lo + hi) / 2;
+		if (e[m][0] == c) return e[m][1];
+		if (e[m][0] < c) lo = m + 1; else hi = m - 1;
+	}
+	return -1;
+}
+
+/* ISO-2022-JP encode.  web: the Encoding Standard encoder (Roman for
+ * U+00A5 and U+203E, halfwidth katakana as their fullwidth forms through
+ * index ISO-2022-JP katakana, U+2212 as U+FF0D).  Not web: RFC 1468, with
+ * U+00A5 and U+203E in JIS-Roman.  Both end in ASCII.  U+000E, U+000F and
+ * U+001B are unmappable, as is anything else with no code; unmappable is
+ * '?' in ASCII, or null under "fail".  Returns -1 for null. */
+static int cv_iso2022jp_enc(int web, int fail, const uint32_t *cp, int n,
+                            hx_val *out, hx_arena *arena)
+{
+	enum { ASC, ROMAN, JIS };
+	int m = (web ? HXE_MB_EUC_JP_WEB : HXE_MB_EUC_JP) - HXE_MB_FIRST;
+	unsigned char *b = (unsigned char *)hx_arena_alloc(arena, 5 * n + 4), eb[4];
+	int st = ASC, o = 0, i;
+#define TO(s, c1, c2) do { if (st != (s)) { b[o++] = 0x1b; b[o++] = (c1); b[o++] = (c2); st = (s); } } while (0)
+	for (i = 0; i < n; i++) {
+		uint32_t c = cp[i];
+		int k;
+		if (!(c & CV_RAWBYTE) && c < 0x80 && c != 0x0e && c != 0x0f && c != 0x1b) {
+			if (!(st == ROMAN && c != 0x5c && c != 0x7e)) TO(ASC, 0x28, 0x42);
+			b[o++] = (unsigned char)c;
+			continue;
+		}
+		if (c == 0xa5 || c == 0x203e) {
+			TO(ROMAN, 0x28, 0x4a);
+			b[o++] = c == 0xa5 ? 0x5c : 0x7e;
+			continue;
+		}
+		if (web && c >= 0xff61 && c <= 0xff9f) c = hxt_kata[c - 0xff61];
+		k = (c & CV_RAWBYTE) || c < 0x80 ? 0 : cv_mb_enc1(m, c, eb);
+		if (k == 2 && eb[0] >= 0xa1 && eb[1] >= 0xa1) {
+			TO(JIS, 0x24, 0x42);
+			b[o++] = eb[0] & 0x7f;
+			b[o++] = eb[1] & 0x7f;
+			continue;
+		}
+		if (fail) return -1;
+		TO(ASC, 0x28, 0x42);
+		b[o++] = '?';
+	}
+	TO(ASC, 0x28, 0x42);
+#undef TO
+	b[o] = '\0';
+	out->data = (char *)b;
+	out->len = o;
+	return 0;
+}
+
+static void cv_encode(int t, uint16_t policy, int premap, const uint32_t *cp, int n,
+                      hx_val *out, hx_arena *arena)
+{
+	int i, o = 0;
+	unsigned char *b;
+	int fail = (policy & HXCV_FAIL) != 0;
+	int cesu = (policy & HXCV_SUR_MASK) == HXCV_SUR_CESU;
+	switch (t) {
+	case HXE_UTF8:
+		b = (unsigned char *)hx_arena_alloc(arena, 4 * n + 1);
+		for (i = 0; i < n; i++) {
+			if (cp[i] & CV_RAWBYTE) { b[o++] = (unsigned char)cp[i]; continue; }
+			if (cesu && cp[i] == 0) { b[o++] = 0xc0; b[o++] = 0x80; continue; }
+			o += cv_put_utf8(cp[i], b + o);
+		}
+		break;
+	case HXE_UTF32LE: case HXE_UTF32BE: case HXE_UTF32: {
+		/* utf32: the BOM, then big-endian (D17) */
+		int be = t != HXE_UTF32LE;
+		b = (unsigned char *)hx_arena_alloc(arena, 4 * n + 5);
+		if (t == HXE_UTF32) { b[o++] = 0; b[o++] = 0; b[o++] = 0xfe; b[o++] = 0xff; }
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			if ((c & CV_RAWBYTE) || (c >= 0xd800 && c <= 0xdfff)) {   /* unmappable */
+				if (fail) { cv_null(out, arena); return; }
+				c = 0xfffd;
+			}
+			b[o++] = (unsigned char)(be ? c >> 24 : c);
+			b[o++] = (unsigned char)(be ? c >> 16 : c >> 8);
+			b[o++] = (unsigned char)(be ? c >> 8 : c >> 16);
+			b[o++] = (unsigned char)(be ? c : c >> 24);
+		}
+		break;
+	}
+	case HXE_CESU8:
+		/* UTR #26: a supplementary character is its UTF-16 surrogate pair,
+		 * each unit in the three-byte form; NUL is 0x00 */
+		b = (unsigned char *)hx_arena_alloc(arena, 6 * n + 1);
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			if (c & CV_RAWBYTE) {
+				if (fail) { cv_null(out, arena); return; }
+				c = 0xfffd;
+			}
+			if (c >= 0x10000) {
+				c -= 0x10000;
+				o += cv_put_utf8(0xd800 | (c >> 10), b + o);
+				c = 0xdc00 | (c & 0x3ff);
+			}
+			o += cv_put_utf8(c, b + o);
+		}
+		break;
+	case HXE_UTF16LE:
+	case HXE_UTF16BE:
+	case HXE_UTF16: {
+		/* utf16: the BOM, then big-endian (D17) */
+		int be = t != HXE_UTF16LE;
+		b = (unsigned char *)hx_arena_alloc(arena, 4 * n + 3);
+		if (t == HXE_UTF16) { b[o++] = 0xfe; b[o++] = 0xff; }
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i], u[2];
+			int k, nu;
+			if (c & CV_RAWBYTE) {   /* unmappable: U+FFFD, or fail */
+				if (fail) { cv_null(out, arena); return; }
+				c = 0xfffd;
+			}
+			if (c < 0x10000) { u[0] = c; nu = 1; }
+			else { c -= 0x10000; u[0] = 0xd800 | (c >> 10); u[1] = 0xdc00 | (c & 0x3ff); nu = 2; }
+			for (k = 0; k < nu; k++) {
+				b[o++] = (unsigned char)(be ? u[k] >> 8 : u[k]);
+				b[o++] = (unsigned char)(be ? u[k] : u[k] >> 8);
+			}
+		}
+		break;
+	}
+	case HXE_UTF7: {
+		unsigned char *u8 = (unsigned char *)hx_arena_alloc(arena, 4 * n + 1);
+		uint32_t *scr;
+		int n8 = 0, cap;
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			if ((c & CV_RAWBYTE) || (c >= 0xd800 && c <= 0xdfff)) {
+				if (fail) { cv_null(out, arena); return; }
+				c = 0xfffd;
+			}
+			n8 += cv_put_utf8(c, u8 + n8);
+		}
+		cap = n8 * 8 + 8;
+		b = (unsigned char *)hx_arena_alloc(arena, cap + 1);
+		scr = (uint32_t *)hx_arena_alloc(arena, (n8 + 2) * sizeof(uint32_t));
+		o = utf8_to_utf7(u8, n8, (char *)b, cap, scr, n8 + 2);
+		if (o < 0) { cv_null(out, arena); return; }
+		break;
+	}
+	case HXE_LOWBYTE16:
+		/* section 17 utf16_lowbyte: UTF-16 units, then the low byte of each
+		 * (JavaScript charCodeAt(i) & 0xFF, Java (byte)c).  An ill-formed
+		 * byte kept under "keep" is unmappable: U+FFFD, so 0xFD, as a
+		 * runtime's UTF-8 decoder would have read it, or "fail" */
+		b = (unsigned char *)hx_arena_alloc(arena, 2 * n + 1);
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			if (c & CV_RAWBYTE) {
+				if (fail) { cv_null(out, arena); return; }
+				c = 0xfffd;
+			}
+			if (c >= 0x10000) {
+				c -= 0x10000;
+				b[o++] = (unsigned char)(0xd800 | (c >> 10));
+				c = 0xdc00 | (c & 0x3ff);
+			}
+			b[o++] = (unsigned char)c;
+		}
+		break;
+	case HXE_LATIN1:
+		b = (unsigned char *)hx_arena_alloc(arena, n + 1);
+		for (i = 0; i < n; i++) {
+			if (!(cp[i] & CV_RAWBYTE) && cp[i] <= 0xff) { b[o++] = (unsigned char)cp[i]; continue; }
+			if (fail) { cv_null(out, arena); return; }
+			b[o++] = '?';
+		}
+		break;
+	case HXE_KOI8R:
+	case HXE_KOI8U:
+		/* per code point, as latin1: these are library tables, not Windows */
+		b = (unsigned char *)hx_arena_alloc(arena, n + 1);
+		for (i = 0; i < n; i++) {
+			int v = cv_koi8_enc(t, cp[i]);
+			if (v >= 0) { b[o++] = (unsigned char)v; continue; }
+			if (fail) { cv_null(out, arena); return; }
+			b[o++] = '?';
+		}
+		break;
+	default: {
+		/* cpNNN: per UTF-16 unit (section 10.5) */
+		int pg;
+		if (hxe_reg[t].sb) {
+			/* a standard single-byte table: the longest sequence of code
+			 * points the table has a byte for; anything else is unmappable,
+			 * '?' or "fail", as latin1 */
+			int sb = t - HXE_SB_FIRST, lo0 = hxt_sb_start[sb], hi0 = hxt_sb_start[sb + 1];
+			b = (unsigned char *)hx_arena_alloc(arena, n + 1);
+			for (i = 0; i < n; ) {
+				int lo = lo0, hi = hi0 - 1, j = -1, k, m;
+				uint32_t c = cp[i];
+				while (lo <= hi) {        /* first entry whose first is c */
+					m = (lo + hi) / 2;
+					if (hxt_sb_enc[m].first < c) lo = m + 1;
+					else { if (hxt_sb_enc[m].first == c) j = m; hi = m - 1; }
+				}
+				for (; j >= 0 && j < hi0 && hxt_sb_enc[j].first == c; j++) {
+					int ln = hxt_sb_enc[j].n;
+					if (i + ln > n) continue;
+					for (k = 1; k < ln; k++)
+						if (cp[i + k] != hxt_sb_pool[hxt_sb_enc[j].off + k]) break;
+					if (k == ln) break;
+				}
+				if (j >= 0 && j < hi0 && hxt_sb_enc[j].first == c && !(c & CV_RAWBYTE)) {
+					b[o++] = hxt_sb_enc[j].b;
+					i += hxt_sb_enc[j].n;
+					continue;
+				}
+				if (fail) { cv_null(out, arena); return; }
+				b[o++] = '?';
+				i++;
+			}
+			break;
+		}
+		if (t == HXE_ISO2022JP || t == HXE_ISO2022JP_WEB) {
+			if (cv_iso2022jp_enc(t == HXE_ISO2022JP_WEB, fail, cp, n, out, arena) < 0)
+				cv_null(out, arena);
+			return;
+		}
+		if (hxe_reg[t].mb) {
+			int m = t - HXE_MB_FIRST, k;
+			b = (unsigned char *)hx_arena_alloc(arena, 4 * n + 1);
+			for (i = 0; i < n; i++) {
+				if ((k = cv_mb_enc1(m, cp[i], b + o)) > 0) { o += k; continue; }
+				if (fail) { cv_null(out, arena); return; }
+				b[o++] = '?';
+			}
+			break;
+		}
+		pg = cv_page(t);
+		int oem = premap == HXPM_UPPER_OEM ? cv_oem(hxt_cpinfo[pg].cp) : -1;
+		b = (unsigned char *)hx_arena_alloc(arena, 4 * n + 1);
+		for (i = 0; i < n; i++) {
+			uint32_t c = cp[i];
+			int k;
+			if (!(c & CV_RAWBYTE) && c >= 0x10000) {
+				c -= 0x10000;
+				if ((k = cv_cp_unit(pg, oem, policy, 0xd800 | (c >> 10), b + o)) < 0) break;
+				o += k;
+				c = 0xdc00 | (c & 0x3ff);
+			}
+			if ((k = cv_cp_unit(pg, oem, policy, c, b + o)) < 0) break;
+			o += k;
+		}
+		if (i < n) { cv_null(out, arena); return; }
+		break;
+	}
+	}
+	b[o] = '\0';
+	out->data = (char *)b;
+	out->len = o;
+}
+
+/* ---- transfer encodings ---- */
+
+static const char cv_a_b64[]  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char cv_a_b64u[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+static const char cv_a_crypt[]= "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+static const char cv_a_bcr[]  = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+static const char cv_a_b32[]  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+static void cv_alpha(int id, const char **alpha, int *bits, int *lsb, int *pad)
+{
+	*bits = 6; *lsb = 0; *pad = 4;
+	switch (id) {
+	case HXE_BASE64:    *alpha = cv_a_b64; break;
+	case HXE_BASE64URL: *alpha = cv_a_b64u; break;
+	case HXE_BASE32:    *alpha = cv_a_b32; *bits = 5; *pad = 8; break;
+	case HXE_CRYPT64:   *alpha = cv_a_crypt; *lsb = 1; *pad = 0; break;
+	case HXE_CRYPT64BE: *alpha = cv_a_crypt; *pad = 0; break;
+	case HXE_BCRYPT64:  *alpha = cv_a_bcr; *pad = 0; break;
+	default:            *alpha = NULL; break;
+	}
+}
+
+/* bytes -> text.  Returns the length written into out (sized by the caller). */
+static int cv_tx_encode(int t, uint16_t policy, const unsigned char *in, int len, char *out)
+{
+	const char *alpha;
+	int bits, lsb, pad, i, o = 0, nb = 0;
+	uint32_t acc = 0;
+	if (t == HXE_RAW) { memcpy(out, in, len); return len; }
+	if (t == HXE_HEX) {
+		const char *hd = (policy & HXCV_UC) ? "0123456789ABCDEF" : "0123456789abcdef";
+		for (i = 0; i < len; i++) { out[o++] = hd[in[i] >> 4]; out[o++] = hd[in[i] & 15]; }
+		return o;
+	}
+	cv_alpha(t, &alpha, &bits, &lsb, &pad);
+	for (i = 0; i < len; i++) {
+		if (lsb) { acc |= (uint32_t)in[i] << nb; nb += 8;
+		           while (nb >= bits) { out[o++] = alpha[acc & 63]; acc >>= 6; nb -= 6; } }
+		else     { acc = (acc << 8) | in[i]; nb += 8;
+		           while (nb >= bits) { nb -= bits; out[o++] = alpha[(acc >> nb) & ((1u << bits) - 1)]; } }
+	}
+	if (nb > 0) out[o++] = lsb ? alpha[acc & 63] : alpha[(acc << (bits - nb)) & ((1u << bits) - 1)];
+	if (pad && !(policy & HXCV_NOPAD))
+		while (o % pad) out[o++] = '=';
+	return o;
+}
+
+static int cv_tx_cap(int t, int len)
+{
+	return t == HXE_RAW ? len : t == HXE_HEX ? 2 * len : (len * 8 + 4) / 5 + 8;
+}
+
+/* text -> bytes; -1 for a null result.  Accepts exactly what the encoder can
+ * produce, with or without padding where the encoding pads. */
+static int cv_tx_decode(int f, const unsigned char *in, int len, unsigned char *out,
+                        hx_arena *arena)
+{
+	const char *alpha;
+	int bits, lsb, pad, i, o = 0, nb = 0, dlen = len, k;
+	uint32_t acc = 0;
+	signed char map[256];
+	if (f == HXE_RAW) { memcpy(out, in, len); return len; }
+	if (f == HXE_HEX) {
+		if (len & 1) return -1;
+		for (i = 0; i < len; i += 2) {
+			int v[2];
+			for (k = 0; k < 2; k++) {
+				unsigned char c = in[i + k];
+				v[k] = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+				       (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+				if (v[k] < 0) return -1;
+			}
+			out[o++] = (unsigned char)(v[0] << 4 | v[1]);
+		}
+		return o;
+	}
+	cv_alpha(f, &alpha, &bits, &lsb, &pad);
+	memset(map, -1, sizeof map);
+	for (i = 0; alpha[i]; i++) map[(unsigned char)alpha[i]] = (signed char)i;
+	if (pad) while (dlen > 0 && in[dlen - 1] == '=') dlen--;
+	for (i = 0; i < dlen; i++) {
+		int v = map[in[i]];
+		if (v < 0) return -1;
+		if (lsb) { acc |= (uint32_t)v << nb; nb += 6;
+		           if (nb >= 8) { out[o++] = (unsigned char)acc; acc >>= 8; nb -= 8; } }
+		else     { acc = (acc << bits) | (uint32_t)v; nb += bits;
+		           if (nb >= 8) { nb -= 8; out[o++] = (unsigned char)(acc >> nb); } }
+	}
+	/* canonical only: re-encode, padded and not, and compare */
+	{
+		char *re = hx_arena_alloc(arena, cv_tx_cap(f, o) + 1);
+		int rl = cv_tx_encode(f, 0, out, o, re);
+		if (rl == len && memcmp(re, in, len) == 0) return o;
+		rl = cv_tx_encode(f, HXCV_NOPAD, out, o, re);
+		if (rl == len && memcmp(re, in, len) == 0) return o;
+	}
+	return -1;
+}
+
+void hx_convert_run(const hx_inst *ip, const hx_val *in, hx_val *out,
+                    hx_arena *arena)
+{
+	int f = ip->u.conv.from, t = ip->u.conv.to, len = in->len;
+	int pm = ip->u.conv.premap;
+	uint16_t policy = ip->u.conv.policy;
+	const unsigned char *src = (const unsigned char *)in->data;
+
+	memset(out, 0, sizeof *out);
+	if (hx_conv_kind(f) == HXE_KIND_TRANSFER) {
+		unsigned char *bytes = (unsigned char *)hx_arena_alloc(arena, len + 4);
+		int n;
+		if (policy & HXCV_LENIENT)
+			n = f == HXE_HEX ? hx_fromhex_lenient(src, len, bytes)
+			                 : hx_frombase64_lenient(src, len, bytes);
+		else
+			n = cv_tx_decode(f, src, len, bytes, arena);
+		if (n < 0) { cv_null(out, arena); return; }
+		if (pm) cv_premap_bytes(pm, bytes, n);
+		out->data = hx_arena_alloc(arena, cv_tx_cap(t, n) + 1);
+		out->len = cv_tx_encode(t, policy, bytes, n, out->data);
+		out->data[out->len] = '\0';
+		return;
+	}
+	{
+		uint32_t *cp = (uint32_t *)hx_arena_alloc(arena, ((hxe_reg[f].sb ? CV_MAXSEQ : 1) * len + 1) *
+		                                            sizeof(uint32_t));
+		int n = cv_decode(f, policy, src, len, cp);
+		if (n < 0) { cv_null(out, arena); return; }
+		if (pm >= HXPM_LOWER_FULL) n = cv_premap_var(pm, &cp, n, arena);
+		else if (pm && pm != HXPM_UPPER_OEM) cv_premap_chars(pm, cp, n);
+		cv_encode(t, policy, pm, cp, n, out, arena);
+	}
+}
+
+/* Build facts for hx -V.  They state what this build is and stand alone:
+ * no reference to any document or source path. */
+const char *hx_build_facts(void)
+{
+	return "Unicode " HXT_UNICODE_VERSION ", frozen\n"
+	       "cpNNN code pages, Windows case tables and LM preparation: Windows 11\n"
+	       "KOI8-R and KOI8-U: RFC 1489 and RFC 2319\n"
+	       "iso8859_N: ISO/IEC 8859; mac_* and adobe_symbol: Apple; "
+	       "adobe_standard: Adobe\n"
+	       "jis_x0201: JIS X 0201; kz1048: STRK1048-2002; viscii: RFC 1456; "
+	       "hp_roman8, dec_mcs: RFC 1345\n"
+	       "atascii, petscii, petscii_shifted: Unicode L2/19-025; ascii: ANSI X3.4; "
+	       "cp864_ibmgraph: IBMGRAPH.TXT\n"
+	       "shift_jis, euc_jp, iso2022jp: JIS X 0208, JIS X 0212, RFC 1468; "
+	       "euc_kr: KS X 1001; euc_jp_c1, euc_kr_c1: with C1, as glibc\n"
+	       "gb2312, gb18030: GB 18030-2022; *_web: WHATWG Encoding Standard\n"
+	       "utf32*, utf16, cesu8, utf7: Unicode, UTR #26, RFC 2152; "
+	       "gsm0338: 3GPP TS 23.038; t61: ITU-T T.61\n";
+}
+
+/* ---- the retired conversion functions' registry entries ----
+ * Every call of one of these names that the compiler does not turn into
+ * OP_CONVERT itself -- hex_bin(x), and a call with more than one argument --
+ * runs the alias's instruction here, on the first argument, which is what
+ * the old implementations did.  hex_bin is the identity (hx.1 2.4). */
+static void fn_conv_call(hx_func_entry *self, hx_val *args, int nargs,
+                         hx_val *result, hx_arena *arena, uint8_t role)
+{
+	hx_inst ci;
+	(void)nargs;
+	if (role == ROLE_BIN) { *result = args[0]; return; }   /* hex_bin */
+	if (!hx_convert_alias_inst(self->name, &ci)) {
+		fprintf(stderr, "hx: %s: %s:%d: no conversion for this name\n",
+		        self->name, __FILE__, __LINE__);
+		exit(1);
+	}
+	hx_convert_run(&ci, &args[0], result, arena);
+}
+
+/* ---- text programs: hx-functions.md 19 ----
+ * valid(x, cs) and roundtrip(x, a, b) take their encoding names as string
+ * constants; the compiler accepts only literals and loop variables there and
+ * checks the names, so a lookup here cannot fail. */
+
+static int cv_arg_id(const hx_val *a)
+{
+	char nm[32];
+	int n = a->len < (int)sizeof nm - 1 ? a->len : (int)sizeof nm - 1;
+	memcpy(nm, a->data, n);
+	nm[n] = '\0';
+	return hx_conv_lookup(nm);
+}
+
+/* x (not empty: fn_valid) is well-formed in f and decoding it substitutes
+ * nothing:
+ *   utf8        well-formed UTF-8 (no overlong form, surrogate or value past
+ *               U+10FFFF), as utf16le() requires;
+ *   utf16le/be  an even length and no lone surrogate;
+ *   latin1, koi8r, koi8u: always, every byte is assigned;
+ *   a standard single-byte table: every byte is assigned in it;
+ *   a cpNNN: Windows' strict decode accepts it (MB_ERR_INVALID_CHARS,
+ *               review/windows/cpdump3): no undefined byte, no invalid
+ *               trail, and no lead byte at the end or before NUL;
+ *   a transfer encoding: the strict decoder accepts it (section 18.3a). */
+static int cv_valid(int f, const unsigned char *in, int len, hx_arena *arena)
+{
+	int i;
+	switch (f) {
+	case HXE_UTF8:
+		for (i = 0; i < len; ) {
+			uint32_t one;
+			int sl = cv_utf8_at(in, i, len, &one);
+			if (!sl) return 0;
+			i += sl;
+		}
+		return 1;
+	case HXE_UTF16LE:
+	case HXE_UTF16BE:
+	case HXE_UTF16: {
+		int be = f != HXE_UTF16LE;
+		if (f == HXE_UTF16 && len >= 2 && ((in[0] == 0xfe && in[1] == 0xff) ||
+		                                   (in[0] == 0xff && in[1] == 0xfe))) {
+			be = in[0] == 0xfe;
+			in += 2;
+			len -= 2;
+		}
+		if (len & 1) return 0;
+		for (i = 0; i < len; i += 2) {
+			uint32_t u = be ? (uint32_t)in[i] << 8 | in[i + 1]
+			                : (uint32_t)in[i + 1] << 8 | in[i];
+			uint32_t l;
+			if (u < 0xd800 || u > 0xdfff) continue;
+			if (u > 0xdbff || i + 3 >= len) return 0;
+			l = be ? (uint32_t)in[i + 2] << 8 | in[i + 3]
+			       : (uint32_t)in[i + 3] << 8 | in[i + 2];
+			if (l < 0xdc00 || l > 0xdfff) return 0;
+			i += 2;
+		}
+		return 1;
+	}
+	case HXE_LATIN1:
+	case HXE_KOI8R:
+	case HXE_KOI8U:
+		return 1;
+	default:
+		if (hx_conv_kind(f) == HXE_KIND_TRANSFER) {
+			unsigned char *b = (unsigned char *)hx_arena_alloc(arena, len + 4);
+			return cv_tx_decode(f, in, len, b, arena) >= 0;
+		}
+		if (hxe_reg[f].sb) {
+			for (i = 0; i < len; i++)
+				if (!hxt_sb_dec[f - HXE_SB_FIRST][in[i]]) return 0;
+			return 1;
+		}
+		if (hxe_reg[f].mb || CV_IS_U32(f) || f == HXE_CESU8 || f == HXE_UTF7) {
+			uint32_t *scr = (uint32_t *)hx_arena_alloc(arena, (2 * len + 2) * sizeof(uint32_t));
+			return cv_decode(f, HXCV_ILL_NULL, in, len, scr) >= 0;
+		}
+		{
+			/* Windows' strict decode accepts it (MB_ERR_INVALID_CHARS) */
+			uint32_t *scr = (uint32_t *)hx_arena_alloc(arena, (len + 1) * sizeof(uint32_t));   /* a cpNNN: one per byte */
+			return cv_decode(f, HXCV_ILL_NULL, in, len, scr) >= 0;
+		}
+	}
+}
+
+static void fn_valid(hx_func_entry *self, hx_val *args, int nargs,
+                     hx_val *result, hx_arena *arena, uint8_t role)
 {
 	(void)self; (void)nargs; (void)role;
-	hx_u16_convert(args, result, arena, UTF16_LE);
+	memset(result, 0, sizeof *result);
+	/* The empty string is not valid: it is also the null result of a failed
+	 * conversion (section 19.2), and a search must not keep that as a
+	 * reading.  (A ruling may make it valid; it is well-formed.) */
+	result->data = args[0].data && args[0].len > 0 &&
+	               cv_valid(cv_arg_id(&args[1]),
+	                        (const unsigned char *)args[0].data,
+	                        args[0].len, arena) ? "1" : "";
+	result->len = (int)strlen(result->data);
 }
 
-/*
- * utf16be(x) — UTF-8 to UTF-16BE via iconv.
- */
-static void fn_utf16be(hx_func_entry *self, hx_val *args, int nargs,
-                       hx_val *result, hx_arena *arena, uint8_t role)
+/* convert(convert(x, a, b), b, a) == x, both with the default policies.
+ * ponytail: the two instructions are rebuilt from the names on every call; a
+ * per-instruction cache is the upgrade if a search program spends its time
+ * here. */
+static void fn_roundtrip(hx_func_entry *self, hx_val *args, int nargs,
+                         hx_val *result, hx_arena *arena, uint8_t role)
 {
+	char a[32], b[32], err[160];
+	hx_inst ab, ba;
+	hx_val mid, back;
+	int la = args[1].len < 31 ? args[1].len : 31, lb = args[2].len < 31 ? args[2].len : 31;
 	(void)self; (void)nargs; (void)role;
-	hx_u16_convert(args, result, arena, UTF16_BE);
+	memcpy(a, args[1].data, la); a[la] = '\0';
+	memcpy(b, args[2].data, lb); b[lb] = '\0';
+	if (hx_convert_build(a, b, NULL, 0, &ab, err, sizeof err) < 0 ||
+	    hx_convert_build(b, a, NULL, 0, &ba, err, sizeof err) < 0) {
+		fprintf(stderr, "hx: %s:%d: roundtrip(): %s\n", __FILE__, __LINE__, err);
+		exit(1);
+	}
+	hx_convert_run(&ab, &args[0], &mid, arena);
+	hx_convert_run(&ba, &mid, &back, arena);
+	memset(result, 0, sizeof *result);
+	/* the empty string is not a round trip, as it is not valid(): it is
+	 * also the null result of a failed conversion (section 19.4a) */
+	result->data = args[0].data && args[0].len > 0 &&
+	               (back.len == (args[0].data ? args[0].len : 0) &&
+	                (back.len == 0 || memcmp(back.data, args[0].data, back.len) == 0))
+	               ? "1" : "";
+	result->len = (int)strlen(result->data);
 }
 
-/*
- * utf7(x) — UTF-8 to UTF-7 (RFC 2152), flushed.  Base64 runs are closed, which
- * the iconv version failed to do.
- */
-static void fn_utf7(hx_func_entry *self, hx_val *args, int nargs,
-                    hx_val *result, hx_arena *arena, uint8_t role)
+/* charsets(group), section 19.1.  ONE table: a row per encoding, in the
+ * order every group lists its members; "all" is every row.  Adding an
+ * encoding to a group is adding (or extending) its row here. */
+enum { CSG_WINDOWS = 1, CSG_OEM = 2, CSG_ISO8859 = 4, CSG_MAC = 8,
+       CSG_EBCDIC = 16, CSG_CJK = 32, CSG_UNICODE = 64 };
+
+static const struct { const char *name; uint8_t groups; } hx_cs_rows[] = {
+	{ "utf8",    CSG_UNICODE }, { "utf16le", CSG_UNICODE }, { "utf16be", CSG_UNICODE },
+	{ "cp874",   CSG_WINDOWS },
+	{ "cp932",   CSG_WINDOWS | CSG_CJK }, { "cp936", CSG_WINDOWS | CSG_CJK },
+	{ "cp949",   CSG_WINDOWS | CSG_CJK }, { "cp950", CSG_WINDOWS | CSG_CJK },
+	{ "cp1250",  CSG_WINDOWS }, { "cp1251", CSG_WINDOWS }, { "cp1252", CSG_WINDOWS },
+	{ "cp1253",  CSG_WINDOWS }, { "cp1254", CSG_WINDOWS }, { "cp1255", CSG_WINDOWS },
+	{ "cp1256",  CSG_WINDOWS }, { "cp1257", CSG_WINDOWS }, { "cp1258", CSG_WINDOWS },
+	{ "cp1361",  CSG_CJK },
+	{ "cp437",   CSG_OEM }, { "cp737", CSG_OEM }, { "cp775", CSG_OEM },
+	{ "cp850",   CSG_OEM }, { "cp852", CSG_OEM }, { "cp855", CSG_OEM },
+	{ "cp857",   CSG_OEM }, { "cp858", CSG_OEM }, { "cp860", CSG_OEM },
+	{ "cp861",   CSG_OEM }, { "cp862", CSG_OEM }, { "cp863", CSG_OEM },
+	{ "cp864",   CSG_OEM }, { "cp865", CSG_OEM }, { "cp866", CSG_OEM },
+	{ "cp869",   CSG_OEM },
+	{ "latin1",  CSG_ISO8859 },
+	{ "cp10000", CSG_MAC },
+	{ "cp37",    CSG_EBCDIC }, { "cp1047", CSG_EBCDIC }, { "cp1140", CSG_EBCDIC },
+	{ "cp1148",  CSG_EBCDIC },
+	/* in "all" only */
+	{ "koi8r", 0 }, { "koi8u", 0 }, { "cp20866", 0 }, { "cp21866", 0 },
+	{ "cp28591", 0 },
+	/* phase 4b, step 1 */
+	{ "iso8859_2", CSG_ISO8859 }, { "iso8859_3", CSG_ISO8859 }, { "iso8859_4", CSG_ISO8859 },
+	{ "iso8859_5", CSG_ISO8859 }, { "iso8859_6", CSG_ISO8859 }, { "iso8859_7", CSG_ISO8859 },
+	{ "iso8859_8", CSG_ISO8859 }, { "iso8859_9", CSG_ISO8859 }, { "iso8859_10", CSG_ISO8859 },
+	{ "iso8859_11", CSG_ISO8859 }, { "iso8859_13", CSG_ISO8859 }, { "iso8859_14", CSG_ISO8859 },
+	{ "iso8859_15", CSG_ISO8859 }, { "iso8859_16", CSG_ISO8859 },
+	{ "mac_roman", CSG_MAC }, { "mac_cyrillic", CSG_MAC }, { "mac_greek", CSG_MAC },
+	{ "mac_turkish", CSG_MAC }, { "mac_centeuro", CSG_MAC }, { "mac_icelandic", CSG_MAC },
+	{ "mac_croatian", CSG_MAC }, { "mac_romanian", CSG_MAC }, { "mac_arabic", CSG_MAC },
+	{ "mac_hebrew", CSG_MAC }, { "mac_thai", CSG_MAC },
+	{ "cp500", CSG_EBCDIC }, { "cp875", CSG_EBCDIC }, { "cp1026", CSG_EBCDIC },
+	{ "cp1141", CSG_EBCDIC }, { "cp1142", CSG_EBCDIC }, { "cp1143", CSG_EBCDIC },
+	{ "cp1144", CSG_EBCDIC }, { "cp1145", CSG_EBCDIC }, { "cp1146", CSG_EBCDIC },
+	{ "cp1147", CSG_EBCDIC }, { "cp1149", CSG_EBCDIC },
+	{ "cp708", CSG_OEM }, { "cp720", CSG_OEM },
+	{ "jis_x0201", CSG_CJK },
+	{ "cp10001", CSG_CJK }, { "cp10002", CSG_CJK }, { "cp10003", CSG_CJK }, { "cp10008", CSG_CJK },
+	/* Windows' readings of other standards, and the rest: "all" only */
+	{ "cp28592", 0 }, { "cp28593", 0 }, { "cp28594", 0 }, { "cp28595", 0 }, { "cp28596", 0 },
+	{ "cp28597", 0 }, { "cp28598", 0 }, { "cp28599", 0 }, { "cp28603", 0 }, { "cp28605", 0 },
+	{ "cp10004", 0 }, { "cp10005", 0 }, { "cp10006", 0 }, { "cp10007", 0 }, { "cp10010", 0 },
+	{ "cp10017", 0 }, { "cp10021", 0 }, { "cp10029", 0 }, { "cp10079", 0 }, { "cp10081", 0 },
+	{ "cp10082", 0 }, { "cp20127", 0 },
+	{ "ascii", 0 }, { "adobe_standard", 0 }, { "adobe_symbol", 0 }, { "kz1048", 0 },
+	{ "viscii", 0 }, { "hp_roman8", 0 }, { "dec_mcs", 0 }, { "atascii", 0 }, { "petscii", 0 },
+	{ "petscii_shifted", 0 }, { "cp864_ibmgraph", 0 },
+	/* phase 4b, step 3 */
+	{ "shift_jis", CSG_CJK }, { "euc_jp", CSG_CJK }, { "iso2022jp", CSG_CJK },
+	{ "euc_kr", CSG_CJK }, { "gb2312", CSG_CJK }, { "gb18030", CSG_CJK },
+	{ "shift_jis_web", CSG_CJK }, { "euc_jp_web", CSG_CJK }, { "iso2022jp_web", CSG_CJK },
+	{ "euc_kr_web", CSG_CJK }, { "big5_web", CSG_CJK }, { "gb18030_web", CSG_CJK },
+	{ "gbk_web", CSG_CJK },
+	/* phase 4b, step 4 */
+	{ "utf32le", CSG_UNICODE }, { "utf32be", CSG_UNICODE }, { "utf32", CSG_UNICODE },
+	{ "utf16", CSG_UNICODE }, { "cesu8", CSG_UNICODE }, { "utf7", CSG_UNICODE },
+	{ "gsm0338", 0 }, { "t61", 0 },
+	{ "euc_jp_c1", CSG_CJK }, { "euc_kr_c1", CSG_CJK },
+};
+#define HX_CS_NROWS ((int)(sizeof hx_cs_rows / sizeof hx_cs_rows[0]))
+
+const char *const *hx_charsets(const char *group)
 {
-	(void)self; (void)nargs; (void)role;
-	{ int inlen = (int)args[0].len;
-	  int cap = inlen * 8 + 8;
-	  char *out = hx_arena_alloc(arena, cap);
-	  uint32_t *scr = (uint32_t *)hx_arena_alloc(arena, (inlen + 2) * sizeof(uint32_t));
-	  int n = utf8_to_utf7((const unsigned char *)args[0].data, inlen,
-	                       out, cap, scr, inlen + 2);
-	  result->data = out;
-	  result->len  = n < 0 ? 0 : n; }
+	static const struct { const char *name; int bit; } g[] = {
+		{ "all", 0 }, { "windows", CSG_WINDOWS }, { "oem", CSG_OEM },
+		{ "iso8859", CSG_ISO8859 }, { "mac", CSG_MAC }, { "ebcdic", CSG_EBCDIC },
+		{ "cjk", CSG_CJK }, { "unicode", CSG_UNICODE },
+	};
+	static const char *list[sizeof g / sizeof g[0]][HX_CS_NROWS + 1];
+	int k, i, n = 0;
+	for (k = 0; k < (int)(sizeof g / sizeof g[0]); k++)
+		if (strcmp(g[k].name, group) == 0) break;
+	if (k == (int)(sizeof g / sizeof g[0])) return NULL;
+	for (i = 0; i < HX_CS_NROWS; i++)
+		if (!g[k].bit || (hx_cs_rows[i].groups & g[k].bit))
+			list[k][n++] = hx_cs_rows[i].name;
+	list[k][n] = NULL;
+	return list[k];
 }
 
-/*
- * zext16(x) — zero-extend each byte to a 16-bit word (little-endian).
- * This is the hashcat-compatible "UTF-16LE" that does NOT perform
- * real UTF-8 decoding: each input byte becomes (byte, 0x00).
- * Matches hashcat's NTLM implementation.
- */
-static void fn_zext16(hx_func_entry *self, hx_val *args, int nargs,
+/* ---- lm_cpNNN: LM as Windows prepares it on a machine of that OEM page ----
+ * hx-functions.md 12, 17, 18.6.  The password is put through
+ * convert(x, "utf8", "cpNNN", "bestfit", "upper_oem", "fail") --
+ * RtlUpcaseUnicodeStringToOemString, from the Windows 11 dumps -- truncated
+ * or NUL-padded to 14 bytes, and each 7-byte half keys DES over "KGS!@#$%",
+ * exactly the DES step of lm() (lm.a's auth_LMhash, hashpipe compute_lm).
+ * For an ASCII password that is lm(): upper_oem maps a-z to A-Z and every
+ * other ASCII character to itself.  A character with no OEM form fails the
+ * conversion, and then there is no LM hash: the result is null (empty), as
+ * Windows computes none.  The page comes from the function's name. */
+static void fn_lm_oem(hx_func_entry *self, hx_val *args, int nargs,
                       hx_val *result, hx_arena *arena, uint8_t role)
 {
-	const unsigned char *in = (const unsigned char *)args[0].data;
-	int inlen = args[0].len;
-	char *out;
-	int i;
-	(void)self; (void)nargs; (void)role;
+	static const unsigned char magic[8] = { 'K','G','S','!','@','#','$','%' };
+	unsigned char key[14], dg[16];
+	char cs[16];
+	hx_inst ci;
+	hx_val ov;
+	int n;
+	(void)nargs;
 
-	out = hx_arena_alloc(arena, inlen * 2 + 2);
-	for (i = 0; i < inlen; i++) {
-		out[i * 2]     = in[i];
-		out[i * 2 + 1] = 0;
+	snprintf(cs, sizeof cs, "cp%s", self->name + 5);
+	cv_set(&ci, HXE_UTF8, hx_conv_lookup(cs), HXCV_BESTFIT | HXCV_FAIL, HXPM_UPPER_OEM);
+	hx_convert_run(&ci, &args[0], &ov, arena);
+	if (ov.len == 0 && args[0].len > 0) {
+		/* every character gives at least one byte, so an empty result from
+		 * a non-empty password is the failed conversion */
+		cv_null(result, arena);
+		return;
 	}
-	result->data = out;
-	result->len  = inlen * 2;
-}
-
-/*
- * from_cp1252(x) — reinterpret bytes as CP1252, convert to UTF-8.
- * from_cp1251(x) — reinterpret bytes as CP1251, convert to UTF-8.
- */
-static void fn_from_cp1252(hx_func_entry *self, hx_val *args, int nargs,
-                            hx_val *result, hx_arena *arena, uint8_t role)
-{
-	(void)self; (void)nargs; (void)role;
-	hx_from_cp_convert(args, result, arena, CP_1252);
-}
-
-static void fn_from_cp1251(hx_func_entry *self, hx_val *args, int nargs,
-                            hx_val *result, hx_arena *arena, uint8_t role)
-{
-	(void)self; (void)nargs; (void)role;
-	hx_from_cp_convert(args, result, arena, CP_1251);
+	n = ov.len < 14 ? ov.len : 14;
+	memset(key, 0, sizeof key);
+	memcpy(key, ov.data, n);
+	hx_des7(key, magic, dg);
+	hx_des7(key + 7, magic, dg + 8);
+	emit_digest(dg, 16, result, arena, role);
 }
 
 /* ---- length ---- */
@@ -3938,6 +5920,76 @@ static void fn_length(hx_func_entry *self, hx_val *args, int nargs,
 	buf = hx_arena_alloc(arena, 20);
 	result->len = sprintf(buf, "%d", args[0].len);
 	result->data = buf;
+}
+
+/* ---- ulength, ucut, utrunc: counted in characters (section 3, 4.1) ---- */
+
+/* The byte offset of every character boundary of x by the section 3 model:
+ * a well-formed UTF-8 sequence is one character, any other byte is one on its
+ * own.  Returns the character count; off has room for len + 1 entries. */
+static int u_bounds(const unsigned char *s, int len, int *off)
+{
+	int i = 0, n = 0;
+	while (i < len) {
+		uint32_t cp;
+		int sl = cv_utf8_at(s, i, len, &cp);
+		off[n++] = i;
+		i += sl ? sl : 1;
+	}
+	off[n] = len;
+	return n;
+}
+
+/* ulength(x): the number of characters, as length() gives bytes. */
+static void fn_ulength(hx_func_entry *self, hx_val *args, int nargs,
+                       hx_val *result, hx_arena *arena, uint8_t role)
+{
+	int *off = (int *)hx_arena_alloc(arena, (args[0].len + 1) * (int)sizeof(int));
+	int n = u_bounds((const unsigned char *)args[0].data, args[0].len, off);
+	char *buf;
+	(void)self; (void)nargs; (void)role;
+	buf = hx_arena_alloc(arena, 20);
+	result->is_int = 1;
+	result->ival   = n;
+	result->len = sprintf(buf, "%d", n);
+	result->data = buf;
+}
+
+/* ucut(x[, start[, len]]): cut()'s rules, counted in characters, so the
+ * result never splits a well-formed sequence (section 4.1). */
+static void fn_ucut(hx_func_entry *self, hx_val *args, int nargs,
+                    hx_val *result, hx_arena *arena, uint8_t role)
+{
+	int *off = (int *)hx_arena_alloc(arena, (args[0].len + 1) * (int)sizeof(int));
+	int n = u_bounds((const unsigned char *)args[0].data, args[0].len, off);
+	int start = 0, len, b0, b1;
+	(void)self; (void)role;
+
+	if (nargs >= 2) start = val_to_int(&args[1]);
+	if (start < 0) { start = n + start; if (start < 0) start = 0; }
+	if (start > n) start = n;
+	if (nargs >= 3) { len = val_to_int(&args[2]); if (len < 0) len = 0; }
+	else len = n - start;
+	if (start + len > n) len = n - start;
+	b0 = off[start];
+	b1 = off[start + len];
+	result->data = hx_arena_alloc(arena, b1 - b0 + 1);
+	memcpy(result->data, args[0].data + b0, b1 - b0);
+	result->data[b1 - b0] = '\0';
+	result->len = b1 - b0;
+}
+
+/* utrunc(x, n): ucut(x, 0, n). */
+static void fn_utrunc(hx_func_entry *self, hx_val *args, int nargs,
+                      hx_val *result, hx_arena *arena, uint8_t role)
+{
+	hx_val a[3];
+	(void)nargs;
+	a[0] = args[0];
+	memset(&a[1], 0, sizeof a[1]);
+	a[1].is_int = 1; a[1].ival = 0;
+	a[2] = args[1];
+	fn_ucut(self, a, 3, result, arena, role);
 }
 
 /* ---- xor ---- */
@@ -4050,30 +6102,30 @@ hx_func_entry hx_func_table[HX_MAX_FUNCS] = {
 	{ "hmac_sha1",     fn_hmac_sha1,     20, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 	{ "hmac_sha256",   fn_hmac_sha256,   32, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 #endif
-	{ "hex",           fn_hex,            0, NULL, 0, ROLES_HEXBIN, ROLE_HEX },
-	{ "upper",         fn_upper,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "lower",         fn_lower,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "hex",           fn_conv_call,            0, NULL, 0, ROLES_HEXBIN, ROLE_HEX },
+	{ "upper",         fn_conv_call,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "lower",         fn_conv_call,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "cut",           fn_cut,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "pad",           fn_pad,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "trunc",         fn_trunc,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "rev",           fn_rev,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "rev",           fn_conv_call,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "bswap32",       fn_bswap32,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "rotate",        fn_rotate,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "cap",           fn_cap,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "rot13",         fn_rot13,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "base64",        fn_base64,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "frombase64",    fn_frombase64,     0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "fromhex",       fn_fromhex,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "rot13",         fn_conv_call,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "base64",        fn_conv_call,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "frombase64",    fn_conv_call,     0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "fromhex",       fn_conv_call,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "wperm",         fn_wperm,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "add",           fn_add,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "sub",           fn_sub,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "mul",           fn_mul,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "mod",           fn_mod,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "phpass_encode", fn_phpass_encode,  0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "phpass_encode", fn_conv_call,  0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "progress_encode", fn_progress_encode, 0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
 	{ "juniper_encode",  fn_juniper_encode,  0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
 	{ "cisco_pix_encode", fn_cisco_pix_encode, 0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
-	{ "cisco4_encode", fn_cisco4_encode, 0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
+	{ "cisco4_encode", fn_conv_call, 0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
 	{ "ebcdic",        fn_ebcdic,         0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
 	{ "racf_encrypt",  fn_racf_encrypt,   0, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 	{ "domino5",       fn_domino5,        0, NULL, 0, ROLES_DIGEST, ROLE_HEX },
@@ -4095,13 +6147,16 @@ hx_func_entry hx_func_table[HX_MAX_FUNCS] = {
 	{ "des3",          fn_des3,           0, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 	{ "sha512crypt_encode", fn_sha512crypt_encode, 0, NULL, 0, ROLES_NONE, ROLE_DEFAULT },
 	{ "bcrypt_encode", fn_bcrypt_encode,  0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "utf16le",       fn_utf16le,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "utf16be",       fn_utf16be,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "utf7",          fn_utf7,           0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "zext16",        fn_zext16,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "from_cp1252",   fn_from_cp1252,    0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
-	{ "from_cp1251",   fn_from_cp1251,    0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "utf16le",       fn_conv_call,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "utf16be",       fn_conv_call,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "utf7",          fn_conv_call,           0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "zext16",        fn_conv_call,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "from_cp1252",   fn_conv_call,    0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "from_cp1251",   fn_conv_call,    0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "length",        fn_length,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "ulength",       fn_ulength,        0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "ucut",          fn_ucut,           0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "utrunc",        fn_utrunc,         0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "xor",           fn_xor,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "emit",          fn_emit,           0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
 	{ "and",           fn_and,            0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
@@ -4144,6 +6199,15 @@ hx_func_entry hx_func_table[HX_MAX_FUNCS] = {
 	{ "siphash",       fn_siphash,        8, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 	{ "murmur3",       fn_murmur3,        4, NULL, 0, ROLES_DIGEST, ROLE_HEX },
 	{ "pbkdf1_sha1",   fn_pbkdf1_sha1,    0, NULL, 0, ROLES_DIGEST, ROLE_HEX },
+	/* text programs (hx-functions.md 19.2): "1" or "" */
+	{ "valid",         fn_valid,          0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	{ "roundtrip",     fn_roundtrip,      0, NULL, 0, ROLES_NONE,   ROLE_DEFAULT },
+	/* lm_cpNNN, one per OEM page with an upper_oem table (hxt_oem_cp) */
+#define LMOEM(n) { "lm_cp" #n, fn_lm_oem, 16, NULL, 0, ROLES_DIGEST, ROLE_HEX }
+	LMOEM(437), LMOEM(737), LMOEM(775), LMOEM(850), LMOEM(852), LMOEM(855),
+	LMOEM(857), LMOEM(858), LMOEM(860), LMOEM(861), LMOEM(862), LMOEM(863),
+	LMOEM(864), LMOEM(865), LMOEM(866), LMOEM(869),
+#undef LMOEM
 };
 
 /* Count initial static entries.  v1.527: KDF + crypt-family split into
@@ -4152,16 +6216,18 @@ hx_func_entry hx_func_table[HX_MAX_FUNCS] = {
  * argon2-alias) and a hashpipe-only set of 6 entries (pomelo,
  * rc4_hmac_md5, aes128/256_cts_hmac_sha1, sm3crypt, gost12_512crypt).
  *
- *   tools/hx8_to_c (standalone, no HX_HAS_KDF): 7 + 39 + 21 + 3
- *   mdxfind        (standalone, HX_HAS_KDF):    7 + 39 + 21 + 13 + 3
- *   hashpipe       (non-standalone):            39 + 21 + 13 + 6 + 3
+ *   tools/hx8_to_c (standalone, no HX_HAS_KDF): 7 + 42 + 21 + 5 + 16
+ *   mdxfind        (standalone, HX_HAS_KDF):    7 + 42 + 21 + 13 + 5 + 16
+ *   hashpipe       (non-standalone):            42 + 21 + 13 + 6 + 5 + 16
+ * (5: siphash murmur3 pbkdf1_sha1 valid roundtrip; the last 16: lm_cp437 ...
+ * lm_cp869)
  */
 #if defined(HX_STANDALONE) && defined(HX_HAS_KDF)
-int hx_func_count = 7 + 39 + 21 + 13 + 3;
+int hx_func_count = 7 + 42 + 21 + 13 + 5 + 16;
 #elif defined(HX_STANDALONE)
-int hx_func_count = 7 + 39 + 21 + 3;
+int hx_func_count = 7 + 42 + 21 + 5 + 16;
 #else
-int hx_func_count = 39 + 21 + 13 + 6 + 3;
+int hx_func_count = 42 + 21 + 13 + 6 + 5 + 16;
 #endif
 
 hx_func_entry *hx_func_lookup(const char *name)
@@ -4185,6 +6251,14 @@ void hx_func_register(const char *name, hx_hashfn fn, int max_out,
 	/* don't register duplicates */
 	if (hx_func_lookup(name))
 		return;
+	/* nor a conversion alias (cp1252_to_utf8, nfc, ...): those names belong
+	 * to OP_CONVERT (hx-functions.md 18.9), whether or not the registry has
+	 * an entry for them */
+	{
+		hx_inst ci;
+		if (hx_convert_alias_inst(name, &ci))
+			return;
+	}
 	hx_func_table[hx_func_count].name            = strdup(name);
 	hx_func_table[hx_func_count].fn              = fn;
 	hx_func_table[hx_func_count].max_out         = max_out;

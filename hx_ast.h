@@ -118,6 +118,10 @@ struct hx_node {
 			hx_node *from;      /* start value (integer)   */
 			hx_node *to;        /* end value (integer)     */
 			hx_node *body;      /* HX_BLOCK                */
+			/* for ident in (...) / in charsets(...): the list, as an
+			 * HX_FUNCALL named "" (a literal list) or "charsets";
+			 * from and to are then NULL.  Unrolled at compile time. */
+			hx_node *in;
 		} forloop;
 
 		/* HX_IF */
@@ -152,6 +156,7 @@ hx_node *hx_funcall(const char *name, hx_node **args, int nargs, int line);
 hx_node *hx_iter(const char *name, int count, hx_node **args, int nargs, int line);
 hx_node *hx_assign(const char *varname, hx_node *expr, int line);
 hx_node *hx_for(const char *var, hx_node *from, hx_node *to, hx_node *body, int line);
+hx_node *hx_forin(const char *var, hx_node *in, hx_node *body, int line);
 hx_node *hx_if(hx_node *cond, hx_node *then_b, hx_node *else_b, int line);
 hx_node *hx_block(hx_node **stmts, int nstmts, int line);
 hx_node *hx_binop_node(hx_op op, hx_node *left, hx_node *right, int line);

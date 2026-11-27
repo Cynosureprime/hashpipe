@@ -147,7 +147,7 @@ hx_compile.o: hx_compile.c hx_ast.h hx_vm.h
 hx_vm.o: hx_vm.c hx_vm.h
 	$(CC) $(CFLAGS) -c hx_vm.c
 
-hx_func.o: hx_func.c hx_vm.h
+hx_func.o: hx_func.c hx_vm.h hx_conv_tables.h
 	$(CC) $(CFLAGS) -c hx_func.c
 
 hx.tab.o: hx.tab.c hx_ast.h
