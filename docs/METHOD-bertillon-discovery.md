@@ -35,6 +35,8 @@ exception` is hashcat's.
     hash:salt
     take no salt, and one was supplied
     cannot produce a
+    unknown function
+    does not apply to
 
 ---
 
@@ -95,6 +97,7 @@ at the easy tier and no examination of the value narrows it.
 | `hash:password` pairs | which type(s) produce it | `bertillon --gate` |
 | `TYPE hash:password` lines | does each verify under its OWN label | `hashpipe -c` |
 | hashes + wordlist | search | `mdxfind` |
+| plaintexts in one encoding | the bytes another encoding gives, line for line | `hashpipe -X 'emit(convert(pass, "utf8", "cp1252"), "")'` |
 | solved plaintexts | structure, rules, shape | `pack2 cgrams`, `procrule -G`, `rling -q` |
 
 `bertillon` IS `hashpipe` — the same binary reached through `argv[0]` via a
@@ -246,6 +249,21 @@ to stderr. **The two streams are the result.**
 | `-s file` | **DUAL USE, no diagnostic**: statistics filename in a normal run, the hx salt value in `-X`/`-F` expression mode. Not both. |
 | `-T` / `-G` | self-tests over every registered type. Run FIRST after any build. |
 | `-N` | type table as TSV: index, name, hashcat modes, flag letters, self-test vector. |
+| `-X expr` | evaluate an hx expression for each input line. Every hash type is available as a function here; standalone `hx` has only the core built-ins, so a catalog expression using one (`lm()`) fails there with `unknown function`. |
+
+**`-X` is a list converter.** `emit(x, "")` writes the value alone: no tab,
+no label, `$HEX[]` when it is not printable. One line comes out for each line
+in, and a conversion that cannot be carried out writes an EMPTY line, never a
+marker, so `paste` keeps a converted list aligned with its hashes:
+
+    hashpipe -X 'emit(convert(pass, "utf8", "cp1252"), "")' < plains > plains.1252
+    paste -d: hashes plains.1252 | hashpipe
+
+To find which code pages give the bytes, loop over a group and compare:
+
+    hashpipe -X 'for cs in charsets("windows") { emit(md5(convert(pass, "utf8", cs, "fail")), cs) }'
+
+The names `convert()` and `charsets()` accept are in Appendix C of `hx.8`.
 
 `bertillon --gate` wraps this: it computes `-L` from each line's own parsed
 work factor BEFORE starting, because hashpipe reports a cost-skipped type and
@@ -279,20 +297,29 @@ SHA1, AICH and SHA1UTF7 all verify the same pair. AICH over one small block IS
 SHA-1. `hashpipe` reports only the first match because a cracker needs one
 answer; bertillon reports every one.
 
-**NTLM / NTLMH / MD4UTF16 are ONE algorithm (MD4) fed three encodings**, each
-a superset of the one above it:
+**NTLM / NTLMH / MD4UTF16 are ONE algorithm (MD4) over UTF-16LE**, and
+the types differ only in the conversion:
 
 | type | conversions offered |
 |---|---|
-| `MD4UTF16` | UTF-8 -> UTF-16LE only; ill-formed UTF-8 gives no hash |
-| `NTLMH` | that, PLUS a UTF-16LE zero-extend (hashcat's method) |
-| `NTLM` | that, PLUS CP1251 and CP1252 variants |
+| `NTLM`, `MD4UTF16` | UTF-8 -> UTF-16LE only; ill-formed UTF-8 gives no hash. One computation under two names |
+| `NTLMH` | that, PLUS a UTF-16LE zero-extend of each byte (hashcat's method) |
 
-hashcat mode 1000 maps to NTLMH, not to NTLM.
+No type offers a CP1251 or CP1252 reading; for that, convert the plaintexts
+first (§4).
 
-**INFERENCE AVAILABLE:** all three coincide only on ASCII input — a UTF-8 `é`
-(`0xC3 0xA9`) is one UTF-16LE unit decoded as UTF-8 and two under zero-extend. So
-all three labels agreeing on a pair means **the plaintext is pure ASCII**.
+`hashpipe -N` lists hashcat mode 1000 on NTLM. hashcat's own conversion is the
+zero-extend, and only NTLMH verifies a non-ASCII pair made that way.
+
+**INFERENCE AVAILABLE — from WHICH labels verify.** On ASCII the two
+conversions coincide and all three verify. On non-ASCII input:
+
+| labels that verify | the plaintext bytes were |
+|---|---|
+| all three | valid UTF-8, decoded as UTF-8 |
+| NTLMH alone | zero-extended: each byte read as one character (Latin-1) |
+
+So all three agreeing does NOT mean the plaintext is ASCII.
 
 Which label to record is a judgement about where the list came from. Nothing in
 the line decides it.
@@ -308,7 +335,8 @@ the line decides it.
 | run completes, `None found, sorry!`, too few lines processed | one over-long line ended the dictionary read | `LC_ALL=C awk 'length($0)>0 && length($0)<=256'` |
 | whole file matches nothing, presents as a wrong wordlist | CRLF list against LF candidates | `bertillon -p` reports it; `file list.txt` |
 | a type "is not registered" under a lowered `-L` | it was SKIPPED FOR COST — same message | drop the `-L`; at the default a skip means a wrong bench_rates.h rate, a defect to report |
-| gate line comes back bare | three indistinguishable causes, in this order: password wrong; fields in wrong order; construction not registered | for the last, write it in `hx` + a `userdef` entry. A wider search will NOT find it. |
+| gate line comes back bare | four indistinguishable causes, in this order: password wrong; fields in wrong order; plaintext recorded in a different ENCODING from the one hashed; construction not registered | for the encoding, convert the plaintexts with `hashpipe -X` (§4) and gate again; for the last, write it in `hx` + a `userdef` entry. A wider search will NOT find either. |
+| `bertillon 'hash:$HEX[...]'` says `field 2 is not the plaintext` for a pair that is right | the verify-outright form does not decode `$HEX[]`, on the command line or in a file; the payload is read as a salt | `bertillon -g`, which decodes it, or give the raw bytes |
 | a verified line, but candidates derived from it yield nothing | **salt folded into the password field.** Verifies perfectly, so verification cannot catch it. Every recorded plaintext carries the salt. | `bertillon -p`. It reports a run only where EVERY record shares it, so it sees a CONSTANT salt and is blind to one that VARIES — two hex characters over 256 values share no run. Silence there is not a negative. |
 | `bertillon` answers `NOTHING to try` for a value `hashpipe` identifies | **version skew.** `bertillon` and `hashpipe` are ONE binary reached two ways. They cannot disagree unless they are different builds. | run both on the same line; `command -v hashpipe bertillon`; compare md5 |
 | `$NT$`-prefixed hashes match nothing under any channel | mdxfind does not strip the John signature | strip, crack bare, restore before `mdsplit` |
@@ -368,6 +396,8 @@ work.
 | a human-readable introduction | `GUIDE-bertillon.md`, `WALKTHROUGH-2011-first-crack.md` |
 
 Counts in this document were measured on `mdxfind` 1.581 and `hashpipe` 1.204.
+The `-X` recipes in §4, all of §6 and the encoding and `$HEX[]` rows of §7 were
+verified on `hashpipe` 1.249.
 
 Type counts and selection sizes are build-dependent: re-measure them, do not
 carry them forward. The version string names the `hashpipe.c` revision only, so
